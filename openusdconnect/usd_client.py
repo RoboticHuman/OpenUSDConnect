@@ -281,11 +281,7 @@ class UsdReceiver:
         return SyncUpdate(applied_events=applied, submitted_events=0)
 
     def wait_until_ready(self, timeout: float | None = DEFAULT_WAIT_TIMEOUT_S) -> bool:
-        """Pump updates on the owning thread until replay is applied.
-
-        Returns ``False`` only on timeout. Rejection, a parked stage, a required
-        native-scene rebuild, or a closed receiver raise instead.
-        """
+        """Pump updates until ``READY``; ``False`` only on timeout."""
         return wait_until_ready(self, timeout)
 
     def rebind_stage(self, stage: Usd.Stage | None) -> None:
@@ -347,12 +343,7 @@ class UsdReceiver:
 
 
 class UsdPublisher:
-    """Publish current-edit-target opinions authored on a USD stage.
-
-    ``start`` enters the lifecycle without blocking. Each ``update`` schedules
-    a background handshake while disconnected and submits one retryable batch
-    while connected.
-    """
+    """Publish current-edit-target opinions authored on a USD stage."""
 
     def __init__(
         self,
@@ -581,18 +572,15 @@ class UsdPublisher:
         return False
 
     def wait_until_ready(self, timeout: float | None = DEFAULT_WAIT_TIMEOUT_S) -> bool:
-        """Pump updates until the publisher is connected; ``False`` only on timeout."""
+        """Pump updates until ``READY``; ``False`` only on timeout."""
         return wait_until_ready(self, timeout)
 
     def submit_and_wait(self, timeout: float | None = DEFAULT_WAIT_TIMEOUT_S) -> bool:
-        """Submit noticed edits and wait for durability; ``False`` only on timeout."""
+        """Publish noticed edits and wait until durable; ``False`` only on timeout."""
         return submit_and_wait(self, timeout)
 
     def disconnect(self) -> None:
-        """Close the socket and pause reconnection until :meth:`connect`.
-
-        Dirty and prepared emitter state is retained.
-        """
+        """Close the socket and pause reconnection until :meth:`connect`."""
         if not self._closed:
             self._paused = True
             self._sender.disconnect()
@@ -616,11 +604,7 @@ class UsdPublisher:
         return self._transform_coalescing.prepare(self._emitter)
 
     def update(self) -> SyncUpdate:
-        """Build and submit one retryable batch of authored stage changes.
-
-        While disconnected, noticed edits stay dirty and a background
-        handshake is scheduled unless :meth:`disconnect` paused the publisher.
-        """
+        """Submit one retryable batch, or schedule a reconnect while disconnected."""
         if self._closed:
             raise RuntimeError("UsdPublisher is closed")
         if not self._started:
@@ -645,12 +629,7 @@ class UsdPublisher:
         )
 
     def publish_current_edit_target(self) -> int:
-        """Publish all opinions currently authored in the active edit target.
-
-        Starts the publisher if needed. The snapshot stays prepared while
-        disconnected; later :meth:`update` calls send it. An earlier retained
-        batch must be retried first.
-        """
+        """Queue every opinion in the edit target; returns events this call submitted."""
         if self._closed:
             raise RuntimeError("UsdPublisher is closed")
         if self._emitter.prepared_event_count:

@@ -504,18 +504,11 @@ class ManagedClient:
         return False
 
     def wait_until_ready(self, timeout: float | None = DEFAULT_WAIT_TIMEOUT_S) -> bool:
-        """Pump updates on the owning thread until connection and replay are ready.
-
-        Returns ``False`` only on timeout. Rejection, a transaction failure, a
-        parked stage, or a closed client raise instead.
-        """
+        """Pump updates until ``READY``; ``False`` only on timeout."""
         return wait_until_ready(self, timeout)
 
     def submit_and_wait(self, timeout: float | None = DEFAULT_WAIT_TIMEOUT_S) -> bool:
-        """Submit local changes and wait for durability while applying incoming work.
-
-        Returns ``False`` only on timeout, with the work retained for retry.
-        """
+        """Publish noticed edits and wait until durable; ``False`` only on timeout."""
         return submit_and_wait(self, timeout)
 
     def _require_layered_replay(self) -> None:
@@ -614,12 +607,7 @@ class ManagedClient:
         )
 
     def publish_current_edit_target(self) -> int:
-        """Publish all opinions currently authored in the active edit target.
-
-        Starts the client if needed. The snapshot remains prepared while replay
-        or connection setup is pending; subsequent :meth:`update` calls send it
-        when ready. An earlier retained batch must be retried first.
-        """
+        """Queue every opinion in the edit target; returns events this call submitted."""
         if self._closed:
             raise RuntimeError("ManagedClient is closed")
         if self._stage is None:
@@ -635,13 +623,10 @@ class ManagedClient:
         return self.update().submitted_events
 
     def rebind_stage(self, stage: Usd.Stage | None, *, discard_unsent: bool = False) -> None:
-        """Move sending and receiving to a new stage and select a fresh authoring layer.
+        """Move sending and receiving to a new stage with a fresh authoring layer.
 
-        Pass ``None`` to park: the receiver stays connected and the queue
-        continues to fill, but ``update()`` returns zero until a new stage
-        is bound. Submit local work first, or explicitly discard unsubmitted
-        work with ``discard_unsent=True``. Submitted work must be acknowledged
-        before rebinding; use :meth:`submit_and_wait`.
+        ``None`` parks the client. Refuses while work is unacknowledged, or
+        unsent unless ``discard_unsent=True`` drops it.
         """
         if self._closed:
             raise RuntimeError("ManagedClient is closed")

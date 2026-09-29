@@ -1,10 +1,9 @@
 # Python client and host-integration API
 
 These APIs attach OpenUSDConnect to an application-owned `pxr.Usd.Stage`.
-Call `update()` from the stage-owning thread. Socket readers, automatic
-reconnect attempts, and (by default, `background_send=True`) transaction socket
-writes run on background threads. Encoding and USD work stay on the calling
-thread; an update is not a bounded-time task.
+Call `update()` from the stage-owning thread. Networking, including
+transaction writes (unless `background_send=False`), runs on background
+threads; encoding and USD work stay on the calling thread.
 
 ## Choose an API
 
@@ -30,75 +29,39 @@ Unreal host integrations.
 
 ## Lifecycle and status
 
-All high-level clients use the same lifecycle:
+All high-level clients share one lifecycle:
 
-1. Construction validates the stage and initializes the role-specific stage
-   state.
-2. `start()` returns immediately. It starts the background receiver for
-   `UsdReceiver`, `ManagedClient`, and `SharedStageClient`; `UsdPublisher`
-   opens no socket until its first `update()`. Entering a context manager
-   calls `start()`.
-3. `wait_until_ready(timeout)` starts the client and pumps `update()` until
-   it reaches `READY`. `connect(timeout)` only waits for the handshakes; for
-   receiving clients it does not apply queued replay.
-4. `update()` applies incoming work and submits local work without waiting
-   for a durable acknowledgement. Every call returns a `SyncUpdate`. While a
-   sender is disconnected, `update()` schedules a background handshake (after
-   the receiver has connected, for bidirectional clients). Repeated calls use a
-   single attempt with retry backoff. Auth, protocol, and recovery rejections
-   stop automatic retries.
-5. `flush(timeout)` waits for already submitted work. It can succeed while
-   unsubmitted stage edits remain. `submit_and_wait(timeout)` publishes noticed
-   edits, then waits for durability.
-6. `close()` stops networking. It does not implicitly turn every pending edit
-   into a blocking flush.
+1. `start()` returns immediately; entering a context manager calls it.
+   `UsdPublisher` opens its socket on the first `update()`.
+2. `wait_until_ready(timeout)` pumps `update()` until the client is `READY`.
+   `connect(timeout)` only completes the handshakes.
+3. `update()` applies incoming work and submits local work. While a sender is
+   disconnected it schedules a background handshake with backoff; rejections
+   stop the retries.
+4. `submit_and_wait(timeout)` publishes pending edits and waits until they are
+   durable. `flush(timeout)` only waits for work already submitted.
+5. `close()` stops networking without flushing.
 
-`client.status` is an immutable `ClientStatus`; `phase` is one of
-`OFFLINE`, `CONNECTING`, `REPLAYING`, `READY`, `RECOVERY_REQUIRED`, `REJECTED`,
-`PARKED`, or `CLOSED`. `PARKED` means a `ManagedClient` or `UsdReceiver` has no
-bound stage, even if its networking is connected. Enable synchronized editing
-only in `READY`. The directional connection fields distinguish partial
-connectivity from a role that is not present.
+The blocking helpers default to a 10 second timeout and return `False` only
+when it expires; the work stays queued. States that more updates cannot fix
+raise, as `connect()` and `flush()` do:
 
-The blocking helpers `wait_until_ready()` and `submit_and_wait()` default to a
-10 second timeout and return `False` only when it expires. States that more
-updates cannot resolve raise instead, matching `connect()` and `flush()`:
-`PermissionError` for authentication rejection, `ConnectionError` for a
-rejected handshake, `TransactionRejectedError` for a rejected transaction, and
-`RuntimeError` for a closed client, a parked stage, or a required native-scene
-rebuild. GUI integrations should use the timer-driven pattern below instead of
-waiting.
+| State | Exception |
+| --- | --- |
+| Authentication rejected | `PermissionError` |
+| Handshake rejected | `ConnectionError` |
+| Transaction rejected | `TransactionRejectedError` |
+| Closed, parked, or native-scene rebuild required | `RuntimeError` |
 
-`status.has_unsent_changes` includes dirty edits not yet prepared and retained
-publication batches. `status.pending_events` counts submitted edits awaiting
-acknowledgement. Neither count alone establishes that local work is finished.
-`status.edit_target_is_shared` indicates whether the current USD edit target
-participates in this client's publication scope, independently of readiness.
+`client.status` is an immutable `ClientStatus`. Its `phase` is `OFFLINE`,
+`CONNECTING`, `REPLAYING`, `READY`, `RECOVERY_REQUIRED`, `REJECTED`, `PARKED`
+(no bound stage), or `CLOSED`; enable editing only in `READY`. It also reports
+unsent (`has_unsent_changes`) and unacknowledged (`pending_events`) work and
+whether the edit target is synchronized (`edit_target_is_shared`). Per-role
+connection fields are `None` for a role the client lacks. `ClientPhase`,
+`ClientStatus`, and `SyncUpdate` are importable from the package root.
 
-`ClientPhase`, `ClientStatus`, and `SyncUpdate` are available from
-`openusdconnect.client_types` and the package root. `client.client_id` exposes
-the connection identity without accessing an underlying transport object.
-
-Keep lifecycle and stage operations on the host's owning thread. Every
-application callback runs during `update()` on that thread: apply callbacks
-(`on_imported`, `on_resync`, `on_applied`, `on_applied_events`) and, by
-default, token, metadata, and playback notifications, which the client queues
-from its network threads. Internal credential sharing and persistence remain
-immediate. A raising callback propagates out of `update()`; notifications
-queued after it are delivered by the next `update()`. Closing discards
-undelivered notifications. Pass `callbacks_on_update=False` only when the
-callbacks are thread-safe and must observe network events without an update
-pump; they then run on the thread handling the handshake or message.
-Inside a receiver's apply callback, `receiver.applying_seq` is the candidate
-batch tail; `last_seq` advances only after the complete apply succeeds.
-
-An adapter-backed `UsdReceiver` also enters `RECOVERY_REQUIRED` when resolver
-recomposition makes incremental projection unsafe. Rebuild the native scene,
-then call `acknowledge_native_scene_rebuilt()`.
-
-`update()` returns a `SyncUpdate` describing the work done by that call;
-directional clients report zero for the direction they lack. Read state such
-as unsent work or deferred records from `client.status`.
+`update()` returns a `SyncUpdate` for the work done by that call:
 
 - `applied_events`: authoritative events applied during this call
 - `submitted_events`: local events accepted by the sender outbox
@@ -106,63 +69,40 @@ as unsent work or deferred records from `client.status`.
 - `pending_events`: currently submitted but unacknowledged events
 - `recovery`: a deterministic rejection that requires application action
 
-### GUI scheduling
+Application callbacks run during `update()` on the calling thread, including
+token, metadata, and playback notifications queued by the network threads. A
+raising callback propagates out of `update()`; later notifications wait for
+the next call. Pass `callbacks_on_update=False` to receive transport
+notifications on network threads instead. Inside an apply callback,
+`receiver.applying_seq` is the batch being applied; `last_seq` advances only
+after the whole apply succeeds.
 
-The host owns its timer and USD thread. Construction and `start()` do not wait
-for synchronization:
+An adapter-backed `UsdReceiver` enters `RECOVERY_REQUIRED` when resolver
+recomposition makes incremental projection unsafe. Rebuild the native scene,
+then call `acknowledge_native_scene_rebuilt()`.
+
+### Host loop
+
+GUI hosts drive the client from a timer instead of waiting:
 
 ```python
 client = ManagedClient(stage, app_name="my-editor").start()
 
 def on_timer():
     if not client.edit_target_is_shared:
-        # ManagedClient.update() refuses to publish from another layer.
+        # ManagedClient publishes only from client.authoring_layer.
         set_editing_enabled(False)
-        show_error("restore client.authoring_layer as the edit target")
         return
     client.update()
-    status = client.status
-    set_editing_enabled(status.phase is ClientPhase.READY)
-    show_sync_status(status)
+    set_editing_enabled(client.status.phase is ClientPhase.READY)
 ```
 
-`SharedStageClient` accepts any edit target: session-layer edits stay local,
-and `status.edit_target_is_shared` lets its UI distinguish them from
-synchronized edits, so its loop calls `update()` unconditionally.
-
-Background transaction sending uses the existing bounded outbox and preserves
-transaction order and reconnect replay. It does not make encoding, USD replay,
-explicit `connect()`, recovery, or playback commands asynchronous. Bidirectional
-updates still apply the complete queued authoritative prefix before publishing;
-large replays can take multiple frame budgets of CPU time. Pass
-`background_send=False` to write transactions on the calling thread instead.
-
-### Finish local work and close
-
-Stop authoring before a blocking finish operation, and call it on the stage's
-owning thread:
-
-```python
-if not client.submit_and_wait(timeout=5):
-    show_unfinished_changes(client.status)
-else:
-    client.close()
-```
-
-The helper keeps pumping replay and retained local batches, releases
-transform coalescing, and waits for durable acknowledgements. It returns
-`False` only on timeout, leaving work retained for retry, and raises for the
-blocked states listed above. The budget bounds waiting between updates; it
-cannot interrupt USD work or synchronous writes when background sending is
-disabled. Callbacks must not continue creating edits indefinitely while
-finishing.
-
-Completion guarantees publication durability, not that the receive stage has
-already applied the acknowledgement's authoritative echo or resolved every
-asset. In a GUI that must remain interactive during shutdown, disable authoring
-and keep its timer running until both unsent and pending work are empty, then
-close. Present rejection and timeout choices to the user instead of discarding
-outstanding work implicitly.
+`SharedStageClient` accepts any edit target (session-layer edits stay local),
+so its loop calls `update()` unconditionally. Bidirectional updates apply the
+whole queued replay before publishing, so one update during a large replay can
+take several frames.
+Before closing, stop authoring and call `submit_and_wait()`. Success means the
+edits are durable, not that their echo has been applied locally.
 
 ## Receive into a stage
 
@@ -266,15 +206,12 @@ failure after an ambiguous write retains the exact transaction and resends it
 with the same producer session and transaction ID after reconnection. The
 server either commits it once or reports the existing durable high-water mark.
 
-While disconnected, `UsdPublisher.update()` leaves noticed edits dirty and
-schedules a background handshake; a later `update()` submits them.
-`disconnect()` closes the socket and pauses those automatic attempts until the
-next `connect()`.
+`disconnect()` pauses automatic reconnection until the next `connect()`.
 
 Use `publish_current_edit_target()` when attaching to a layer that was already
 authored before the publisher existed. It publishes authored opinions, not a
-flattened composed stage. While disconnected, the snapshot stays prepared until
-an `update()` can submit it. Retry any retained batch with `update()` first.
+flattened composed stage, and waits for a connection if needed. Retry any
+retained batch with `update()` first.
 
 For high-frequency default-time transforms, set
 `transform_coalesce_seconds` to a small host-appropriate window. Only repeated
@@ -319,31 +256,15 @@ authoritative prefix, then submits the frozen local batch. The dispatcher
 suppresses and invalidates the emitter while applying server records, so
 authoritative echoes do not become new local submissions.
 
-`publish_current_edit_target()` explicitly captures the current authoring layer
-and follows the same replay/readiness gate as ordinary updates. A zero return
-may mean the snapshot is retained until a later update can submit it.
+`publish_current_edit_target()` queues a snapshot of the authoring layer for
+the next `update()` that can publish; a zero return can mean it is still queued.
+`rebind_stage()` refuses unsent or unacknowledged work: call
+`submit_and_wait()` first, or pass `discard_unsent=True` to drop unsent edits.
+`rebind_stage(None)` parks the client while networking stays active.
 
-`rebind_stage(new_stage)` and `rebind_stage(None)` refuse unfinished local work.
-Use `submit_and_wait()` before switching documents. If the host deliberately
-abandons unsent edits, pass `discard_unsent=True`; submitted transactions still
-need acknowledgement before rebinding. A new stage receives a fresh authoring
-layer, and `None` parks stage application while networking remains active.
-
-Closing a managed client detaches its authoritative collaboration layers. It
-leaves the local authoring layer and selected edit target on the old stage, so
-the composed scene may reveal older local opinions. To preserve the composition
-currently visible to the user, explicitly create an independent snapshot before
-closing, then let the host adopt or export it:
-
-```python
-visible_snapshot = Usd.Stage.Open(client.stage.Flatten())
-client.close()
-replace_stage_in_host(visible_snapshot)
-```
-
-This deliberately flattens the currently composed scene; it is not a replacement
-for preserving authored layer structure or finishing outstanding publications.
-`SharedStageClient.close()` leaves application-owned authored layers in place.
+`close()` detaches the collaboration layers but leaves the authoring layer on
+the stage, so the composed scene can change. To keep what the user sees,
+flatten first: `Usd.Stage.Open(client.stage.Flatten())`.
 
 Use separate `UsdPublisher` and `UsdReceiver` stages when the host intentionally
 authors persistent layers or changes edit targets. Attaching those two
@@ -428,14 +349,10 @@ sublayers may resolve later; call `refresh_layer_graph()` after resolver or
 asset availability changes. Use `is_layer_reachable(layer)` before authoring
 into a newly attached layer.
 
-`READY` means the replay checkpoint has been processed, even if some records
-must wait for unresolved layers. `status.deferred_events` and
-`status.deferred_layer_keys` expose that incomplete content without preventing
-editing of available layers. `refresh_layer_graph()` retries these records.
-Remote topology edits can select the root edit target if the previous target
-is no longer in the layer stack; read `stage.GetEditTarget()` when refreshing
-the host's layer UI. Both clients expose `claim_playback()` and
-`send_playback_control()` alongside the playback callbacks.
+`READY` does not wait for unresolved layers: their records are counted in
+`status.deferred_events` / `deferred_layer_keys` and applied by
+`refresh_layer_graph()`. A remote topology edit that removes the current edit
+target selects the root layer instead.
 
 The portable Python tracker keeps full in-memory layer snapshots. Native hosts
 can build an optional bridge against the exact OpenUSD installation they load:

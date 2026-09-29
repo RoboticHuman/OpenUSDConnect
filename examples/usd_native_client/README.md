@@ -26,8 +26,6 @@ temporary server and peer process and removes its temporary event log. Pressing
 
 The ownership rule is visible in `demo.py`: `ManagedClient` selects its own
 transient authoring layer below the authoritative collaboration layers. Both
-processes open equivalent read-only base content. The demo waits for replay
-readiness before authoring, pauses edits outside `READY`, and finishes local
-publication before normal shutdown. The peer also waits for durable delivery.
+processes open equivalent read-only base content.
 See the [USD-native integration contract](../../docs/usd-native-integration.md)
 for the corresponding host integration rules.

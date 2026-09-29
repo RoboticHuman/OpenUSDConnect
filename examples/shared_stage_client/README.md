@@ -43,6 +43,5 @@ persistence remains an application decision.
 The author only changes the stage while `client.status.phase` is `READY`.
 During connection or replay it continues pumping `update()` without authoring;
 on a recoverable rejection it stops authoring and reports the server reason.
-Normal shutdown uses `submit_and_wait()` so a successful exit means its local
-edits were durably acknowledged. Transaction socket writes use the default
-background sender; USD capture and replay still run in the update loop.
+Normal shutdown uses `submit_and_wait()`, so a successful exit means its edits
+are durable.

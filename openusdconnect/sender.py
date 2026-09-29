@@ -63,8 +63,7 @@ class EventSender:
     identity are replayed after reconnect, so an ACK lost after commit cannot
     apply the USD edits twice.
 
-    Set ``background_send=True`` to move transaction socket writes and reconnect
-    replay to a worker. Validation and encoding remain on the calling thread.
+    ``background_send=True`` moves transaction writes and replay to a worker.
     """
 
     def __init__(
@@ -281,8 +280,7 @@ class EventSender:
         """Handshake, start the result reader, and replay the exact outbox.
 
         ``timeout`` bounds this attempt and never extends the configured
-        handshake timeout. Background sending replays on its writer after the
-        handshake completes; use :meth:`flush` to wait for acknowledgement.
+        handshake timeout.
         """
         with self._condition:
             epoch = self._connect_epoch
@@ -546,10 +544,6 @@ class EventSender:
         if the socket fails during this call. ``False`` means no ownership was
         taken (disconnected before submission, empty input, full outbox, or a
         terminal rejection).
-
-        With ``background_send=True``, only validation, encoding, and bounded
-        outbox submission run on the caller; a worker performs transaction
-        writes and replay. Non-transaction messages still write synchronously.
         """
         if not events:
             return False

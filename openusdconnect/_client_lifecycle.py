@@ -71,21 +71,14 @@ def wait_until_ready(client, timeout: float | None) -> bool:
 
 
 def submit_and_wait(client, timeout: float | None) -> bool:
-    """Submit noticed local edits and wait for durable acknowledgement.
-
-    ``False`` means only that the timeout expired; the work stays retained.
-    The timeout bounds waiting between updates; it cannot interrupt USD work.
-    Success does not imply that the receive side has applied the echo.
-    """
+    """Submit noticed edits and wait until durable; ``False`` only on timeout."""
     client.start()
     deadline = deadline_after(timeout)
     while True:
         client.update()
         status = client.status
         raise_if_blocked(client, status)
-        # flush(0) also releases a managed transform coalescing window. It must
-        # not block: update() keeps draining replay and outbox pressure until
-        # every retained local batch can be submitted.
+        # flush(0) also releases transform coalescing and must not block the pump.
         if (
             status.phase is ClientPhase.READY
             and client.flush(timeout=0)
@@ -118,9 +111,8 @@ class ClientCallbackQueue:
         return enqueue
 
     def drain(self) -> None:
-        # Bound this tick to notifications already queued at entry. A callback
-        # or busy receiver can enqueue more work for the next update. A raising
-        # callback propagates to update(); later notifications stay queued.
+        # Only notifications queued before this tick, so a busy receiver cannot
+        # starve update().
         for _ in range(self._queue.qsize()):
             try:
                 callback, value = self._queue.get_nowait()

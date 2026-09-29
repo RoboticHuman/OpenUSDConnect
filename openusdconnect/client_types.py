@@ -30,13 +30,8 @@ class ClientStatus:
     client instance, including producer-session recovery. Connection and
     replay readiness do not imply that every submitted edit is durable.
 
-    ``has_unsent_changes`` includes noticed edits not yet prepared for sending.
-    ``deferred_events`` and ``deferred_layer_keys`` describe incoming shared
-    layer edits waiting for asset resolution, independently of replay readiness.
-    ``edit_target_is_shared`` describes the current target's publication scope,
-    not permission to author while disconnected or recovering; it is ``None``
-    for clients that publish whatever the edit target is, or do not publish.
-    A pending shared recovery replacement is exposed by ``recovery_stage_pending``.
+    ``edit_target_is_shared`` is ``None`` for clients that publish from any edit
+    target or do not publish.
     """
 
     phase: ClientPhase
@@ -62,8 +57,7 @@ class SyncUpdate:
     """Work completed by one client update call; read ``client.status`` for state.
 
     ``acknowledged_events_delta`` is consumed by this update and therefore
-    is not a cumulative counter. Directional clients report zero for the
-    direction they do not have.
+    is not a cumulative counter.
     """
 
     applied_events: int

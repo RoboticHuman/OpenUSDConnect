@@ -306,11 +306,7 @@ class SharedStageClient:
 
     @property
     def edit_target_is_shared(self) -> bool:
-        """Whether the current edit target belongs to the root/sublayer stack.
-
-        Session-layer edits remain local. This describes authoring scope, not
-        connection readiness or whether a new layer has its authoritative key.
-        """
+        """Whether edits to the current edit target are synchronized."""
         target = self._stage.GetEditTarget().GetLayer()
         return target in self._stage.GetLayerStack(includeSessionLayers=False)
 
@@ -406,10 +402,9 @@ class SharedStageClient:
         Producer reconnect is attempted within the same timeout budget; if it
         cannot complete, the normal update loop retries.
 
-        Once the replacement is bound, replay failure leaves it bound and sets
-        ``recovery_stage_pending``. Keep the host bound to ``client.stage`` even
-        if this call raises, and continue with :meth:`resume_recovery`. Do not
-        author into the replacement until recovery completes.
+        If replay fails after the replacement is bound, it stays bound
+        (``recovery_stage_pending``): keep the host on ``client.stage`` and call
+        :meth:`resume_recovery`.
         """
         deadline = deadline_after(timeout)
         self._validate_clean_recovery_stage(clean_stage)
@@ -661,18 +656,11 @@ class SharedStageClient:
         return self._sender.flush(timeout)
 
     def wait_until_ready(self, timeout: float | None = DEFAULT_WAIT_TIMEOUT_S) -> bool:
-        """Pump replay on the stage-owning thread until ready.
-
-        Returns ``False`` only on timeout; rejection and recovery raise.
-        Readiness does not imply that unresolved layers have become available.
-        """
+        """Pump updates until ``READY``; ``False`` only on timeout."""
         return wait_until_ready(self, timeout)
 
     def submit_and_wait(self, timeout: float | None = DEFAULT_WAIT_TIMEOUT_S) -> bool:
-        """Pump local edits and replay, then wait for durable acknowledgement.
-
-        Call from the stage-owning thread. Returns ``False`` only on timeout.
-        """
+        """Publish noticed edits and wait until durable; ``False`` only on timeout."""
         return submit_and_wait(self, timeout)
 
     @property
