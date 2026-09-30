@@ -253,7 +253,6 @@ def test_status_distinguishes_local_edit_targets_and_unsubmitted_changes(tmp_pat
         assert client.status.prepared_events > 0
         client.close()
         assert not client.status.has_unsent_changes
-        assert not client.status.has_unsent_changes
     finally:
         client.close()
 
@@ -323,7 +322,6 @@ def test_unresolved_layer_events_apply_after_dependency_refresh(tmp_path):
         mapped = client.refresh_layer_graph()
 
         assert mapped == (child_key,)
-        assert client.status.deferred_events == 0
         assert client.status.deferred_events == 0
         assert client.status.deferred_layer_keys == ()
         assert late.GetAttributeAtPath("/Late.value").default == 8
@@ -1033,7 +1031,6 @@ def test_shared_rebind_recovery_resumes_after_replacement_replay_timeout(
 
         assert client.stage is fresh_stage
         assert client.status.recovery_stage_pending
-        assert client.status.recovery_stage_pending
         assert client.status.phase is ClientPhase.RECOVERY_REQUIRED
         assert sender.abandoned_session_ids == []
 
@@ -1088,7 +1085,6 @@ def test_shared_rebind_recovery_resumes_after_replacement_replay_timeout(
             assert result.rejected_snapshots[0].GetPrimAtPath("/Rejected")
             assert result.checkpoint_seq == (5 if after_timeout == "update" else 4)
             assert client.stage is fresh_stage
-            assert not client.status.recovery_stage_pending
             assert not client.status.recovery_stage_pending
             assert not sender.recovery_required
     finally:

@@ -89,6 +89,7 @@ callable arguments and properties.
   thread runs Python.
 - `EventSender(token_provider=)` resolves credentials once per connection
   attempt.
+- `EventDispatcher.backlog_pending` and `NoticeEmitter.has_local_changes`.
 - Receiver replay identity and optional post-commit transaction checkpoints.
 
 ### Changed

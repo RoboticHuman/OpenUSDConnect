@@ -271,7 +271,6 @@ def test_managed_client_recovers_rejection_with_fresh_producer_session(
         assert recovered.preserved_authoring_layer.GetPrimAtPath("/World/Rejected")
         assert not stage.GetPrimAtPath("/World/Rejected")
         assert client.sender.session_id == "managed-replacement-session"
-        assert client.status.phase is not ClientPhase.RECOVERY_REQUIRED
         assert client.status.connected
         assert client.status.phase is ClientPhase.READY
         assert client.receiver.reconnect is False

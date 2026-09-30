@@ -102,7 +102,8 @@ for index, snapshot in enumerate(assessment.rejected_snapshots):
     snapshot.Export(f"rejected-work-{index}.usda")
 ```
 
-If replay times out after the replacement is bound, `recovery_stage_pending`
+If replay times out after the replacement is bound,
+`client.status.recovery_stage_pending`
 is `True`: keep authoring disabled and continue with
 `client.resume_recovery(timeout=5)`, which keeps the original rejected
 snapshots. A failure before replacement is retried with `recover_use_server()`.
@@ -184,10 +185,11 @@ Stable codes include `no_incident`, `wrong_recovery_kind`,
 
 ## UI guidance
 
-Drive editing state from `client.status.phase`:
+Enable authoring only when `client.status.can_author` is true; use
+`client.status.phase` for the message:
 
-- `READY`: enable authoring
-- `CONNECTING` or `REPLAYING`: keep calling `update()`, but disable authoring
+- `CONNECTING` or `REPLAYING`: keep calling `update()`
+- `PARKED`: bind a stage with `rebind_stage()`
 - `RECOVERY_REQUIRED`: disable authoring and present Use Server, repair, or
   application-specific merge choices
 - `REJECTED`: show the authentication or layer-mode reason

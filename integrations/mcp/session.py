@@ -49,10 +49,10 @@ class ConnectionSession:
         self.mirror_stage = None
         self.auth_rejected = False
         self._origin_base = f"mcp-{uuid.uuid4().hex[:8]}"
-        # prim_path -> sequence it last changed at, fed by the dispatcher's
-        # on_applied hook; powers changes_since() diff queries.
+        # prim_path -> sequence it last changed at, fed by _MirrorObserver;
+        # powers changes_since() diff queries.
         self._dirty: dict[str, int] = {}
-        # Latest PlaybackState the server broadcast, set on the receiver thread.
+        # Latest PlaybackState the server broadcast, delivered during pump().
         self._playback_state: PlaybackState | None = None
 
     @property

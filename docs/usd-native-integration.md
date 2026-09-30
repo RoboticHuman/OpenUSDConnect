@@ -39,7 +39,8 @@ All high-level clients share one lifecycle:
    While a sender is disconnected it schedules a background handshake with
    backoff; rejections stop the retries.
 4. `submit_and_wait(timeout)` publishes pending edits and waits until they are
-   durable. `flush(timeout)` only waits for work already submitted.
+   durable. `flush(timeout)` waits only for work already submitted (plus a
+   coalesced transform).
 5. `close()` stops networking without flushing.
 
 Blocking calls (`connect`, `flush`, `wait_until_ready`, `submit_and_wait`)
@@ -118,8 +119,10 @@ whole queued backlog in one call: about 20 µs per transform event, so a
 reconnect with 10,000 queued events stalls one frame for about 200 ms. With a
 budget the backlog spreads over frames at the same total cost, and local edits
 are held until the backlog queued before them has been applied.
-`SharedStageClient` accepts any edit target (session-layer edits stay local),
-so its loop calls `update()` unconditionally.
+Receiving pauses while a `ManagedClient` edit target is foreign, because its
+`update()` refuses to publish another layer's opinions. `SharedStageClient`
+accepts any edit target (session-layer edits stay local), so its loop calls
+`update()` unconditionally.
 
 `background_send=True` moves transaction writes to a worker so a full socket
 buffer cannot block the UI thread. The worker needs the GIL: while the host's
@@ -232,8 +235,8 @@ server either commits it once or reports the existing durable high-water mark.
 
 Use `publish_current_edit_target()` when attaching to a layer that was already
 authored before the publisher existed. It publishes authored opinions, not a
-flattened composed stage, and waits for a connection if needed. Retry any
-retained batch with `update()` first.
+flattened composed stage. While disconnected the snapshot stays queued for a
+later `update()`. Retry any retained batch with `update()` first.
 
 For high-frequency default-time transforms, set
 `transform_coalesce_seconds` to a small host-appropriate window. Only repeated

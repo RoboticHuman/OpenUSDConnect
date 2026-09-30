@@ -308,7 +308,7 @@ def test_flush_shares_timeout_between_reconnect_and_acknowledgement(kind, monkey
         client.close()
 
 
-def test_receiver_exposes_identity_and_current_delivery_sequence():
+def test_receiver_exposes_its_client_id():
     client = UsdReceiver(
         Usd.Stage.CreateInMemory(), app_name="viewer", client_id="viewer-id", persist_token=False
     )

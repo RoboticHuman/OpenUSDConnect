@@ -26,7 +26,7 @@ def _stage(path):
 
 
 @pytest.mark.parametrize("kind", [ManagedClient, SharedStageClient])
-def test_finish_includes_unprepared_edits_and_waits_for_server_commit(tmp_path, kind):
+def test_submit_and_wait_publishes_unprepared_edits_and_waits_for_commit(tmp_path, kind):
     # Distinct files prevent the in-process server and client from sharing a
     # mutable Sdf.Layer through USD's layer registry.
     server_base = tmp_path / "server.usda"
@@ -54,7 +54,6 @@ def test_finish_includes_unprepared_edits_and_waits_for_server_commit(tmp_path, 
             assert client.status.edit_target_is_shared
 
             stage.GetAttributeAtPath("/World.xformOp:translate").Set(Gf.Vec3d(2, 3, 4))
-            assert client.status.has_unsent_changes
             assert client.status.has_unsent_changes
             assert client.status.prepared_events == 0
             assert client.status.pending_events == 0

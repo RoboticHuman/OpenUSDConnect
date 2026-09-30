@@ -26,17 +26,6 @@ from openusdconnect.usd_client import UsdPublisher, UsdReceiver
 from tests.helpers import RecordingObserver
 
 
-def test_bidirectional_clients_share_one_update_result_contract():
-    update = SyncUpdate(
-        applied_events=1,
-        submitted_events=2,
-        acknowledged_events_delta=3,
-        pending_events=4,
-    )
-    assert update.acknowledged_events_delta == 3
-    assert update.pending_events == 4
-
-
 class _SenderStub:
     def __init__(self, results: list[bool]):
         self.connected = True

@@ -8,6 +8,7 @@ import threading
 import time
 from contextlib import contextmanager
 
+from openusdconnect.client_observer import ClientObserver
 from openusdconnect.protocol_constants import (
     K_SET_REFERENCE,
     K_SET_XFORM_TRS,
@@ -213,38 +214,32 @@ def mcp_session_with_receiver(port):
     return session
 
 
-class RecordingObserver:
-    """ClientObserver double recording (method, value, thread id) per call."""
+class RecordingObserver(ClientObserver):
+    """Records (method, value, thread id) for every observer call."""
 
-    def __new__(cls, *args, **kwargs):
-        from openusdconnect.client_observer import ClientObserver
+    def __init__(self, on_call=None):
+        self.calls = []
+        self._on_call = on_call
 
-        class _Recording(ClientObserver):
-            def __init__(self, on_call=None):
-                self.calls = []
-                self._on_call = on_call
+    def _record(self, name, value):
+        self.calls.append((name, value, threading.get_ident()))
+        if self._on_call is not None:
+            self._on_call(name, value)
 
-            def _record(self, name, value):
-                self.calls.append((name, value, threading.get_ident()))
-                if self._on_call is not None:
-                    self._on_call(name, value)
+    def on_applied(self, batch):
+        self._record("applied", batch)
 
-            def on_applied(self, batch):
-                self._record("applied", batch)
+    def on_resync(self):
+        self._record("resync", None)
 
-            def on_resync(self):
-                self._record("resync", None)
+    def on_stage_metadata(self, metadata):
+        self._record("stage_metadata", metadata)
 
-            def on_stage_metadata(self, metadata):
-                self._record("stage_metadata", metadata)
+    def on_playback_state(self, state):
+        self._record("playback_state", state)
 
-            def on_playback_state(self, state):
-                self._record("playback_state", state)
+    def on_playback_claim(self, result):
+        self._record("playback_claim", result)
 
-            def on_playback_claim(self, result):
-                self._record("playback_claim", result)
-
-            def on_token_issued(self, token):
-                self._record("token_issued", token)
-
-        return _Recording(*args, **kwargs)
+    def on_token_issued(self, token):
+        self._record("token_issued", token)
