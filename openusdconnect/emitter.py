@@ -4090,6 +4090,9 @@ class NoticeEmitter:
                 self._notice_resynced_prims.discard(prim_path)
                 continue
             events.extend(self._build_dirty_prim_events(prim_path, prim, eps_trs))
+        # A resynced path that was never dirty (a removed local definition)
+        # only drove the subtree walk above.
+        self._notice_resynced_prims.clear()
 
         if self._full_sdf_spec_scan or self._dirty_sdf_specs or self._dirty_sdf_subtrees:
             events.extend(

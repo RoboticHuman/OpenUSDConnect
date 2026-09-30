@@ -15,6 +15,7 @@ from openusdconnect.recovery import (
 )
 from openusdconnect.sdf_spec_delta import serialize_spec_fields
 from openusdconnect.shared_stage_client import SharedStageClient
+from tests.helpers import PeerTraffic
 
 
 def _create_root(path) -> Usd.Stage:
@@ -354,7 +355,7 @@ def test_content_apply_failure_preserves_layer_and_tracker_until_retry(
                 event={"k": "replace_sdf_layer_content", "fragment": source.ExportToString()},
             ))
         if deferred:
-            client._pending_records.extend(records)
+            client._set_deferred(records)
         before = root.ExportToString()
         stage.SetEditTarget(stage.GetSessionLayer())
         original_apply = client_module.apply_events
@@ -463,12 +464,12 @@ def test_repair_and_resume_targets_current_mapped_layer(tmp_path, monkeypatch):
     original_sender = client._sender
     repaired = []
 
-    class _RepairSender:
-        recovery_artifact = _stale_artifact("layer:root")
-        transaction_failure = recovery_artifact.failure
-
+    class _RepairSender(_RecoverySender):
         def repair_rejected_transaction(self, events, *, layer_key=""):
+            if not events:
+                raise ValueError("repair events must not be empty")
             repaired.append((events, layer_key))
+            self.recovery_artifact = self.transaction_failure = None
             return 7
 
     try:
@@ -484,8 +485,9 @@ def test_repair_and_resume_targets_current_mapped_layer(tmp_path, monkeypatch):
                 ],
             }
         )
-        client._sender = _RepairSender()
+        client._sender = _RepairSender(_stale_artifact("layer:root"))
         client._started = True
+        client._recovery_rebind_artifact = client._sender.recovery_artifact
         resumed = []
 
         def _resume():
@@ -495,14 +497,18 @@ def test_repair_and_resume_targets_current_mapped_layer(tmp_path, monkeypatch):
         monkeypatch.setattr(client, "_connect_sender", _resume)
         events = [{"k": "replace_sdf_layer_content", "fragment": "#usda 1.0\n"}]
 
-        assert client.repair_and_resume(events, layer=stage.GetRootLayer()) == 7
-        assert repaired == [(events, "layer:root")]
-        assert resumed == [True]
-
         detached = Sdf.Layer.CreateAnonymous()
         with pytest.raises(RecoveryError, match="not mapped") as error:
             client.repair_and_resume(events, layer=detached)
         assert error.value.code == "invalid_repair_target"
+        with pytest.raises(ValueError, match="must not be empty"):
+            client.repair_and_resume([], layer=stage.GetRootLayer())
+        assert client.status.recovery_stage_pending, "a failed repair keeps the incident"
+
+        assert client.repair_and_resume(events, layer=stage.GetRootLayer()) == 7
+        assert repaired == [(events, "layer:root")]
+        assert resumed == [True]
+        assert not client.status.recovery_stage_pending
     finally:
         client._sender = original_sender
         client.close()
@@ -1184,19 +1190,11 @@ def test_shared_rebind_recovery_rejects_a_detached_source_reused_by_clean_stage(
         client.close()
 
 
-def test_shared_budgeted_update_holds_local_edits_until_backlog_applied(
-    tmp_path, monkeypatch,
-):
+def test_shared_budget_releases_local_edits_under_sustained_traffic(tmp_path, monkeypatch):
     stage = _create_root(tmp_path / "root.usda")
     client = SharedStageClient(stage, app_name="shared-budget", persist_token=False)
-    backlog = [3]
+    traffic = PeerTraffic(client._receiver, monkeypatch, queued=3)
     sent = []
-
-    def apply_incoming(max_messages=None):
-        taken = backlog[0] if max_messages is None else min(backlog[0], max_messages)
-        backlog[0] -= taken
-        client._backlog_pending = max_messages is not None and taken >= max_messages
-        return taken
 
     try:
         client._started = True
@@ -1208,7 +1206,6 @@ def test_shared_budgeted_update_holds_local_edits_until_backlog_applied(
         client._tracker.sync_graph(force=True)
         client._receiver.connected = True
         client._receiver._synchronized_event.set()
-        monkeypatch.setattr(client, "_apply_incoming", apply_incoming)
         monkeypatch.setattr(client._sender, "sock", object())
         monkeypatch.setattr(
             client._sender, "send_events",
@@ -1216,12 +1213,11 @@ def test_shared_budgeted_update_holds_local_edits_until_backlog_applied(
         )
         stage.DefinePrim("/Shared", "Xform")
 
-        held = client.update(max_messages=2)
-        assert (held.applied_events, held.submitted_events) == (2, 0)
-        assert client.status.has_unsent_changes
-        published = client.update(max_messages=2)
-        assert published.applied_events == 1
-        assert published.submitted_events > 0
+        submitted = []
+        for _ in range(2):
+            submitted.append(client.update(max_messages=2).submitted_events)
+            traffic.arrive(2)
+        assert submitted[0] == 0 and submitted[1] > 0
         assert sent
     finally:
         client._sender.sock = None

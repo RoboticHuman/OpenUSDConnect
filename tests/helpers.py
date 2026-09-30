@@ -6,9 +6,11 @@ import subprocess
 import sys
 import threading
 import time
+from collections import deque
 from contextlib import contextmanager
 
 from openusdconnect.client_observer import ClientObserver
+from openusdconnect.codec import encode_message
 from openusdconnect.protocol_constants import (
     K_SET_REFERENCE,
     K_SET_XFORM_TRS,
@@ -212,6 +214,27 @@ def mcp_session_with_receiver(port):
     # These tests drive one connection attempt directly to control reconnect timing.
     session.receiver._started = True
     return session
+
+
+class PeerTraffic:
+    """Replaces a receiver's queue with ping messages that peers keep sending."""
+
+    def __init__(self, receiver, monkeypatch, *, queued=0):
+        self._ping = encode_message({"type": "ping"})
+        self._frames = deque()
+        self.arrive(queued)
+        monkeypatch.setattr(receiver, "drain_queue", self._drain)
+        monkeypatch.setattr(
+            type(receiver), "queued_message_count",
+            property(lambda _receiver: len(self._frames)),
+        )
+
+    def arrive(self, count):
+        self._frames.extend([self._ping] * count)
+
+    def _drain(self, max_messages=None):
+        count = len(self._frames) if max_messages is None else min(max_messages, len(self._frames))
+        return deque(self._frames.popleft() for _ in range(count))
 
 
 def force_handshake(client, *, synchronized=False):

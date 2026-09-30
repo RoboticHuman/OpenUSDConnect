@@ -323,12 +323,12 @@ def test_sdf_spec_batches_use_full_layer_atomic_rollback():
     assert mirror.GetRootLayer().documentation == "original"
 
 
-def test_budgeted_drain_reports_remaining_backlog():
+def test_budgeted_drain_reports_messages_taken():
     receiver = _QueuedReceiver([_event(seq, f"/World/P{seq}") for seq in (1, 2, 3)])
     dispatcher = EventDispatcher(receiver=receiver, adapter=MockAdapter())
 
     assert dispatcher.drain_and_apply(max_messages=2) == 2
-    assert dispatcher.backlog_pending
+    assert dispatcher.drained_message_count == 2
     assert dispatcher.drain_and_apply(max_messages=2) == 1
-    assert not dispatcher.backlog_pending
+    assert dispatcher.drained_message_count == 1
     assert dispatcher.last_seq == 3

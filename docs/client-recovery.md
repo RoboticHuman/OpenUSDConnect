@@ -7,9 +7,11 @@ producer session and transaction ID.
 A deterministic producer rejection requires an explicit policy. The rejected
 transaction and its ordered suffix are quarantined because later IDs cannot
 safely pass the gap.
-`ManagedClient` and `SharedStageClient` report this through
+`ManagedClient`, `SharedStageClient`, and `UsdPublisher` report this through
 `client.status.phase == ClientPhase.RECOVERY_REQUIRED`,
-`client.status.recovery`, and `client.recovery_artifact`.
+`client.status.recovery`, and `client.recovery_artifact`. `UsdPublisher`
+recovers only by repair (`repair_and_resume(events)`), because it holds no
+authoritative state to fall back to.
 
 Ordinary `update()` calls report the condition without raising. Explicit
 recovery commands may raise `RecoveryError`, `TimeoutError`, or
@@ -189,6 +191,8 @@ Enable authoring only when `client.status.can_author` is true; use
 `client.status.phase` for the message:
 
 - `CONNECTING` or `REPLAYING`: keep calling `update()`
+- `OFFLINE`: nothing will reconnect; call `connect()` after `disconnect()`, or
+  create a new client if its receiver used `reconnect=False`
 - `PARKED`: bind a stage with `rebind_stage()`
 - `RECOVERY_REQUIRED`: disable authoring and present Use Server, repair, or
   application-specific merge choices

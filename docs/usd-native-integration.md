@@ -41,16 +41,20 @@ All high-level clients share one lifecycle:
 4. `submit_and_wait(timeout)` publishes pending edits and waits until they are
    durable. `flush(timeout)` waits only for work already submitted (plus a
    coalesced transform).
-5. `close()` stops networking without flushing.
+5. `close()` stops networking without flushing, then delivers notifications
+   that were still queued.
 
 Blocking calls (`connect`, `flush`, `wait_until_ready`, `submit_and_wait`)
 default to a 10 second timeout and return `False` only when it expires; the
-work stays queued. States that more updates cannot fix raise:
+work stays queued. `flush` also returns `False` at once while a coalesced
+transform cannot be submitted yet (replaying or parked). States that more
+updates cannot fix raise:
 
 | State | Exception |
 | --- | --- |
 | Authentication rejected | `PermissionError` |
 | Handshake rejected | `ConnectionError` |
+| Offline and not reconnecting (after `disconnect()`, or `reconnect=False`) | `ConnectionError` |
 | Transaction rejected | `TransactionRejectedError` |
 | Closed, parked, or native-scene rebuild required | `RuntimeError` |
 
@@ -75,7 +79,9 @@ connection fields are `None` for a role the client lacks. `ClientPhase`,
 ### Observing the client
 
 Pass one `ClientObserver` subclass as `observer=` and override only what the
-host needs. Every method runs inside `update()` on the calling thread, and the
+host needs. Methods never run on a network thread: notifications arrive in
+`update()` or `close()`, and delivery methods run wherever the client applies
+authoritative state (`update()`, `refresh_asset_dependency()`, recovery). The
 client wires only overridden methods, so unused notifications cost nothing:
 
 ```python
@@ -89,8 +95,10 @@ class HostObserver(ClientObserver):
 client = ManagedClient(stage, app_name="my-editor", observer=HostObserver())
 ```
 
-`on_applied` and `on_resync` are part of delivery: raising rolls the batch back
-and replays it, so they must be safe to retry. `on_stage_metadata`,
+`on_applied` and `on_resync` are part of delivery: raising from one in
+`update()` rolls the batch back and replays it, so they must be safe to retry.
+Stage edits made in them are not published, and a `close()` called from one
+takes effect once the batch has been applied. `on_stage_metadata`,
 `on_playback_state`, `on_playback_claim`, and `on_token_issued` only observe:
 raising propagates out of `update()` and later notifications wait for the next
 call. Methods that do not apply to a client never fire; `UsdPublisher` reports
@@ -250,7 +258,7 @@ other event kinds, and distinct animation samples remain ordering barriers.
 ```python
 from pxr import Gf, Usd, UsdGeom
 
-from openusdconnect import ClientPhase, ManagedClient
+from openusdconnect import ManagedClient
 
 stage = Usd.Stage.Open("shot.usda")
 
@@ -267,7 +275,7 @@ with ManagedClient(
 
     while application_is_running():
         client.update()
-        if client.status.phase is ClientPhase.READY:
+        if client.status.can_author:
             if translate is None:
                 sphere = UsdGeom.Sphere.Define(stage, "/World/Sphere")
                 translate = UsdGeom.Xformable(sphere).AddTranslateOp()
@@ -343,7 +351,7 @@ uv run openusdconnect-server --base shot.usda --layer-mode shared_stage
 ```python
 from pxr import Usd
 
-from openusdconnect import ClientPhase, SharedStageClient
+from openusdconnect import SharedStageClient
 
 stage = Usd.Stage.Open("shot.usda")
 
@@ -353,7 +361,7 @@ with SharedStageClient(stage, app_name="layer-editor") as client:
 
     while application_is_running():
         client.update()
-        set_editing_enabled(client.status.phase is ClientPhase.READY)
+        set_editing_enabled(client.status.can_author)
 ```
 
 Every process opens its own equivalent root document under its normal

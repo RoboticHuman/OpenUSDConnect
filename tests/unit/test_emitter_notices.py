@@ -40,6 +40,21 @@ def _make_stage_and_emitter():
     return stage, emitter
 
 
+def test_removed_local_def_over_weaker_prim_leaves_no_pending_changes():
+    stage = Usd.Stage.CreateInMemory()
+    stage.DefinePrim("/World/Child", "Xform")
+    stage.SetEditTarget(Usd.EditTarget(stage.GetSessionLayer()))
+    emitter = NoticeEmitter(stage)
+    stage.DefinePrim("/World", "Xform")
+    assert emitter.build_events_for_dirty()
+
+    stage.RemovePrim("/World")
+    events = emitter.build_events_for_dirty()
+
+    assert {"k": K_DELETE_PRIM, "prim": "/World"} in events
+    assert not emitter.has_local_changes
+
+
 class TestCreationDetection:
     """DefinePrim triggers ensure_prim + set_xform_trs events."""
 

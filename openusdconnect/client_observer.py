@@ -72,13 +72,14 @@ class PlaybackClaim:
 
 
 class ClientObserver:
-    """Override the notifications a host needs; every method runs inside ``update()``.
+    """Override the notifications a host needs; no method runs on a network thread.
 
-    Delivery methods are part of applying authoritative state: raising rolls
-    the batch back and replays it, and stage edits made in them are not
-    published. Notification methods only observe: raising propagates out of
-    ``update()`` and later notifications wait for the next call. A client
-    calls only the methods it supports and a subclass overrides.
+    Delivery methods run while the client applies authoritative state: raising
+    from one in ``update()`` rolls the batch back and replays it, and stage
+    edits made in them are not published. Notification methods only observe
+    and arrive in ``update()`` or ``close()``: raising propagates, and later
+    notifications wait for the next call. A client calls only the methods it
+    supports and a subclass overrides.
     """
 
     def on_applied(self, batch: AppliedBatch) -> None:

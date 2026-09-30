@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import threading
 import uuid
 from collections.abc import Callable
 
@@ -64,22 +65,23 @@ class ClientCredential:
         self._port = port
         self._persist = persist
         self._on_issued = on_issued
+        # Both connection threads read and replace the token.
+        self._lock = threading.Lock()
         self.token = resolve_client_token(host, port, token, persist)
 
     def current(self) -> str | None:
         """The token for a connection attempt, loading a stored one if none is known."""
-        if self.token is None and self._persist:
-            stored = load_token(self._host, self._port)
-            # A handshake on another connection can issue a token meanwhile.
-            if self.token is None:
-                self.token = stored
-        return self.token
+        with self._lock:
+            if self.token is None and self._persist:
+                self.token = load_token(self._host, self._port)
+            return self.token
 
     def issued(self, token: str) -> None:
         """Adopt a server-issued token, persist it, then notify the host."""
-        self.token = token
-        if self._persist:
-            save_token(self._host, self._port, token)
+        with self._lock:
+            self.token = token
+            if self._persist:
+                save_token(self._host, self._port, token)
         if self._on_issued is not None:
             self._on_issued(token)
 

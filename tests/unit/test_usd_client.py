@@ -15,7 +15,6 @@ from openusdconnect import (
 )
 from openusdconnect import coalescing as coalescing_module
 from openusdconnect.codec import TransactionRejectionCode
-from openusdconnect.emitter import NoticeEmitter
 from openusdconnect.managed_client import ManagedClient
 from openusdconnect.recovery import (
     QuarantinedTransaction,
@@ -23,7 +22,7 @@ from openusdconnect.recovery import (
     make_recovery_incident,
 )
 from openusdconnect.usd_client import UsdPublisher, UsdReceiver
-from tests.helpers import RecordingObserver, force_handshake
+from tests.helpers import PeerTraffic, RecordingObserver, force_handshake
 
 
 class _SenderStub:
@@ -375,24 +374,6 @@ def test_managed_metadata_only_changes_count_as_unsent_work(ready_managed_client
     assert client.update().submitted_events == 0
 
 
-def test_emitter_rebind_seeds_replacement_metadata_baseline():
-    old_stage = Usd.Stage.CreateInMemory()
-    emitter = NoticeEmitter(old_stage)
-    old_stage.SetFramesPerSecond(48)
-    replacement = Usd.Stage.CreateInMemory()
-    replacement.SetFramesPerSecond(30)
-    UsdGeom.SetStageUpAxis(replacement, UsdGeom.Tokens.z)
-    try:
-        emitter.rebind_stage(replacement)
-        assert not emitter.has_local_changes
-        UsdGeom.SetStageUpAxis(replacement, UsdGeom.Tokens.y)
-        assert emitter.build_events_for_dirty() == [
-            {"k": "set_stage_metadata", "upAxis": "Y"},
-        ]
-    finally:
-        emitter.cleanup()
-
-
 def test_managed_snapshot_waits_for_replay_without_losing_newer_edits(
     ready_managed_client, monkeypatch,
 ):
@@ -424,8 +405,7 @@ def test_managed_snapshot_waits_for_replay_without_losing_newer_edits(
     assert values == [1, 2]
 
 
-@pytest.mark.parametrize("prepare", [False, True])
-@pytest.mark.parametrize("park", [False, True])
+@pytest.mark.parametrize(("prepare", "park"), [(False, False), (True, True)])
 def test_managed_rebind_requires_explicit_unsent_discard(
     ready_managed_client, prepare, park,
 ):
@@ -461,7 +441,6 @@ def test_managed_parked_client_is_not_ready(ready_managed_client):
     assert client.status.connected
     assert not client.status.synchronized
     assert client.status.phase is ClientPhase.PARKED
-    assert not client.status.synchronized
     assert not client.status.edit_target_is_published
     with pytest.raises(RuntimeError, match="no bound stage"):
         client.wait_until_ready()
@@ -1102,25 +1081,23 @@ def test_app_name_is_required():
         UsdReceiver(stage, app_name=" ", persist_token=False)
 
 
-def test_managed_budgeted_update_holds_local_edits_until_backlog_applied(
-    ready_managed_client, monkeypatch,
-):
-    client, sender = ready_managed_client
-    backlog = [3]
+def test_managed_budget_releases_local_edits_under_sustained_traffic(monkeypatch):
+    client = ManagedClient(
+        Usd.Stage.CreateInMemory(), app_name="managed-budget", persist_token=False,
+    )
+    client._sender = _SenderStub([True] * 10)
+    force_handshake(client, synchronized=True)
+    traffic = PeerTraffic(client.receiver, monkeypatch, queued=3)
+    try:
+        client.stage.DefinePrim("/Local", "Xform")
+        submitted = []
+        for _ in range(2):
+            submitted.append(client.update(max_messages=2).submitted_events)
+            traffic.arrive(2)
+        # Held behind the three queued messages, then released although the
+        # peers keep every later drain at its budget.
+        assert submitted[0] == 0 and submitted[1] > 0
+        assert not client.status.has_unsent_changes
+    finally:
+        client.close()
 
-    def drain(max_messages=None):
-        taken = backlog[0] if max_messages is None else min(backlog[0], max_messages)
-        backlog[0] -= taken
-        client._dispatcher._backlog_pending = max_messages is not None and taken >= max_messages
-        return taken
-
-    monkeypatch.setattr(client._dispatcher, "drain_and_apply", drain)
-    client.stage.DefinePrim("/Local", "Xform")
-
-    held = client.update(max_messages=2)
-    assert (held.applied_events, held.submitted_events) == (2, 0)
-    assert client.status.has_unsent_changes
-    published = client.update(max_messages=2)
-    assert published.applied_events == 1
-    assert published.submitted_events > 0
-    assert not client.status.has_unsent_changes

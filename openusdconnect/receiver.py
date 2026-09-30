@@ -153,6 +153,11 @@ class ReceiverThread(threading.Thread):
         return self._inbox.last_sequence
 
     @property
+    def stopped(self) -> bool:
+        """Whether the thread ran and exited, so it will not reconnect."""
+        return self.ident is not None and not self.is_alive()
+
+    @property
     def queued_message_count(self) -> int:
         """Number of received messages waiting for the owning thread to drain."""
 

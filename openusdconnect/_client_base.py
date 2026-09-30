@@ -61,6 +61,8 @@ class ClientBase:
         self._port = port
         self._started = False
         self._closed = False
+        self._apply_depth = 0
+        self._close_requested = False
         self._callbacks = ClientCallbackQueue()
         self._hooks = observer_hooks(observer, self._callbacks.wrap)
         self._credential = ClientCredential(
@@ -94,7 +96,11 @@ class ClientBase:
             parked=self._is_parked(),
             replaying=receiver is not None and receiver.connected and not receiver.synchronized,
             ready=connected and synchronized,
-            connecting=self._started and not self._paused,
+            connecting=(
+                self._started
+                and not self._paused
+                and not (receiver is not None and receiver.stopped)
+            ),
         )
         if failure is not None:
             reason = str(failure)
@@ -141,21 +147,35 @@ class ClientBase:
             timeout = remaining_time(deadline)
         return self._sender is None or self._connect_sender(timeout)
 
+    def update(self, *, max_messages: int | None = None) -> SyncUpdate:
+        """Apply received work and submit local work; call it every frame."""
+        raise NotImplementedError
+
     def wait_until_ready(self, timeout: float | None = DEFAULT_WAIT_TIMEOUT_S) -> bool:
         """Pump updates until ``READY``; ``False`` only on timeout."""
         return wait_until_ready(self, timeout)
 
     def close(self) -> None:
-        """Stop networking and release client-owned resources."""
+        """Stop networking, deliver queued notifications, and release resources.
+
+        Called from an observer while events are applied, it takes effect when
+        that apply returns.
+        """
         if self._closed:
             return
-        self._callbacks.close()
-        if self._sender is not None:
-            self._sender.disconnect()
-        if self._receiver is not None:
-            stop_receiver(self._receiver)
-        self._release()
+        if self._apply_depth:
+            self._close_requested = True
+            return
         self._closed = True
+        try:
+            if self._sender is not None:
+                self._sender.disconnect()
+            if self._receiver is not None:
+                stop_receiver(self._receiver)
+            # A token issued by the last handshake must still reach the host.
+            self._callbacks.close()
+        finally:
+            self._release()
 
     def __enter__(self):
         return self.start()
@@ -201,6 +221,16 @@ class ClientBase:
         self._require_open()
         if not self._started:
             raise RuntimeError(f"{type(self).__name__} has not been started")
+
+    def _dispatch(self, operation: Callable, /, *args, **kwargs):
+        """Run a dispatcher operation that may call observer delivery methods."""
+        self._apply_depth += 1
+        try:
+            return operation(*args, **kwargs)
+        finally:
+            self._apply_depth -= 1
+            if self._close_requested and not self._apply_depth:
+                self.close()
 
     def _begin_update(self) -> bool:
         """Deliver queued notifications; ``False`` when one of them closed the client."""
@@ -274,16 +304,12 @@ class PublishingClientBase(ClientBase):
             )
         return failure
 
-    def _repair_and_reconnect(self, events: list[dict], *, layer_key: str = "") -> int:
-        """Replace the rejected transaction at its ID, then reconnect the outbox."""
-        self._require_recoverable_failure()
-        txn_id = self._sender.repair_rejected_transaction(events, layer_key=layer_key)
+    def _reconnect_repaired(self, txn_id: int) -> None:
         if not self._connect_sender():
             raise ConnectionError(
                 f"transaction {txn_id} repaired but reconnect to "
                 f"{self._host}:{self._port} failed; it remains queued"
             )
-        return txn_id
 
     def _replay_to_fresh_checkpoint(self, timeout: float | None) -> None:
         """Apply replay through a new server watermark before resolving recovery."""
@@ -295,6 +321,7 @@ class PublishingClientBase(ClientBase):
             receiver.request_replay_from(self.last_seq + 1)
             while True:
                 self._apply_queued()
+                self._require_open()
                 if receiver.synchronized:
                     return
                 if not _pause_before_poll(deadline):
@@ -302,8 +329,8 @@ class PublishingClientBase(ClientBase):
         finally:
             receiver.reconnect = reconnect
 
-    def _apply_queued(self) -> None:
-        """Apply what the receiver has queued; clients with a receiver implement it."""
+    def _apply_queued(self, max_messages: int | None = None) -> int:
+        """Apply queued receiver messages; clients with a receiver implement it."""
         raise NotImplementedError
 
     def _resume_sender_after_recovery(self, timeout: float | None) -> None:
@@ -340,6 +367,19 @@ class EmitterClientBase(PublishingClientBase):
     def sender(self) -> EventSender:
         """The underlying :class:`EventSender`; a diagnostic handle."""
         return self._sender
+
+    def repair_and_resume(self, events: list[dict]) -> int:
+        """Replace a recoverable transaction and resume its ordered outbox.
+
+        The application must first reconcile its stage with authoritative
+        state and rebuild *events* for that state. The repaired transaction is
+        assigned the original rejected ID; later quarantined transactions keep
+        their existing IDs and replay after it.
+        """
+        self._require_recoverable_failure()
+        txn_id = self._sender.repair_rejected_transaction(events)
+        self._reconnect_repaired(txn_id)
+        return txn_id
 
     @property
     def emitter(self) -> NoticeEmitter:

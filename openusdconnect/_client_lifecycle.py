@@ -1,4 +1,4 @@
-"""Stateless helpers shared by the high-level clients."""
+"""Helpers shared by the high-level clients."""
 
 from __future__ import annotations
 
@@ -76,6 +76,8 @@ def raise_if_blocked(client, status: ClientStatus) -> None:
         if status.auth_rejected:
             raise PermissionError(status.reason or f"{name} authentication rejected")
         raise ConnectionError(status.reason or f"{name} connection rejected")
+    if status.phase is ClientPhase.OFFLINE:
+        raise ConnectionError(status.reason or f"{name} is offline and not reconnecting")
     if status.phase is ClientPhase.PARKED:
         raise RuntimeError(f"{name} has no bound stage; call rebind_stage() first")
     if status.phase is ClientPhase.RECOVERY_REQUIRED:
@@ -113,8 +115,34 @@ def submit_and_wait(client, timeout: float | None) -> bool:
             return False
 
 
+class BacklogHold:
+    """Hold a local batch until the messages queued before it have been drained.
+
+    Counting those messages, rather than checking whether a drain used its
+    whole budget, keeps sustained inbound traffic from holding edits forever.
+    """
+
+    __slots__ = ("_ahead",)
+
+    def __init__(self):
+        self._ahead = 0
+
+    @property
+    def holding(self) -> bool:
+        return self._ahead > 0
+
+    def freeze(self, queued: int) -> None:
+        """Record the queue depth when a new local batch is frozen."""
+        self._ahead = queued
+
+    def drained(self, count: int, queued: int) -> None:
+        # The messages ahead of the batch are at the front of the queue, so a
+        # replay request that discards the queue also bounds them.
+        self._ahead = min(max(0, self._ahead - count), queued)
+
+
 class ClientCallbackQueue:
-    """Deliver notifications raised on network threads during update()."""
+    """Deliver notifications raised on network threads during update() or close()."""
 
     def __init__(self):
         self._queue = queue.SimpleQueue()
@@ -140,10 +168,27 @@ class ClientCallbackQueue:
             callback(value)
 
     def close(self) -> None:
+        """Refuse new notifications and deliver the queued ones.
+
+        Every queued notification runs even if one raises; the first error is
+        re-raised after the rest have been delivered.
+        """
         with self._lock:
             self._closed = True
-            while not self._queue.empty():
-                self._queue.get_nowait()
+        error = None
+        while True:
+            try:
+                callback, value = self._queue.get_nowait()
+            except queue.Empty:
+                break
+            try:
+                callback(value)
+            except Exception as exc:
+                if error is not None:
+                    LOG.exception("Observer notification failed while closing")
+                error = error or exc
+        if error is not None:
+            raise error
 
 
 def raise_if_rejected(endpoint, role: str) -> None:

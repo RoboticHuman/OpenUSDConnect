@@ -10,7 +10,12 @@ from pathlib import Path
 from pxr import Sdf, Usd
 
 from ._client_base import PublishingClientBase
-from ._client_lifecycle import DEFAULT_WAIT_TIMEOUT_S, deadline_after, remaining_time
+from ._client_lifecycle import (
+    DEFAULT_WAIT_TIMEOUT_S,
+    BacklogHold,
+    deadline_after,
+    remaining_time,
+)
 from ._client_utils import client_origin, require_app_name
 from .client_id import make_stable_client_id
 from .client_observer import ClientObserver
@@ -158,8 +163,8 @@ class SharedStageClient(PublishingClientBase):
             **identity, **credential,
         )
         self._last_seq = 0
-        self._backlog_pending = False
-        self._pending_records: list[ReceivedEvent] = []
+        self._backlog = BacklogHold()
+        self._set_deferred([])
         self._last_recovery_assessment: SharedRecoveryAssessment | None = None
         self._recovery_rebind_artifact: RecoveryArtifact | None = None
 
@@ -211,9 +216,11 @@ class SharedStageClient(PublishingClientBase):
                 "repair target layer is not mapped by the current graph",
             )
         self._require_recoverable_artifact()
+        txn_id = self._sender.repair_rejected_transaction(events, layer_key=layer_key)
         self._last_recovery_assessment = None
         self._recovery_rebind_artifact = None
-        return self._repair_and_reconnect(events, layer_key=layer_key)
+        self._reconnect_repaired(txn_id)
+        return txn_id
 
     def refresh_recovery_assessment(
         self,
@@ -482,7 +489,7 @@ class SharedStageClient(PublishingClientBase):
         sent = 0
         if self._graph.ready and self._receiver.connected and not self._sender.connected:
             self._sender.request_connect()
-        if self._sender.connected and self._is_synchronized() and not self._backlog_pending:
+        if self._sender.connected and self._is_synchronized() and not self._backlog.holding:
             while routed := self._tracker.next_routed_batch():
                 batch, layer_key, events = routed
                 if not self._sender.send_events(events, layer_key=layer_key):
@@ -493,7 +500,10 @@ class SharedStageClient(PublishingClientBase):
 
     def _apply_queued(self, max_messages: int | None = None) -> int:
         """Apply queued records while local edits are frozen out of the layers."""
+        had_batch = bool(self._tracker.prepared_event_count)
         self._tracker.prepare_local_changes()
+        if not had_batch and self._tracker.prepared_event_count:
+            self._backlog.freeze(self._receiver.queued_message_count)
         try:
             return self._apply_incoming(max_messages)
         finally:
@@ -501,7 +511,7 @@ class SharedStageClient(PublishingClientBase):
 
     def _apply_incoming(self, max_messages: int | None = None) -> int:
         buffers = self._receiver.drain_queue(max_messages)
-        self._backlog_pending = max_messages is not None and len(buffers) >= max_messages
+        self._backlog.drained(len(buffers), self._receiver.queued_message_count)
         if not buffers:
             self._receiver.mark_replay_applied()
             return 0
@@ -514,7 +524,7 @@ class SharedStageClient(PublishingClientBase):
             require_contiguous=True,
         )
         if result.resync_requested:
-            self._pending_records.clear()
+            self._set_deferred([])
         applied_seq = 0 if result.resync_requested else self._last_seq
         applied = 0
         try:
@@ -580,7 +590,7 @@ class SharedStageClient(PublishingClientBase):
 
         layer = self._graph.layer_for(layer_key)
         if layer is None:
-            self._pending_records.append(record)
+            self._defer(record)
             return False
         self._apply_layer_events(layer, [event])
         return True
@@ -604,6 +614,19 @@ class SharedStageClient(PublishingClientBase):
         else:
             self._stage.SetEditTarget(Usd.EditTarget(self._stage.GetRootLayer()))
 
+    def _defer(self, record: ReceivedEvent) -> None:
+        """Hold a record until its layer is mapped by the local graph."""
+        self._pending_records.append(record)
+        key = record.layer_key or ""
+        if key not in self._deferred_layer_keys:
+            self._deferred_layer_keys += (key,)
+
+    def _set_deferred(self, records: list[ReceivedEvent]) -> None:
+        self._pending_records = records
+        self._deferred_layer_keys = tuple(
+            dict.fromkeys(record.layer_key or "" for record in records)
+        )
+
     def _apply_pending(self) -> int:
         if not self._pending_records:
             return 0
@@ -623,7 +646,7 @@ class SharedStageClient(PublishingClientBase):
             events = [record.event for record in records]
             self._apply_layer_events(layer, events)
             applied += len(records)
-        self._pending_records = retained
+        self._set_deferred(retained)
         return applied
 
     def refresh_layer_graph(self) -> tuple[str, ...]:
@@ -677,7 +700,7 @@ class SharedStageClient(PublishingClientBase):
         self._stage = stage
         self._graph = graph
         self._tracker = tracker
-        self._pending_records.clear()
+        self._set_deferred([])
         self._last_seq = 0
         old_tracker.close()
 
@@ -698,9 +721,7 @@ class SharedStageClient(PublishingClientBase):
         target = self._stage.GetEditTarget().GetLayer()
         return {
             "deferred_events": len(self._pending_records),
-            "deferred_layer_keys": tuple(
-                dict.fromkeys(record.layer_key or "" for record in self._pending_records)
-            ),
+            "deferred_layer_keys": self._deferred_layer_keys,
             "edit_target_is_published": (
                 target in self._stage.GetLayerStack(includeSessionLayers=False)
             ),

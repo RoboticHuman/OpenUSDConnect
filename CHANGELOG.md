@@ -32,7 +32,10 @@ Callbacks become one `observer=ClientObserver`:
   `batch.imported_paths`.
 - `on_playback_claimed` and `on_playback_rejected` become
   `on_playback_claim(result)`.
-- Other `on_*` arguments become the observer method of the same name.
+- Other `on_*` arguments become the observer method of the same name, which
+  receives a typed value instead of a dict: `StageMetadata`, `PlaybackState`,
+  or `PlaybackClaim` (a rejection's `current_leader_client_id` is its
+  `leader_client_id`).
 - For `UsdReceiver.applying_seq`, use `batch.seq` inside `on_applied`.
 
 State moves to `client.status`:
@@ -60,14 +63,17 @@ Return values and defaults:
 
 Behavior:
 
-- Token, metadata, and playback notifications run during `update()` on the
-  calling thread instead of on network threads.
+- Token, metadata, and playback notifications run during `update()` or
+  `close()` on the calling thread instead of on network threads.
+- Stage edits made in `on_resync` are no longer published, matching
+  `on_applied`.
 - `UsdPublisher.update()` raises before `start()`. While disconnected it
   reconnects in the background; `disconnect()` pauses that until `connect()`.
-- `publish_current_edit_target()` keeps its snapshot until an `update()` can
-  send it, instead of returning 0 and dropping it.
-- `ManagedClient.rebind_stage()` refuses unsent or unacknowledged work. Finish
-  with `submit_and_wait()`, or pass `discard_unsent=True`.
+- `publish_current_edit_target()` captures its snapshot while disconnected and
+  sends it from a later `update()`, instead of returning 0 without capturing.
+- `ManagedClient.rebind_stage()` refuses unacknowledged work (finish with
+  `submit_and_wait()`) and unsent edits unless `discard_unsent=True` drops
+  them.
 - `ManagedClient.flush()` raises when the server rejects the connection,
   like `UsdPublisher.flush()`, instead of returning `False`.
 - `UsdReceiver.status` reports `CONNECTING` instead of `READY` while it
@@ -83,19 +89,22 @@ callable arguments and properties.
 - `wait_until_ready()` and `submit_and_wait()`. They return `False` only on
   timeout and raise for states that more updates cannot fix.
 - `update(max_messages=)` on `ManagedClient` and `SharedStageClient` spreads a
-  reconnect backlog over frames.
+  reconnect backlog over frames; local edits wait only for the messages queued
+  before them.
 - `ClientStatus` fields `auth_rejected`, `has_unsent_changes`,
   `deferred_events`, `deferred_layer_keys`, `edit_target_is_published`, and
   `recovery_stage_pending`; the `can_author` property; `ClientPhase.PARKED`.
 - `SharedStageClient.resume_recovery()` (error code
-  `no_pending_recovery_stage`), `claim_playback()`, and
-  `send_playback_control()`.
+  `no_pending_recovery_stage`).
+- `claim_playback()` and `send_playback_control()` on `SharedStageClient` and
+  `UsdPublisher`.
 - Opt-in `background_send=True` moves transaction writes to a worker thread.
   The worker needs the GIL, adding about 5 ms per write while the host's main
   thread runs Python.
 - `token_provider=` on `EventSender` and `ReceiverThread` supplies the token
   for each connection attempt.
-- `EventDispatcher.backlog_pending` and `NoticeEmitter.has_local_changes`.
+- `EventDispatcher.drained_message_count`, `ReceiverThread.stopped`, and
+  `NoticeEmitter.has_local_changes`.
 - Receiver replay identity and optional post-commit transaction checkpoints.
 
 ### Changed

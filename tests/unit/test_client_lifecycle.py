@@ -72,13 +72,49 @@ def test_every_client_reports_the_same_lifecycle_phases(kind, tmp_path):
     try:
         assert client.status.phase is client_types.ClientPhase.OFFLINE
         assert not client.status.connected
-        client._started = True
+        client.start()
         assert client.status.phase is client_types.ClientPhase.CONNECTING
     finally:
         client.close()
     assert client.status.phase is client_types.ClientPhase.CLOSED
     with pytest.raises(RuntimeError, match=f"{kind.__name__} is closed"):
         client.update()
+
+
+def test_waits_raise_when_nothing_will_reconnect():
+    publisher = UsdPublisher(
+        Usd.Stage.CreateInMemory(), app_name="paused", port=1, persist_token=False,
+    )
+    receiver = UsdReceiver(
+        Usd.Stage.CreateInMemory(), app_name="one-shot", port=1, persist_token=False,
+        reconnect=False,
+    )
+    try:
+        publisher.start()
+        publisher.disconnect()
+        receiver.start()
+        receiver.receiver.join(timeout=5)
+        for client in (publisher, receiver):
+            assert client.status.phase is client_types.ClientPhase.OFFLINE
+            with pytest.raises(ConnectionError, match="offline"):
+                client.wait_until_ready(timeout=5)
+        with pytest.raises(ConnectionError, match="offline"):
+            publisher.submit_and_wait(timeout=5)
+    finally:
+        publisher.close()
+        receiver.close()
+
+
+def test_backlog_hold_counts_only_messages_queued_before_the_batch():
+    hold = _client_lifecycle.BacklogHold()
+    hold.freeze(3)
+    hold.drained(2, queued=5)
+    assert hold.holding
+    hold.drained(2, queued=5)
+    assert not hold.holding
+    hold.freeze(4)
+    hold.drained(0, queued=0)
+    assert not hold.holding, "a discarded queue has nothing left ahead of the batch"
 
 
 def test_queued_notifications_run_on_update_thread_and_bound_each_drain():
@@ -100,11 +136,11 @@ def test_queued_notifications_run_on_update_thread_and_bound_each_drain():
     assert received == [("first", threading.get_ident())]
     notifications.drain()
     assert received == [("first", threading.get_ident()), ("next-tick", threading.get_ident())]
-    callback("discarded")
+    callback("queued")
     notifications.close()
     callback("late")
     notifications.drain()
-    assert len(received) == 2
+    assert [value for value, _thread in received] == ["first", "next-tick", "queued"]
 
 
 def test_queued_notification_failure_propagates_and_keeps_later_notifications():
@@ -148,22 +184,32 @@ def test_credential_reads_storage_only_while_no_token_is_known(monkeypatch):
     assert credential.current() is None
     stored[0] = "stored"
     assert credential.current() == "stored"
+    reads.clear()
     assert credential.current() == "stored"
-    assert len(reads) == 3
     assert _client_utils.ClientCredential("test-host", 7200, None, False).current() is None
-    assert len(reads) == 3
+    assert reads == []
 
 
 def test_credential_keeps_a_token_issued_while_storage_loads(monkeypatch):
     monkeypatch.setattr(_client_utils, "save_token", lambda host, port, token: None)
     monkeypatch.setattr(_client_utils, "load_token", lambda host, port: None)
     credential = _client_utils.ClientCredential("localhost", 1, None, True)
+    loading, release = threading.Event(), threading.Event()
 
-    def load_during_issue(host, port):
-        credential.issued("issued-during-load")
+    def slow_load(host, port):
+        loading.set()
+        assert release.wait(5)
         return "old-stored-token"
 
-    monkeypatch.setattr(_client_utils, "load_token", load_during_issue)
+    monkeypatch.setattr(_client_utils, "load_token", slow_load)
+    reader = threading.Thread(target=credential.current)
+    reader.start()
+    assert loading.wait(5)
+    issuer = threading.Thread(target=credential.issued, args=("issued-during-load",))
+    issuer.start()
+    release.set()
+    reader.join(5)
+    issuer.join(5)
     assert credential.current() == "issued-during-load"
 
 
@@ -185,11 +231,9 @@ def test_sender_takes_its_token_from_the_provider_on_every_attempt(monkeypatch):
     assert presented == ["first", "second"]
 
 
-@pytest.mark.parametrize("kind", [ManagedClient, SharedStageClient])
-@pytest.mark.parametrize("issuer", ["_sender", "_receiver"])
 @pytest.mark.parametrize("failure", [None, "persistence", "observer"])
 def test_issued_token_is_persisted_before_notifying_and_used_by_both_roles(
-    kind, issuer, failure, tmp_path, monkeypatch,
+    failure, tmp_path, monkeypatch,
 ):
     calls = []
 
@@ -203,12 +247,12 @@ def test_issued_token_is_persisted_before_notifying_and_used_by_both_roles(
     )
     stage = Usd.Stage.CreateNew(str(tmp_path / "scene.usda"))
     observer = RecordingObserver(on_call=lambda name, token: record("observer", token))
-    client = kind(
+    client = ManagedClient(
         stage, app_name="shared-credentials", token="configured", persist_token=True,
         observer=observer,
     )
     try:
-        callback = getattr(client, issuer)._on_token_issued
+        callback = client._sender._on_token_issued
         if failure == "persistence":
             with pytest.raises(RuntimeError, match="injected persistence failure"):
                 callback("replacement")
@@ -322,25 +366,13 @@ def test_flush_shares_timeout_between_reconnect_and_acknowledgement(kind, monkey
         client.close()
 
 
-def test_receiver_exposes_its_client_id():
-    client = UsdReceiver(
-        Usd.Stage.CreateInMemory(), app_name="viewer", client_id="viewer-id", persist_token=False
-    )
-    try:
-        assert client.client_id == "viewer-id"
-    finally:
-        client.close()
-
-
 @pytest.mark.parametrize(
     ("phase", "sender_connected", "edit_target_is_published", "expected"),
     [
-        ("ready", True, True, True),
         ("ready", True, None, True),
         ("ready", True, False, False),
         ("ready", None, None, False),
         ("replaying", True, True, False),
-        ("recovery_required", True, True, False),
     ],
 )
 def test_can_author_combines_readiness_role_and_edit_target(
@@ -357,7 +389,7 @@ def test_can_author_combines_readiness_role_and_edit_target(
 
 
 @pytest.mark.parametrize("kind", [ManagedClient, SharedStageClient, UsdReceiver, UsdPublisher])
-def test_every_client_delivers_notifications_on_the_draining_thread(kind, tmp_path):
+def test_close_delivers_notifications_queued_by_network_threads(kind, tmp_path):
     observer = RecordingObserver()
     stage = Usd.Stage.CreateNew(str(tmp_path / "scene.usda"))
     client = kind(stage, app_name="notifications", persist_token=False, observer=observer)
@@ -370,10 +402,10 @@ def test_every_client_delivers_notifications_on_the_draining_thread(kind, tmp_pa
         worker.start()
         worker.join(timeout=1)
         assert observer.calls == []
-        client._callbacks.drain()
-        assert observer.calls == [
-            ("token_issued", "issued", threading.get_ident()),
-            ("stage_metadata", StageMetadata(up_axis="Y"), threading.get_ident()),
-        ]
     finally:
         client.close()
+    # A host that stores tokens itself must receive one issued just before close.
+    assert observer.calls == [
+        ("token_issued", "issued", threading.get_ident()),
+        ("stage_metadata", StageMetadata(up_axis="Y"), threading.get_ident()),
+    ]

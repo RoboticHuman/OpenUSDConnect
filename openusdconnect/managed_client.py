@@ -12,7 +12,12 @@ from dataclasses import dataclass
 from pxr import Sdf, Usd
 
 from ._client_base import EmitterClientBase
-from ._client_lifecycle import DEFAULT_WAIT_TIMEOUT_S, deadline_after, remaining_time
+from ._client_lifecycle import (
+    DEFAULT_WAIT_TIMEOUT_S,
+    BacklogHold,
+    deadline_after,
+    remaining_time,
+)
 from ._client_utils import client_origin, require_app_name, validate_layered_source
 from .adapters import UsdStageAdapter
 from .client_id import make_stable_client_id
@@ -73,6 +78,7 @@ class ManagedClient(EmitterClientBase):
         self._app_name = app_name
         self._authoring_layer: Sdf.Layer | None = None
         self._last_recovery_result: ManagedRecoveryResult | None = None
+        self._backlog = BacklogHold()
         self._init_emitter(
             stage,
             attr_filter=attr_filter,
@@ -156,17 +162,21 @@ class ManagedClient(EmitterClientBase):
         # authoritative prefix has applied. SharedStageClient follows the same
         # prepare/apply/restore ordering at the Sdf-layer level.
         self._validate_authoring_target()
+        had_batch = bool(self._emitter.prepared_event_count)
         outgoing = self._prepare_outgoing_events()
-        received = self._dispatcher.drain_and_apply(max_messages=max_messages)
+        if not had_batch and self._emitter.prepared_event_count:
+            self._backlog.freeze(self._receiver.queued_message_count)
+        received = self._apply_queued(max_messages)
+        if self._closed:
+            return self._progress(received)
+        self._backlog.drained(
+            self._dispatcher.drained_message_count, self._receiver.queued_message_count,
+        )
 
         sent = 0
         if self._receiver.connected and not self._sender.connected:
             self._sender.request_connect()
-        if (
-            self._sender.connected
-            and self._is_synchronized()
-            and not self._dispatcher.backlog_pending
-        ):
+        if self._sender.connected and self._is_synchronized() and not self._backlog.holding:
             sent = self._send(outgoing)
         return self._progress(received, sent)
 
@@ -209,7 +219,7 @@ class ManagedClient(EmitterClientBase):
     ) -> AssetDependencyRefreshResult:
         """Retry dependencies under the stage's current resolver context."""
         self._require_open()
-        return self._dispatcher.refresh_asset_dependency(asset_path)
+        return self._dispatch(self._dispatcher.refresh_asset_dependency, asset_path)
 
     def recover_use_server(
         self,
@@ -262,16 +272,6 @@ class ManagedClient(EmitterClientBase):
         self._resume_sender_after_recovery(remaining_time(deadline))
         return result
 
-    def repair_and_resume(self, events: list[dict]) -> int:
-        """Replace a recoverable transaction and resume its ordered outbox.
-
-        The application must first reconcile its stage with authoritative
-        state and rebuild *events* for that state. The repaired transaction is
-        assigned the original rejected ID; later quarantined transactions keep
-        their existing IDs and replay after it.
-        """
-        return self._repair_and_reconnect(events)
-
     def _is_synchronized(self) -> bool:
         return (
             self._stage is not None
@@ -293,8 +293,8 @@ class ManagedClient(EmitterClientBase):
             ),
         }
 
-    def _apply_queued(self) -> None:
-        self._dispatcher.drain_and_apply()
+    def _apply_queued(self, max_messages: int | None = None) -> int:
+        return self._dispatch(self._dispatcher.drain_and_apply, max_messages=max_messages)
 
     def _can_capture_edit_target(self) -> bool:
         if self._stage is None:

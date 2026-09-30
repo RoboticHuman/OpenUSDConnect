@@ -323,11 +323,11 @@ class EventSender:
             if self._session.recovery_required or time.monotonic() < self._retry_after_until:
                 return False
 
-        if self._token_provider is not None:
-            self.token = self._token_provider()
         connect_timeout = deadline - time.monotonic()
         if connect_timeout <= 0.0:
             return False
+        if self._token_provider is not None:
+            self.token = self._token_provider()
 
         connection = self._session.begin_connection()
         if connection is None:

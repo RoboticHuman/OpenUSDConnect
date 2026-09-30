@@ -45,6 +45,7 @@ def _patch_net(monkeypatch, started, stopped):
         layered_replay_active = True
         server_instance = "test-server"
         replay_epoch = 0
+        stopped = False
 
         def __init__(self, **kwargs):
             self.options = kwargs

@@ -125,7 +125,9 @@ class UsdReceiver(ClientBase):
         """
         if not self._begin_update() or self._stage is None:
             return self._progress()
-        return self._progress(self._dispatcher.drain_and_apply(max_messages=max_messages))
+        return self._progress(
+            self._dispatch(self._dispatcher.drain_and_apply, max_messages=max_messages)
+        )
 
     def rebind_stage(self, stage: Usd.Stage | None) -> None:
         """Move receive-side composition and managed layers to a new stage.
@@ -157,7 +159,7 @@ class UsdReceiver(ClientBase):
     ) -> AssetDependencyRefreshResult:
         """Retry dependencies under the stage's current resolver context."""
         self._require_open()
-        return self._dispatcher.refresh_asset_dependency(asset_path)
+        return self._dispatch(self._dispatcher.refresh_asset_dependency, asset_path)
 
     def acknowledge_native_scene_rebuilt(self) -> None:
         """Resume projection after rebuilding an external adapter destination."""
@@ -237,8 +239,12 @@ class UsdPublisher(EmitterClientBase):
             self._paused = True
             self._sender.disconnect()
 
-    def update(self) -> SyncUpdate:
-        """Submit one retryable batch, or schedule a reconnect while disconnected."""
+    def update(self, *, max_messages: int | None = None) -> SyncUpdate:
+        """Submit one retryable batch, or schedule a reconnect while disconnected.
+
+        ``max_messages`` is accepted for a uniform host loop; a publisher
+        receives nothing.
+        """
         if not self._begin_update():
             return self._progress()
         sent = 0
@@ -247,16 +253,6 @@ class UsdPublisher(EmitterClientBase):
         elif not self._paused:
             self._sender.request_connect()
         return self._progress(submitted=sent)
-
-    def repair_and_resume(self, events: list[dict]) -> int:
-        """Replace a recoverable transaction and resume its ordered outbox.
-
-        The application must first reconcile its stage with authoritative
-        state and rebuild *events* for that state. The repaired transaction is
-        assigned the original rejected ID; later quarantined transactions keep
-        their existing IDs and replay after it.
-        """
-        return self._repair_and_reconnect(events)
 
     def _is_synchronized(self) -> bool:
         return self._sender.connected
