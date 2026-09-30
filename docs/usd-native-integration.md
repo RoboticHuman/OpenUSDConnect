@@ -53,11 +53,13 @@ work stays queued. States that more updates cannot fix raise:
 | Transaction rejected | `TransactionRejectedError` |
 | Closed, parked, or native-scene rebuild required | `RuntimeError` |
 
-`client.status` is an immutable `ClientStatus`. Its `phase` is `OFFLINE`,
+`client.status` is an immutable `ClientStatus` and the one place to read client
+state; the clients themselves expose data and operations. Its `phase` is `OFFLINE`,
 `CONNECTING`, `REPLAYING`, `READY`, `RECOVERY_REQUIRED`, `REJECTED`, `PARKED`
 (no bound stage), or `CLOSED`. `status.can_author` tells a UI whether edits to
 the current edit target will be published now. The status also reports unsent
-(`has_unsent_changes`) and unacknowledged (`pending_events`) work. Per-role
+(`has_unsent_changes`) and unacknowledged (`pending_events`) work, and
+`auth_rejected` separates an authentication rejection from a protocol one. Per-role
 connection fields are `None` for a role the client lacks. `ClientPhase`,
 `ClientStatus`, and `SyncUpdate` are importable from the package root.
 
@@ -106,7 +108,7 @@ GUI hosts drive the client from a timer instead of waiting:
 client = ManagedClient(stage, app_name="my-editor").start()
 
 def on_timer():
-    if client.edit_target_is_shared:  # ManagedClient publishes only its authoring layer
+    if client.status.edit_target_is_shared:  # ManagedClient publishes only its authoring layer
         client.update(max_messages=256)
     set_editing_enabled(client.status.can_author)
 ```
@@ -415,8 +417,8 @@ A context-only resolver remap is a special case for adapters targeting a
 non-USD native scene. It can recompose both the live and previous-state stages
 before projection observes the old topology. The dispatcher then sets
 `native_scene_rebuild_required` and stops incremental delivery. The high-level
-client exposes this through `client.native_scene_rebuild_required` and
-`client.status`. Rebuild the native destination and call
+receiver reports it as `RECOVERY_REQUIRED` in `client.status`. Rebuild the
+native destination and call
 `client.acknowledge_native_scene_rebuilt()` before resuming. An ordinary
 reconnect does not clear this guard.
 

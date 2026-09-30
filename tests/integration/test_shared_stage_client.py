@@ -92,7 +92,7 @@ def test_shared_client_shares_reissued_tokens(tmp_path, background, first_reconn
         try:
             assert client.connect(timeout=5)
             sender_readers.append(client._sender._reader_thread)
-            assert _pump_until([client], lambda: client.synchronized)
+            assert _pump_until([client], lambda: client.status.synchronized)
             old_token = client._sender.token
             assert old_token == client._receiver.token
             assert runtime.sync_server.revoke_token(client.client_id)
@@ -114,9 +114,9 @@ def test_shared_client_shares_reissued_tokens(tmp_path, background, first_reconn
                 client._sender.disconnect()
                 if background:
                     assert _pump_until(
-                        [client], lambda: client.connected or client._sender.auth_rejected,
+                        [client], lambda: client.status.connected or client._sender.auth_rejected,
                     )
-                    assert client.connected
+                    assert client.status.connected
                 else:
                     assert client.connect(timeout=3)
                 sender_readers.append(client._sender._reader_thread)
@@ -130,9 +130,9 @@ def test_shared_client_shares_reissued_tokens(tmp_path, background, first_reconn
             client._receiver.request_replay_from(1)
             assert not client._receiver.synchronized
             assert _pump_until(
-                [client], lambda: client.synchronized or client._receiver.auth_rejected,
+                [client], lambda: client.status.synchronized or client._receiver.auth_rejected,
             )
-            assert client.synchronized
+            assert client.status.synchronized
             assert not client._receiver.auth_rejected
             assert client._sender.token == client._receiver.token == sender_tokens[0]
         finally:
@@ -689,8 +689,8 @@ def test_clients_reconnect_and_converge_after_server_restart(tmp_path):
         assert _pump_until(
             [first, second],
             lambda: (
-                first.connected
-                and second.connected
+                first.status.connected
+                and second.status.connected
                 and _value(first_stage) == 5
                 and _value(second_stage) == 5
                 and _value(restarted_stage) == 5
@@ -918,7 +918,7 @@ def test_shared_client_use_server_recovers_after_layer_detach_race(tmp_path, reb
         assert client._sender.connected is rebind
 
         # update schedules a background handshake; readiness arrives on a later tick.
-        assert _pump_until([client], lambda: client.connected)
+        assert _pump_until([client], lambda: client.status.connected)
     finally:
         client.close()
         tcp_server.shutdown()

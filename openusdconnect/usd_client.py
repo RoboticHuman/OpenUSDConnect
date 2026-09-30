@@ -47,9 +47,7 @@ from .receiver import ReceiverThread
 from .recovery import (
     RecoveryArtifact,
     RecoveryError,
-    RecoveryIncident,
     RejectionDisposition,
-    TransactionFailure,
 )
 from .sender import EventSender
 
@@ -133,17 +131,19 @@ class UsdReceiver:
     @property
     def status(self) -> ClientStatus:
         """Current receiver transport and replay state."""
+        auth_rejected = self._receiver.auth_rejected
+        rejected = auth_rejected or self._receiver.hello_rejected
         if self._closed:
             phase = ClientPhase.CLOSED
-        elif self.auth_rejected or self.connection_rejected:
+        elif rejected:
             phase = ClientPhase.REJECTED
         elif self._stage is None:
             phase = ClientPhase.PARKED
-        elif self.native_scene_rebuild_required:
+        elif self._dispatcher.native_scene_rebuild_required:
             phase = ClientPhase.RECOVERY_REQUIRED
-        elif self.synchronized:
+        elif self._synchronized:
             phase = ClientPhase.READY
-        elif self.connected:
+        elif self._connected:
             phase = ClientPhase.REPLAYING
         elif self._started:
             phase = ClientPhase.CONNECTING
@@ -151,14 +151,15 @@ class UsdReceiver:
             phase = ClientPhase.OFFLINE
         return ClientStatus(
             phase=phase,
-            connected=self.connected,
-            synchronized=self.synchronized,
+            connected=self._connected,
+            synchronized=self._synchronized,
             receiver_connected=self._receiver.connected,
             reason=(
                 "the adapter-owned scene must be rebuilt after resolver recomposition"
-                if self.native_scene_rebuild_required
+                if self._dispatcher.native_scene_rebuild_required
                 else self._receiver.rejection_reason
             ),
+            auth_rejected=auth_rejected,
         )
 
     @property
@@ -177,11 +178,11 @@ class UsdReceiver:
         return self._dispatcher
 
     @property
-    def connected(self) -> bool:
+    def _connected(self) -> bool:
         return not self._closed and self._receiver.connected
 
     @property
-    def synchronized(self) -> bool:
+    def _synchronized(self) -> bool:
         return not self._closed and self._stage is not None and self._receiver.synchronized
 
     @property
@@ -203,25 +204,12 @@ class UsdReceiver:
         return self._receiver.replay_epoch
 
     @property
-    def auth_rejected(self) -> bool:
-        return self._receiver.auth_rejected
-
-    @property
-    def connection_rejected(self) -> bool:
-        return self._receiver.hello_rejected
-
-    @property
     def stage_metadata(self) -> StageMetadata:
         return stage_metadata_from_message(self._receiver.stage_metadata)
 
     @property
     def pending_asset_dependencies(self) -> tuple[str, ...]:
         return self._dispatcher.pending_asset_dependencies
-
-    @property
-    def native_scene_rebuild_required(self) -> bool:
-        """Whether an external adapter destination needs a complete rebuild."""
-        return self._dispatcher.native_scene_rebuild_required
 
     def start(self) -> UsdReceiver:
         """Start the background socket reader and return this receiver."""
@@ -401,15 +389,17 @@ class UsdPublisher:
     @property
     def status(self) -> ClientStatus:
         """Current publisher transport, durability, and recovery state."""
+        auth_rejected = self._sender.auth_rejected
+        rejected = auth_rejected or self._sender.hello_rejected
         failure = self._sender.transaction_failure
         reason = str(failure) if failure is not None else self._sender.rejection_reason
         if self._closed:
             phase = ClientPhase.CLOSED
         elif failure is not None:
             phase = ClientPhase.RECOVERY_REQUIRED
-        elif self.auth_rejected or self.connection_rejected:
+        elif rejected:
             phase = ClientPhase.REJECTED
-        elif self.connected:
+        elif self._connected:
             phase = ClientPhase.READY
         elif self._started and not self._paused:
             phase = ClientPhase.CONNECTING
@@ -417,16 +407,17 @@ class UsdPublisher:
             phase = ClientPhase.OFFLINE
         return ClientStatus(
             phase=phase,
-            connected=self.connected,
-            synchronized=self.synchronized,
+            connected=self._connected,
+            synchronized=self._synchronized,
             sender_connected=self._sender.connected,
-            prepared_events=self.prepared_event_count,
-            pending_events=self.pending_event_count,
-            acknowledged_events_total=self.acknowledged_event_count,
+            prepared_events=self._emitter.prepared_event_count,
+            pending_events=self._sender.pending_event_count,
+            acknowledged_events_total=self._sender.acknowledged_event_count,
             failure=failure,
             recovery=self._sender.recovery_incident,
             reason=reason,
-            has_unsent_changes=self.has_unsent_changes,
+            auth_rejected=auth_rejected,
+            has_unsent_changes=self._has_unsent_changes,
         )
 
     @property
@@ -445,70 +436,27 @@ class UsdPublisher:
         return self._emitter
 
     @property
-    def connected(self) -> bool:
+    def _connected(self) -> bool:
         return not self._closed and self._sender.connected
 
     @property
-    def synchronized(self) -> bool:
+    def _synchronized(self) -> bool:
         """Send-only clients are synchronized whenever their transport is connected."""
-        return self.connected
-
-    @property
-    def auth_rejected(self) -> bool:
-        return self._sender.auth_rejected
-
-    @property
-    def connection_rejected(self) -> bool:
-        return self._sender.hello_rejected
+        return self._connected
 
     @property
     def stage_metadata(self) -> StageMetadata:
         return stage_metadata_from_message(self._sender.stage_metadata)
 
     @property
-    def has_unsent_changes(self) -> bool:
+    def _has_unsent_changes(self) -> bool:
         """Whether noticed edits or a prepared batch still need submission."""
         return not self._closed and self._emitter.has_local_changes
-
-    @property
-    def prepared_event_count(self) -> int:
-        """Number of events not yet accepted by the sender outbox."""
-        return self._emitter.prepared_event_count
-
-    @property
-    def pending_event_count(self) -> int:
-        """Submitted events not yet durably acknowledged by the server."""
-        return self._sender.pending_event_count
-
-    @property
-    def acknowledged_event_count(self) -> int:
-        """Cumulative events durably acknowledged by the server."""
-        return self._sender.acknowledged_event_count
-
-    @property
-    def transaction_error(self) -> str:
-        """Terminal producer rejection, or an empty string."""
-        return self._sender.transaction_error
-
-    @property
-    def transaction_failure(self) -> TransactionFailure | None:
-        """Structured rejection including its recovery disposition, if any."""
-        return self._sender.transaction_failure
-
-    @property
-    def recovery_incident(self) -> RecoveryIncident | None:
-        """Structured recovery summary for polling and host UI."""
-        return self._sender.recovery_incident
 
     @property
     def recovery_artifact(self) -> RecoveryArtifact | None:
         """Exact quarantined transactions for integration-owned recovery."""
         return self._sender.recovery_artifact
-
-    @property
-    def recovery_disposition(self) -> RejectionDisposition | None:
-        """Recovery policy category for the current rejection, if any."""
-        return self._sender.recovery_disposition
 
     def repair_and_resume(self, events: list[dict]) -> int:
         """Replace a recoverable transaction and resume its ordered outbox.
@@ -542,7 +490,7 @@ class UsdPublisher:
             raise RuntimeError("UsdPublisher is closed")
         deadline = deadline_after(timeout)
         if self._transform_coalescing.buffering:
-            if not self.connected and not self.connect(timeout=remaining_time(deadline)):
+            if not self._connected and not self.connect(timeout=remaining_time(deadline)):
                 return False
             events = self._transform_coalescing.force(self._emitter)
             if events and not self._send(events):
@@ -600,7 +548,9 @@ class UsdPublisher:
         self._callbacks.drain()
         if self._closed:
             return SyncUpdate(
-                applied_events=0, submitted_events=0, pending_events=self.pending_event_count,
+                applied_events=0,
+                submitted_events=0,
+                pending_events=self._sender.pending_event_count,
             )
         sent = 0
         if self._sender.connected:

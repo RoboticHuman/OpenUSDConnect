@@ -47,7 +47,7 @@ def raise_if_blocked(client, status: ClientStatus) -> None:
     if status.phase is ClientPhase.CLOSED:
         raise RuntimeError(f"{name} is closed")
     if status.phase is ClientPhase.REJECTED:
-        if client.auth_rejected:
+        if status.auth_rejected:
             raise PermissionError(status.reason or f"{name} authentication rejected")
         raise ConnectionError(status.reason or f"{name} connection rejected")
     if status.phase is ClientPhase.PARKED:
@@ -79,13 +79,10 @@ def submit_and_wait(client, timeout: float | None) -> bool:
         status = client.status
         raise_if_blocked(client, status)
         # flush(0) also releases transform coalescing and must not block the pump.
-        if (
-            status.phase is ClientPhase.READY
-            and client.flush(timeout=0)
-            and not client.has_unsent_changes
-            and not client.pending_event_count
-        ):
-            return True
+        if status.phase is ClientPhase.READY and client.flush(timeout=0):
+            status = client.status
+            if not status.has_unsent_changes and not status.pending_events:
+                return True
         if not _pause_before_poll(deadline):
             return False
 

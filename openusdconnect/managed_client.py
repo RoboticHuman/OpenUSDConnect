@@ -50,7 +50,6 @@ from .receiver import ReceiverThread
 from .recovery import (
     RecoveryArtifact,
     RecoveryError,
-    RecoveryIncident,
     RejectionDisposition,
     TransactionFailure,
 )
@@ -181,6 +180,8 @@ class ManagedClient:
     @property
     def status(self) -> ClientStatus:
         """Current transport, replay, durability, and recovery state."""
+        auth_rejected = self._receiver.auth_rejected or self._sender.auth_rejected
+        rejected = auth_rejected or self._receiver.hello_rejected or self._sender.hello_rejected
         failure = self._sender.transaction_failure
         reason = str(failure) if failure is not None else (
             self._sender.rejection_reason or self._receiver.rejection_reason
@@ -189,13 +190,13 @@ class ManagedClient:
             phase = ClientPhase.CLOSED
         elif failure is not None:
             phase = ClientPhase.RECOVERY_REQUIRED
-        elif self.auth_rejected or self.connection_rejected:
+        elif rejected:
             phase = ClientPhase.REJECTED
         elif self._stage is None:
             phase = ClientPhase.PARKED
         elif self._receiver.connected and not self._receiver.synchronized:
             phase = ClientPhase.REPLAYING
-        elif self.connected and self.synchronized:
+        elif self._connected and self._synchronized:
             phase = ClientPhase.READY
         elif self._started:
             phase = ClientPhase.CONNECTING
@@ -203,18 +204,19 @@ class ManagedClient:
             phase = ClientPhase.OFFLINE
         return ClientStatus(
             phase=phase,
-            connected=self.connected,
-            synchronized=self.synchronized,
+            connected=self._connected,
+            synchronized=self._synchronized,
             receiver_connected=self._receiver.connected,
             sender_connected=self._sender.connected,
-            prepared_events=self.prepared_event_count,
-            pending_events=self.pending_event_count,
+            prepared_events=self._emitter.prepared_event_count,
+            pending_events=self._sender.pending_event_count,
             acknowledged_events_total=self._sender.acknowledged_event_count,
             failure=failure,
             recovery=self._sender.recovery_incident,
             reason=reason,
-            has_unsent_changes=self.has_unsent_changes,
-            edit_target_is_shared=self.edit_target_is_shared,
+            auth_rejected=auth_rejected,
+            has_unsent_changes=self._has_unsent_changes,
+            edit_target_is_shared=self._edit_target_is_shared,
         )
 
     @property
@@ -244,12 +246,12 @@ class ManagedClient:
         return self._authoring_layer
 
     @property
-    def has_unsent_changes(self) -> bool:
+    def _has_unsent_changes(self) -> bool:
         """Whether local notices or a prepared batch still need submission."""
         return not self._closed and self._stage is not None and self._emitter.has_local_changes
 
     @property
-    def edit_target_is_shared(self) -> bool:
+    def _edit_target_is_shared(self) -> bool:
         """Whether edits currently target this client's synchronized authoring layer."""
         return (
             self._stage is not None
@@ -257,11 +259,11 @@ class ManagedClient:
         )
 
     @property
-    def connected(self) -> bool:
+    def _connected(self) -> bool:
         return not self._closed and self._receiver.connected and self._sender.connected
 
     @property
-    def synchronized(self) -> bool:
+    def _synchronized(self) -> bool:
         """Whether the local stage applied replay through the server watermark."""
         return (
             not self._closed
@@ -269,31 +271,6 @@ class ManagedClient:
             and self._receiver.synchronized
             and not self._sender.recovery_required
         )
-
-    @property
-    def recovery_required(self) -> bool:
-        """Whether deterministic rejection requires local-state reconciliation."""
-        return self._sender.recovery_required
-
-    @property
-    def pending_event_count(self) -> int:
-        """Number of submitted events not yet durably acknowledged."""
-        return self._sender.pending_event_count
-
-    @property
-    def transaction_error(self) -> str:
-        """Terminal producer rejection, or an empty string."""
-        return self._sender.transaction_error
-
-    @property
-    def transaction_failure(self) -> TransactionFailure | None:
-        """Structured rejection including its recovery disposition, if any."""
-        return self._sender.transaction_failure
-
-    @property
-    def recovery_incident(self) -> RecoveryIncident | None:
-        """Structured recovery summary for polling and host UI."""
-        return self._sender.recovery_incident
 
     @property
     def recovery_artifact(self) -> RecoveryArtifact | None:
@@ -397,11 +374,6 @@ class ManagedClient:
         finally:
             self._receiver.reconnect = reconnect
 
-    @property
-    def recovery_disposition(self) -> RejectionDisposition | None:
-        """Recovery policy category for the current rejection, if any."""
-        return self._sender.recovery_disposition
-
     def repair_and_resume(self, events: list[dict]) -> int:
         """Replace a recoverable transaction and resume its ordered outbox.
 
@@ -443,20 +415,12 @@ class ManagedClient:
                     return False
             except (PermissionError, ConnectionError):
                 return False
-            if not self.synchronized:
+            if not self._synchronized:
                 return False
             events = self._transform_coalescing.force(self._emitter)
             if events and not self._send(events):
                 return False
         return self._sender.flush(remaining_time(deadline))
-
-    @property
-    def auth_rejected(self) -> bool:
-        return self._receiver.auth_rejected or self._sender.auth_rejected
-
-    @property
-    def connection_rejected(self) -> bool:
-        return self._receiver.hello_rejected or self._sender.hello_rejected
 
     @property
     def last_seq(self) -> int:
@@ -465,11 +429,6 @@ class ManagedClient:
     @property
     def stage_metadata(self) -> StageMetadata:
         return stage_metadata_from_message(self._receiver.stage_metadata)
-
-    @property
-    def prepared_event_count(self) -> int:
-        """Number of events retained after an unsuccessful transport write."""
-        return self._emitter.prepared_event_count
 
     @property
     def pending_asset_dependencies(self) -> tuple[str, ...]:
@@ -569,7 +528,9 @@ class ManagedClient:
         self._callbacks.drain()
         if self._closed:
             return SyncUpdate(
-                applied_events=0, submitted_events=0, pending_events=self.pending_event_count,
+                applied_events=0,
+                submitted_events=0,
+                pending_events=self._sender.pending_event_count,
             )
         if self._stage is None:
             return SyncUpdate(
@@ -593,7 +554,7 @@ class ManagedClient:
         sent = 0
         if self._receiver.connected and not self._sender.connected:
             self._sender.request_connect()
-        if self._sender.connected and self.synchronized and not self._dispatcher.backlog_pending:
+        if self._sender.connected and self._synchronized and not self._dispatcher.backlog_pending:
             sent = self._send(outgoing)
 
         return SyncUpdate(
@@ -632,9 +593,9 @@ class ManagedClient:
         if stage is not None:
             adapter = UsdStageAdapter(stage)
             validate_layered_source(stage)
-        if self.pending_event_count:
+        if self._sender.pending_event_count:
             raise RuntimeError("cannot rebind with submitted work pending; call submit_and_wait()")
-        if self.has_unsent_changes and not discard_unsent:
+        if self._has_unsent_changes and not discard_unsent:
             raise RuntimeError(
                 "cannot rebind with unsent changes; call submit_and_wait() "
                 "or pass discard_unsent=True"

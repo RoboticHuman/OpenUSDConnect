@@ -45,6 +45,7 @@ class ClientStatus:
     failure: TransactionFailure | None = None
     recovery: RecoveryIncident | None = None
     reason: str = ""
+    auth_rejected: bool = False
     has_unsent_changes: bool = False
     deferred_events: int = 0
     deferred_layer_keys: tuple[str, ...] = ()

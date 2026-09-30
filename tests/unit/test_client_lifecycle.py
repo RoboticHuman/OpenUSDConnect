@@ -46,9 +46,12 @@ def test_wait_until_ready_returns_false_only_when_startup_expires():
     ],
 )
 def test_blocked_states_raise_instead_of_timing_out(phase, auth_rejected, failure, expected):
-    status = SimpleNamespace(phase=client_types.ClientPhase(phase), failure=failure, reason="")
+    status = SimpleNamespace(
+        phase=client_types.ClientPhase(phase), failure=failure, reason="",
+        auth_rejected=auth_rejected,
+    )
     with pytest.raises(expected):
-        _client_lifecycle.raise_if_blocked(SimpleNamespace(auth_rejected=auth_rejected), status)
+        _client_lifecycle.raise_if_blocked(SimpleNamespace(), status)
 
 
 def test_queued_notifications_run_on_update_thread_and_bound_each_drain():

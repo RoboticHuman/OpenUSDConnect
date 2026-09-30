@@ -39,6 +39,9 @@ def _patch_net(monkeypatch, started, stopped):
     class _FakeReceiver:
         synchronized = True
         connected = True
+        auth_rejected = False
+        hello_rejected = False
+        rejection_reason = ""
         layered_replay_active = True
         server_instance = "test-server"
         replay_epoch = 0

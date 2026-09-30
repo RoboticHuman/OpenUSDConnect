@@ -233,26 +233,26 @@ def test_status_distinguishes_local_edit_targets_and_unsubmitted_changes(tmp_pat
     stage = _create_root(tmp_path / "root.usda")
     client = SharedStageClient(stage, app_name="authoring-scope", persist_token=False)
     try:
-        assert client.edit_target_is_shared
+        assert client.status.edit_target_is_shared
         stage.SetEditTarget(stage.GetSessionLayer())
         stage.DefinePrim("/Local", "Xform")
         assert not client.status.edit_target_is_shared
-        assert not client.has_unsent_changes
+        assert not client.status.has_unsent_changes
 
         stage.SetEditTarget(stage.GetRootLayer())
         stage.DefinePrim("/Shared", "Xform")
         assert client.status.edit_target_is_shared
         assert client.status.has_unsent_changes
-        assert client.prepared_event_count == 0
-        assert client.pending_event_count == 0
+        assert client.status.prepared_events == 0
+        assert client.status.pending_events == 0
 
         client._started = True
         result = client.update()
         assert client.status.has_unsent_changes
         assert result.submitted_events == 0
-        assert client.prepared_event_count > 0
+        assert client.status.prepared_events > 0
         client.close()
-        assert not client.has_unsent_changes
+        assert not client.status.has_unsent_changes
         assert not client.status.has_unsent_changes
     finally:
         client.close()
@@ -310,10 +310,10 @@ def test_unresolved_layer_events_apply_after_dependency_refresh(tmp_path):
             "removed": False,
         }
         assert not client._apply_record(ReceivedEvent(seq=2, event=event, layer_key=child_key))
-        assert client.deferred_event_count == 1
+        assert client.status.deferred_events == 1
         client._receiver.connected = True
         client._receiver._synchronized_event.set()
-        assert client.synchronized
+        assert client.status.synchronized
         assert client.status.deferred_events == 1
         assert client.status.deferred_layer_keys == (child_key,)
 
@@ -323,7 +323,7 @@ def test_unresolved_layer_events_apply_after_dependency_refresh(tmp_path):
         mapped = client.refresh_layer_graph()
 
         assert mapped == (child_key,)
-        assert client.deferred_event_count == 0
+        assert client.status.deferred_events == 0
         assert client.status.deferred_events == 0
         assert client.status.deferred_layer_keys == ()
         assert late.GetAttributeAtPath("/Late.value").default == 8
@@ -386,13 +386,13 @@ def test_content_apply_failure_preserves_layer_and_tracker_until_retry(
         assert stage.GetEditTarget().GetLayer() == stage.GetSessionLayer()
         assert accepted == []
         assert applied_batches == [[record.event for record in records]]
-        assert client.deferred_event_count == (len(records) if deferred else 0)
+        assert client.status.deferred_events == (len(records) if deferred else 0)
 
         monkeypatch.setattr(client_module, "apply_events", original_apply)
         assert apply_records() == len(records)
         assert accepted == [record.event for record in records]
         assert root.ExportToString() == source.ExportToString()
-        assert client.deferred_event_count == 0
+        assert client.status.deferred_events == 0
     finally:
         client.close()
 
@@ -1032,7 +1032,7 @@ def test_shared_rebind_recovery_resumes_after_replacement_replay_timeout(
             client.recover_use_server(clean_stage=fresh_stage)
 
         assert client.stage is fresh_stage
-        assert client.recovery_stage_pending
+        assert client.status.recovery_stage_pending
         assert client.status.recovery_stage_pending
         assert client.status.phase is ClientPhase.RECOVERY_REQUIRED
         assert sender.abandoned_session_ids == []
@@ -1058,7 +1058,7 @@ def test_shared_rebind_recovery_resumes_after_replacement_replay_timeout(
             assert client.update().applied_events == 1
             assert fresh_stage.GetPrimAtPath("/BetweenAttempts")
             assert client.last_seq == 4
-            assert client.recovery_stage_pending
+            assert client.status.recovery_stage_pending
             assert client.status.phase is ClientPhase.RECOVERY_REQUIRED
 
         if after_timeout == "local_edits":
@@ -1070,7 +1070,7 @@ def test_shared_rebind_recovery_resumes_after_replacement_replay_timeout(
             assert sender.recovery_required
         elif after_timeout == "different_incident":
             sender.recovery_artifact = _stale_artifact("layer:root")
-            assert not client.recovery_stage_pending
+            assert not client.status.recovery_stage_pending
             with pytest.raises(RecoveryError) as error:
                 client.resume_recovery()
             assert error.value.code == "no_pending_recovery_stage"
@@ -1088,7 +1088,7 @@ def test_shared_rebind_recovery_resumes_after_replacement_replay_timeout(
             assert result.rejected_snapshots[0].GetPrimAtPath("/Rejected")
             assert result.checkpoint_seq == (5 if after_timeout == "update" else 4)
             assert client.stage is fresh_stage
-            assert not client.recovery_stage_pending
+            assert not client.status.recovery_stage_pending
             assert not client.status.recovery_stage_pending
             assert not sender.recovery_required
     finally:
@@ -1222,7 +1222,7 @@ def test_shared_budgeted_update_holds_local_edits_until_backlog_applied(
 
         held = client.update(max_messages=2)
         assert (held.applied_events, held.submitted_events) == (2, 0)
-        assert client.has_unsent_changes
+        assert client.status.has_unsent_changes
         published = client.update(max_messages=2)
         assert published.applied_events == 1
         assert published.submitted_events > 0

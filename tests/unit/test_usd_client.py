@@ -238,14 +238,12 @@ def test_receiver_surfaces_and_acknowledges_native_scene_rebuild():
     receiver._receiver.connected = True
     receiver._receiver._synchronized_event.set()
     try:
-        assert receiver.native_scene_rebuild_required
         assert receiver.status.phase is ClientPhase.RECOVERY_REQUIRED
         assert "must be rebuilt" in receiver.status.reason
 
         receiver.acknowledge_native_scene_rebuilt()
 
         assert state.acknowledgements == 1
-        assert not receiver.native_scene_rebuild_required
         assert receiver.status.phase is ClientPhase.READY
     finally:
         receiver.close()
@@ -380,17 +378,17 @@ def test_managed_metadata_only_changes_count_as_unsent_work(ready_managed_client
     client, _sender = ready_managed_client
     with Usd.EditContext(client.stage, client.stage.GetRootLayer()):
         client.stage.SetFramesPerSecond(48)
-    assert client.has_unsent_changes
+    assert client.status.has_unsent_changes
     # Evaluated even when the authoring layer does not own the opinion.
     client.update()
-    assert not client.has_unsent_changes
+    assert not client.status.has_unsent_changes
 
     client.stage.GetRootLayer().framesPerSecond = 24
-    assert client.has_unsent_changes
+    assert client.status.has_unsent_changes
     replacement = Usd.Stage.CreateInMemory()
     replacement.SetFramesPerSecond(30)
     client.rebind_stage(replacement, discard_unsent=True)
-    assert not client.has_unsent_changes
+    assert not client.status.has_unsent_changes
     assert client.update().submitted_events == 0
 
 
@@ -426,15 +424,15 @@ def test_managed_snapshot_waits_for_replay_without_losing_newer_edits(
     assert client.publish_current_edit_target() == 0
     assert starts == [True]
     assert sender.batches == []
-    assert client.has_unsent_changes
+    assert client.status.has_unsent_changes
     with pytest.raises(RuntimeError, match="earlier publisher batch"):
         client.publish_current_edit_target()
     value.Set(2)
     client._receiver._synchronized_event.set()
     assert client.update().submitted_events > 0
-    assert client.has_unsent_changes
+    assert client.status.has_unsent_changes
     assert client.update().submitted_events > 0
-    assert not client.has_unsent_changes
+    assert not client.status.has_unsent_changes
     values = [
         event["attrs"]["radius"]
         for batch in sender.batches for event in batch
@@ -457,11 +455,11 @@ def test_managed_rebind_requires_explicit_unsent_discard(
     with pytest.raises(RuntimeError, match="unsent changes"):
         client.rebind_stage(replacement)
     assert client.stage is old_stage
-    assert client.has_unsent_changes
+    assert client.status.has_unsent_changes
     client.rebind_stage(replacement, discard_unsent=True)
     assert client.stage is replacement
-    assert not client.has_unsent_changes
-    assert client.edit_target_is_shared is not park
+    assert not client.status.has_unsent_changes
+    assert client.status.edit_target_is_shared is not park
 
 
 def test_managed_rebind_cannot_discard_submitted_work(ready_managed_client):
@@ -477,11 +475,11 @@ def test_managed_rebind_cannot_discard_submitted_work(ready_managed_client):
 def test_managed_parked_client_is_not_ready(ready_managed_client):
     client, _sender = ready_managed_client
     client.rebind_stage(None)
-    assert client.connected
-    assert not client.synchronized
+    assert client.status.connected
+    assert not client.status.synchronized
     assert client.status.phase is ClientPhase.PARKED
     assert not client.status.synchronized
-    assert not client.edit_target_is_shared
+    assert not client.status.edit_target_is_shared
     with pytest.raises(RuntimeError, match="no bound stage"):
         client.wait_until_ready()
     with pytest.raises(RuntimeError, match="no bound stage"):
@@ -562,7 +560,7 @@ def test_managed_use_server_preserves_and_clears_owned_authoring_layer(reconnect
         assert sender.abandoned_session_ids == ["replacement-session"]
         assert sender.connected is reconnects
         assert sender.connect_timeouts
-        assert client.recovery_incident is None
+        assert client.status.recovery is None
         assert client.last_recovery_result is result
         client.dismiss_recovery_result()
         assert client.last_recovery_result is None
@@ -737,7 +735,7 @@ def test_receiver_fails_closed_when_layered_replay_is_not_negotiated():
     with pytest.raises(RuntimeError, match="required layered replay"):
         receiver.update()
 
-    assert not receiver.connected
+    assert not receiver.status.connected
 
 
 def test_publisher_retains_exact_batch_until_send_succeeds():
@@ -760,12 +758,12 @@ def test_publisher_retains_exact_batch_until_send_succeeds():
         value.Set(1)
 
         assert publisher.update().submitted_events == 0
-        assert publisher.prepared_event_count > 0
+        assert publisher.status.prepared_events > 0
 
         value.Set(2)
         assert publisher.update().submitted_events > 0
         assert sender.batches[1] is sender.batches[0]
-        assert publisher.prepared_event_count == 0
+        assert publisher.status.prepared_events == 0
 
         assert publisher.update().submitted_events > 0
         assert sender.batches[2] is not sender.batches[1]
@@ -809,7 +807,7 @@ def test_publisher_coalesces_latest_default_time_transform_before_submission(mon
         translate.Set((3, 0, 0))
         assert publisher.update().submitted_events == 0
         assert len(sender.batches) == 1
-        assert publisher.prepared_event_count == 1
+        assert publisher.status.prepared_events == 1
 
         clock[0] = 0.11
         assert publisher.update().submitted_events == 1
@@ -904,12 +902,12 @@ def test_managed_client_gates_new_edits_until_replay_is_applied_but_not_on_acks(
         replaying = client.update()
         assert replaying.submitted_events == 0
         assert sender.batches == []
-        assert not client.synchronized
+        assert not client.status.synchronized
 
         client._receiver._synchronized_event.set()
         first = client.update()
         assert first.submitted_events > 0
-        assert client.synchronized
+        assert client.status.synchronized
         assert sender.pending_event_count == first.submitted_events
 
         value.Set(2)
@@ -996,8 +994,8 @@ def test_publisher_does_not_consume_edits_while_disconnected():
         stage.DefinePrim("/World/Thing", "Xform")
 
         assert publisher.update().submitted_events == 0
-        assert publisher.prepared_event_count == 0
-        assert publisher.has_unsent_changes
+        assert publisher.status.prepared_events == 0
+        assert publisher.status.has_unsent_changes
         assert sender.connect_requests == 1
 
         sender.connected = True
@@ -1066,7 +1064,7 @@ def test_publisher_requires_a_prepared_batch_to_be_retried_before_snapshot():
     try:
         stage.DefinePrim("/World/Thing", "Xform")
         assert publisher.update().submitted_events == 0
-        assert publisher.prepared_event_count > 0
+        assert publisher.status.prepared_events > 0
 
         with pytest.raises(RuntimeError, match=r"call update\(\)"):
             publisher.publish_current_edit_target()
@@ -1103,11 +1101,11 @@ def test_current_edit_target_publication_is_retained_for_update_retry():
     publisher._sender = sender
     try:
         assert publisher.publish_current_edit_target() == 0
-        assert publisher.prepared_event_count > 0
+        assert publisher.status.prepared_events > 0
 
         assert publisher.update().submitted_events > 0
         assert sender.batches[1] is sender.batches[0]
-        assert publisher.prepared_event_count == 0
+        assert publisher.status.prepared_events == 0
     finally:
         publisher.close()
 
@@ -1172,8 +1170,8 @@ def test_managed_budgeted_update_holds_local_edits_until_backlog_applied(
 
     held = client.update(max_messages=2)
     assert (held.applied_events, held.submitted_events) == (2, 0)
-    assert client.has_unsent_changes
+    assert client.status.has_unsent_changes
     published = client.update(max_messages=2)
     assert published.applied_events == 1
     assert published.submitted_events > 0
-    assert not client.has_unsent_changes
+    assert not client.status.has_unsent_changes

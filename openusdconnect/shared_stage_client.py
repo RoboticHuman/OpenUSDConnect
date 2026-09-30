@@ -242,6 +242,8 @@ class SharedStageClient:
     @property
     def status(self) -> ClientStatus:
         """Current transport, replay, durability, and recovery state."""
+        auth_rejected = self._receiver.auth_rejected or self._sender.auth_rejected
+        rejected = auth_rejected or self._receiver.hello_rejected or self._sender.hello_rejected
         failure = self._sender.transaction_failure
         reason = str(failure) if failure is not None else (
             self._sender.rejection_reason or self._receiver.rejection_reason
@@ -250,11 +252,11 @@ class SharedStageClient:
             phase = ClientPhase.CLOSED
         elif failure is not None:
             phase = ClientPhase.RECOVERY_REQUIRED
-        elif self.auth_rejected or self.connection_rejected:
+        elif rejected:
             phase = ClientPhase.REJECTED
         elif self._receiver.connected and not self._receiver.synchronized:
             phase = ClientPhase.REPLAYING
-        elif self.connected and self.synchronized:
+        elif self._connected and self._synchronized:
             phase = ClientPhase.READY
         elif self._started:
             phase = ClientPhase.CONNECTING
@@ -262,29 +264,30 @@ class SharedStageClient:
             phase = ClientPhase.OFFLINE
         return ClientStatus(
             phase=phase,
-            connected=self.connected,
-            synchronized=self.synchronized,
+            connected=self._connected,
+            synchronized=self._synchronized,
             receiver_connected=self._receiver.connected,
             sender_connected=self._sender.connected,
-            prepared_events=self.prepared_event_count,
-            pending_events=self.pending_event_count,
+            prepared_events=self._tracker.prepared_event_count,
+            pending_events=self._sender.pending_event_count,
             acknowledged_events_total=self._sender.acknowledged_event_count,
             failure=failure,
             recovery=self._sender.recovery_incident,
             reason=reason,
-            has_unsent_changes=self.has_unsent_changes,
-            deferred_events=self.deferred_event_count,
-            deferred_layer_keys=self.deferred_layer_keys,
-            edit_target_is_shared=self.edit_target_is_shared,
-            recovery_stage_pending=self.recovery_stage_pending,
+            auth_rejected=auth_rejected,
+            has_unsent_changes=self._has_unsent_changes,
+            deferred_events=len(self._pending_records),
+            deferred_layer_keys=self._deferred_layer_keys,
+            edit_target_is_shared=self._edit_target_is_shared,
+            recovery_stage_pending=self._recovery_stage_pending,
         )
 
     @property
-    def connected(self) -> bool:
+    def _connected(self) -> bool:
         return not self._closed and self._receiver.connected and self._sender.connected
 
     @property
-    def synchronized(self) -> bool:
+    def _synchronized(self) -> bool:
         """Whether the local layer graph applied the server replay watermark."""
         return (
             not self._closed
@@ -294,25 +297,12 @@ class SharedStageClient:
         )
 
     @property
-    def auth_rejected(self) -> bool:
-        return self._receiver.auth_rejected or self._sender.auth_rejected
-
-    @property
-    def connection_rejected(self) -> bool:
-        return self._receiver.hello_rejected or self._sender.hello_rejected
-
-    @property
-    def pending_event_count(self) -> int:
-        """Number of submitted events not yet durably acknowledged."""
-        return self._sender.pending_event_count
-
-    @property
-    def has_unsent_changes(self) -> bool:
+    def _has_unsent_changes(self) -> bool:
         """Whether tracked local edits have not yet entered the sender outbox."""
         return not self._closed and self._tracker.has_local_changes
 
     @property
-    def edit_target_is_shared(self) -> bool:
+    def _edit_target_is_shared(self) -> bool:
         """Whether edits to the current edit target are synchronized."""
         target = self._stage.GetEditTarget().GetLayer()
         return target in self._stage.GetLayerStack(includeSessionLayers=False)
@@ -323,7 +313,7 @@ class SharedStageClient:
         return self._sender.recovery_artifact
 
     @property
-    def recovery_stage_pending(self) -> bool:
+    def _recovery_stage_pending(self) -> bool:
         """Whether a replacement stage is bound but recovery is incomplete."""
         return (
             self._recovery_rebind_artifact is not None
@@ -432,7 +422,7 @@ class SharedStageClient:
         Rejected snapshots captured by the original attempt are preserved.
         """
         self._require_recoverable_artifact()
-        if not self.recovery_stage_pending:
+        if not self._recovery_stage_pending:
             raise RecoveryError(
                 "no_pending_recovery_stage",
                 "no replacement stage is waiting for recovery to complete",
@@ -485,7 +475,7 @@ class SharedStageClient:
         if clean_stage is self._stage:
             hint = (
                 "; call resume_recovery() to continue the pending replacement"
-                if self.recovery_stage_pending
+                if self._recovery_stage_pending
                 else ""
             )
             raise RecoveryError(
@@ -679,15 +669,7 @@ class SharedStageClient:
         return self._last_seq
 
     @property
-    def prepared_event_count(self) -> int:
-        return self._tracker.prepared_event_count
-
-    @property
-    def deferred_event_count(self) -> int:
-        return len(self._pending_records)
-
-    @property
-    def deferred_layer_keys(self) -> tuple[str, ...]:
+    def _deferred_layer_keys(self) -> tuple[str, ...]:
         return tuple(dict.fromkeys(record.layer_key or "" for record in self._pending_records))
 
     def is_layer_reachable(self, layer: Sdf.Layer) -> bool:
@@ -766,7 +748,7 @@ class SharedStageClient:
             return SyncUpdate(
                 applied_events=0,
                 submitted_events=0,
-                pending_events=self.pending_event_count,
+                pending_events=self._sender.pending_event_count,
             )
         self._tracker.prepare_local_changes()
         try:
@@ -779,7 +761,7 @@ class SharedStageClient:
         if (
             self._sender.connected
             and self._graph.ready
-            and self.synchronized
+            and self._synchronized
             and not self._backlog_pending
         ):
             while routed := self._tracker.next_routed_batch():

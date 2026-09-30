@@ -54,15 +54,15 @@ def test_finish_includes_unprepared_edits_and_waits_for_server_commit(tmp_path, 
             assert client.status.edit_target_is_shared
 
             stage.GetAttributeAtPath("/World.xformOp:translate").Set(Gf.Vec3d(2, 3, 4))
-            assert client.has_unsent_changes
             assert client.status.has_unsent_changes
-            assert client.prepared_event_count == 0
-            assert client.pending_event_count == 0
+            assert client.status.has_unsent_changes
+            assert client.status.prepared_events == 0
+            assert client.status.pending_events == 0
             assert client.flush(timeout=0)  # ACK-only flush has no submitted work yet.
 
             assert client.submit_and_wait(timeout=5)
-            assert not client.has_unsent_changes
-            assert client.pending_event_count == 0
+            assert not client.status.has_unsent_changes
+            assert client.status.pending_events == 0
             assert client.status.acknowledged_events_total > 0
             assert server.sync_server.stage.GetAttributeAtPath(
                 "/World.xformOp:translate"
@@ -99,7 +99,7 @@ def test_directional_clients_share_the_blocking_helpers(tmp_path):
             author.GetAttributeAtPath("/World.xformOp:translate").Set(Gf.Vec3d(2, 3, 4))
             assert publisher.status.has_unsent_changes
             assert publisher.submit_and_wait(timeout=5)
-            assert not publisher.has_unsent_changes
+            assert not publisher.status.has_unsent_changes
 
             received = viewer.GetAttributeAtPath("/World.xformOp:translate")
             deadline = time.monotonic() + 5

@@ -263,7 +263,7 @@ def status() -> dict:
         "running": True,
         "host": f"{_receiver.receiver.host}:{_receiver.receiver.port}",
         "client_id": _receiver.receiver.client_id or "",
-        "receiver_connected": _receiver.connected,
+        "receiver_connected": _receiver.status.connected,
         "last_seq": _receiver.last_seq,
         "pending_asset_dependencies": list(_receiver.pending_asset_dependencies),
         "translate_openpbr": _translate_openpbr,

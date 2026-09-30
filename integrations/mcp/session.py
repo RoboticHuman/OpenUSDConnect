@@ -169,7 +169,7 @@ class ConnectionSession:
         """Send one txn and drain the mirror until it reflects the write."""
         if not self.connected:
             raise ToolError("not connected, call usd_connect first", code="not_connected")
-        if self.receiver is not None and not self.receiver.synchronized:
+        if self.receiver is not None and not self.receiver.status.synchronized:
             if not self._drain_initial_replay():
                 raise ToolError(
                     "the mirror is still applying the initial replay",
@@ -208,7 +208,7 @@ class ConnectionSession:
                 return False
             if checkpoint is not None:
                 if (
-                    self.receiver.synchronized
+                    self.receiver.status.synchronized
                     and self.receiver.server_instance == checkpoint.server_instance
                     and self.receiver.replay_epoch == checkpoint.epoch
                     and self.receiver.last_seq >= checkpoint.head_seq
@@ -225,10 +225,10 @@ class ConnectionSession:
         if self.receiver is None:
             return False
         deadline = time.monotonic() + self.config.read_after_write_timeout_s
-        while not self.receiver.synchronized and time.monotonic() < deadline:
+        while not self.receiver.status.synchronized and time.monotonic() < deadline:
             if self.pump() == 0:
                 time.sleep(0.005)
-        return self.receiver.synchronized
+        return self.receiver.status.synchronized
 
     def pump(self) -> int:
         """Non-blocking drain so introspection reflects recent foreign edits."""
@@ -322,7 +322,7 @@ class ConnectionSession:
 
     def status(self) -> dict:
         if self.receiver is not None:
-            if not self.receiver.synchronized:
+            if not self.receiver.status.synchronized:
                 self.pump()
         return {
             "ok": True,
@@ -332,7 +332,7 @@ class ConnectionSession:
             "client_id": self.config.client_id,
             "department": self.config.department,
             "mirror_enabled": self.config.mirror_enabled,
-            "mirror_synchronized": bool(self.receiver and self.receiver.synchronized),
+            "mirror_synchronized": bool(self.receiver and self.receiver.status.synchronized),
             "mirror_prim_count": self._mirror_prim_count(),
             "last_seq": self.receiver.last_seq if self.receiver else 0,
             "auth_rejected": self.auth_rejected,
