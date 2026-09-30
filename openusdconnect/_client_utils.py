@@ -49,40 +49,54 @@ def resolve_client_token(
     return load_token(host, port)
 
 
-def client_token_callback(
-    host: str,
-    port: int,
-    persist: bool,
-) -> Callable[[str], None] | None:
-    if not persist:
-        return None
-    return lambda token: save_token(host, port, token)
+class ClientCredential:
+    """The one token both roles of a client present, persisted when enabled."""
 
+    def __init__(
+        self,
+        host: str,
+        port: int,
+        token: str | None,
+        persist: bool,
+        on_issued: Callable[[str], None] | None = None,
+    ):
+        self._host = host
+        self._port = port
+        self._persist = persist
+        self._on_issued = on_issued
+        self.token = resolve_client_token(host, port, token, persist)
 
-def client_token_handlers(
-    host: str,
-    port: int,
-    persist: bool,
-    on_token_issued: Callable[[str], None] | None,
-) -> Callable[[str], None] | None:
-    """Return a callback that chains *on_token_issued* with disk persistence."""
-    persist_cb = client_token_callback(host, port, persist)
-    if on_token_issued is None or persist_cb is None:
-        return on_token_issued or persist_cb
+    def current(self) -> str | None:
+        """The token for a connection attempt, loading a stored one if none is known."""
+        if self.token is None and self._persist:
+            stored = load_token(self._host, self._port)
+            # A handshake on another connection can issue a token meanwhile.
+            if self.token is None:
+                self.token = stored
+        return self.token
 
-    def _both(token: str) -> None:
-        persist_cb(token)
-        on_token_issued(token)
+    def issued(self, token: str) -> None:
+        """Adopt a server-issued token, persist it, then notify the host."""
+        self.token = token
+        if self._persist:
+            save_token(self._host, self._port, token)
+        if self._on_issued is not None:
+            self._on_issued(token)
 
-    return _both
+    def endpoint_kwargs(self) -> dict:
+        """Keyword arguments that make an endpoint present and report this token."""
+        return {
+            "token": self.token,
+            "token_provider": self.current,
+            "on_token_issued": self.issued,
+        }
 
 
 __all__ = [
     "ClientPhase",
     "ClientStatus",
+    "ClientCredential",
     "client_origin",
-    "client_token_callback",
-    "client_token_handlers",
     "require_app_name",
     "resolve_client_token",
     "SyncUpdate",

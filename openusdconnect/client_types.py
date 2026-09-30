@@ -23,15 +23,14 @@ class ClientPhase(StrEnum):
 
 @dataclass(frozen=True, slots=True)
 class ClientStatus:
-    """Immutable client state suitable for application and UI polling.
+    """Immutable client state for UI polling, taken on the stage-owning thread.
 
-    A directional connection is ``None`` when that role is not present.
-    ``acknowledged_events_total`` is cumulative for the lifetime of the
-    client instance, including producer-session recovery. Connection and
-    replay readiness do not imply that every submitted edit is durable.
-
-    ``edit_target_is_shared`` is ``None`` for clients that publish from any edit
-    target or do not publish.
+    ``connected`` means every role the client has is connected; a
+    directional field is ``None`` when that role is absent.
+    ``acknowledged_events_total`` is cumulative for the lifetime of the client
+    instance. Connection and replay readiness do not imply that every
+    submitted edit is durable. ``edit_target_is_published`` is ``None`` for
+    clients that publish from any edit target or do not publish.
     """
 
     phase: ClientPhase
@@ -49,7 +48,7 @@ class ClientStatus:
     has_unsent_changes: bool = False
     deferred_events: int = 0
     deferred_layer_keys: tuple[str, ...] = ()
-    edit_target_is_shared: bool | None = None
+    edit_target_is_published: bool | None = None
     recovery_stage_pending: bool = False
 
     @property
@@ -58,7 +57,7 @@ class ClientStatus:
         return (
             self.phase is ClientPhase.READY
             and self.sender_connected is not None
-            and self.edit_target_is_shared is not False
+            and self.edit_target_is_published is not False
         )
 
 

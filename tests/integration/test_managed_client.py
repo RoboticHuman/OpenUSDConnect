@@ -442,7 +442,6 @@ def test_managed_client_shares_reissued_tokens(tmp_path, background, first_recon
                 assert not client.sender.auth_rejected
             assert sender_tokens[0] != old_token
             assert sender_tokens[1] == sender_tokens[0]
-            assert client.receiver.token == sender_tokens[0]
 
             # The other connection must also authenticate with the replacement.
             client.receiver.request_replay_from(1)

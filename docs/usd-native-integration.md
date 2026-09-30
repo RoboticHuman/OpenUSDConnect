@@ -109,7 +109,7 @@ GUI hosts drive the client from a timer instead of waiting:
 client = ManagedClient(stage, app_name="my-editor").start()
 
 def on_timer():
-    if client.status.edit_target_is_shared:  # ManagedClient publishes only its authoring layer
+    if client.status.edit_target_is_published:  # ManagedClient publishes only its authoring layer
         client.update(max_messages=256)
     set_editing_enabled(client.status.can_author)
 ```

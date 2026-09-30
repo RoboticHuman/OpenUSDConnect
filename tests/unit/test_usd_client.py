@@ -23,7 +23,7 @@ from openusdconnect.recovery import (
     make_recovery_incident,
 )
 from openusdconnect.usd_client import UsdPublisher, UsdReceiver
-from tests.helpers import RecordingObserver
+from tests.helpers import RecordingObserver, force_handshake
 
 
 class _SenderStub:
@@ -310,10 +310,7 @@ def test_managed_status_exposes_partial_connection_and_event_counts():
     sender.pending_event_count = 4
     sender.acknowledged_event_count = 7
     client._sender = sender
-    client._started = True
-    client._receiver.connected = True
-    client._receiver.layered_replay_active = True
-    client._receiver._synchronized_event.set()
+    force_handshake(client, synchronized=True)
     try:
         status = client.status
         assert status.phase is ClientPhase.CONNECTING
@@ -337,10 +334,7 @@ def ready_managed_client(monkeypatch):
     )
     sender = _SenderStub([True] * 10)
     client._sender = sender
-    client._started = True
-    client._receiver.connected = True
-    client._receiver.layered_replay_active = True
-    client._receiver._synchronized_event.set()
+    force_handshake(client, synchronized=True)
     monkeypatch.setattr(client._dispatcher, "drain_and_apply", lambda max_messages=None: 0)
     try:
         yield client, sender
@@ -448,7 +442,7 @@ def test_managed_rebind_requires_explicit_unsent_discard(
     client.rebind_stage(replacement, discard_unsent=True)
     assert client.stage is replacement
     assert not client.status.has_unsent_changes
-    assert client.status.edit_target_is_shared is not park
+    assert client.status.edit_target_is_published is not park
 
 
 def test_managed_rebind_cannot_discard_submitted_work(ready_managed_client):
@@ -468,7 +462,7 @@ def test_managed_parked_client_is_not_ready(ready_managed_client):
     assert not client.status.synchronized
     assert client.status.phase is ClientPhase.PARKED
     assert not client.status.synchronized
-    assert not client.status.edit_target_is_shared
+    assert not client.status.edit_target_is_published
     with pytest.raises(RuntimeError, match="no bound stage"):
         client.wait_until_ready()
     with pytest.raises(RuntimeError, match="no bound stage"):
@@ -533,11 +527,8 @@ def test_managed_use_server_preserves_and_clears_owned_authoring_layer(reconnect
     sender.recovery_incident = make_recovery_incident(artifact)
     sender.connect_result = reconnects
     client._sender = sender
-    client._started = True
-    client._refresh_recovery_checkpoint = lambda timeout: None
-    client._receiver.connected = True
-    client._receiver.layered_replay_active = True
-    client._receiver._synchronized_event.set()
+    client._replay_to_fresh_checkpoint = lambda timeout: None
+    force_handshake(client, synchronized=True)
     try:
         assert client.recovery_artifact is artifact
         result = client.recover_use_server(session_id="replacement-session")
@@ -567,10 +558,7 @@ def test_managed_client_rejects_an_edit_target_switch_before_publishing():
     )
     sender = _SenderStub([])
     client._sender = sender
-    client._started = True
-    client._receiver.connected = True
-    client._receiver.layered_replay_active = True
-    client._receiver._synchronized_event.set()
+    force_handshake(client, synchronized=True)
     try:
         stage.SetEditTarget(Usd.EditTarget(stage.GetRootLayer()))
         stage.DefinePrim("/World/WrongLayer", "Xform")
@@ -599,11 +587,8 @@ def test_managed_use_server_refuses_an_edit_target_switch():
     sender = _SenderStub([])
     sender.recovery_required = True
     client._sender = sender
-    client._started = True
-    client._refresh_recovery_checkpoint = lambda timeout: None
-    client._receiver.connected = True
-    client._receiver.layered_replay_active = True
-    client._receiver._synchronized_event.set()
+    client._replay_to_fresh_checkpoint = lambda timeout: None
+    force_handshake(client, synchronized=True)
     try:
         with pytest.raises(RecoveryError, match="edit target changed") as error:
             client.recover_use_server()
@@ -633,11 +618,8 @@ def test_managed_use_server_restores_local_layer_when_session_abandonment_fails(
 
     sender.abandon_rejected_session = _fail_abandonment
     client._sender = sender
-    client._started = True
-    client._refresh_recovery_checkpoint = lambda timeout: None
-    client._receiver.connected = True
-    client._receiver.layered_replay_active = True
-    client._receiver._synchronized_event.set()
+    client._replay_to_fresh_checkpoint = lambda timeout: None
+    force_handshake(client, synchronized=True)
     try:
         with pytest.raises(RuntimeError, match="injected abandonment failure"):
             client.recover_use_server()
@@ -674,7 +656,7 @@ def test_managed_use_server_retains_result_when_emitter_reattach_fails():
     sender.recovery_incident = make_recovery_incident(artifact)
     client._sender = sender
     client._started = True
-    client._refresh_recovery_checkpoint = lambda timeout: None
+    client._replay_to_fresh_checkpoint = lambda timeout: None
 
     def _fail_reattach(stage):
         raise RuntimeError("injected emitter reattach failure")
@@ -708,23 +690,6 @@ def test_receiver_rejects_a_stage_that_already_contains_live_state(
 
     with pytest.raises(ValueError, match="original base stage"):
         UsdReceiver(stage, app_name="test-receiver", persist_token=False)
-
-
-def test_receiver_fails_closed_when_layered_replay_is_not_negotiated():
-    receiver = UsdReceiver(
-        Usd.Stage.CreateInMemory(),
-        app_name="test-receiver",
-        persist_token=False,
-        reconnect=False,
-    )
-    receiver._started = True
-    receiver._receiver.connected = True
-    receiver._receiver.layered_replay_active = False
-
-    with pytest.raises(RuntimeError, match="required layered replay"):
-        receiver.update()
-
-    assert not receiver.status.connected
 
 
 def test_publisher_retains_exact_batch_until_send_succeeds():
@@ -879,9 +844,7 @@ def test_managed_client_gates_new_edits_until_replay_is_applied_but_not_on_acks(
     )
     sender = _SenderStub([True, True])
     client._sender = sender
-    client._started = True
-    client._receiver.connected = True
-    client._receiver.layered_replay_active = True
+    force_handshake(client)
     monkeypatch.setattr(client, "_connect_sender", lambda: None)
     try:
         prim = stage.DefinePrim("/World/Thing", "Xform")
@@ -927,10 +890,7 @@ def test_managed_client_uses_the_same_pre_submission_transform_window(monkeypatc
     xformable.AddScaleOp(UsdGeom.XformOp.PrecisionDouble)
     sender = _SenderStub([True, True])
     client._sender = sender
-    client._started = True
-    client._receiver.connected = True
-    client._receiver.layered_replay_active = True
-    client._receiver._synchronized_event.set()
+    force_handshake(client, synchronized=True)
     monkeypatch.setattr(client, "_connect_sender", lambda: None)
     try:
         translate.Set((1, 0, 0))

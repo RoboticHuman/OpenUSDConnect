@@ -51,7 +51,7 @@ def test_submit_and_wait_publishes_unprepared_edits_and_waits_for_commit(tmp_pat
         ) as client:
             assert client.wait_until_ready(timeout=5)
             assert client.status.phase is ClientPhase.READY
-            assert client.status.edit_target_is_shared
+            assert client.status.edit_target_is_published
 
             stage.GetAttributeAtPath("/World.xformOp:translate").Set(Gf.Vec3d(2, 3, 4))
             assert client.status.has_unsent_changes

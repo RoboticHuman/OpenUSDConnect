@@ -3,7 +3,8 @@
 from pxr import Usd
 
 from openusdconnect import AppliedBatch, ClientObserver, PlaybackClaim, PlaybackState, UsdReceiver
-from openusdconnect.client_observer import observer_callbacks
+from openusdconnect._observer_hooks import ObserverHooks, observer_hooks
+from openusdconnect.codec import encode_message
 from openusdconnect.protocol_constants import K_ENSURE_PRIM, K_SET_REFERENCE, K_SET_VISIBILITY
 from tests.helpers import RecordingObserver
 
@@ -27,12 +28,14 @@ def test_only_overridden_methods_are_wired():
         def on_applied(self, batch):
             pass
 
-    assert observer_callbacks(None, lambda cb: cb, lambda: 0) == {}
-    assert observer_callbacks(ClientObserver(), lambda cb: cb, lambda: 0) == {}
-    assert set(observer_callbacks(Paths(), lambda cb: cb, lambda: 0)) == {"on_applied_events"}
+    assert observer_hooks(None, lambda cb: cb) == ObserverHooks()
+    assert observer_hooks(ClientObserver(), lambda cb: cb) == ObserverHooks()
+    hooks = observer_hooks(Paths(), lambda cb: cb)
+    assert hooks.on_applied is not None
+    assert set(hooks.receiver_callbacks().values()) == {None}
 
 
-def test_receiver_delivers_applied_batches_with_their_sequence():
+def test_receiver_update_delivers_applied_batches_with_the_drained_sequence(monkeypatch):
     batches = []
 
     class Record(ClientObserver):
@@ -43,17 +46,25 @@ def test_receiver_delivers_applied_batches_with_their_sequence():
         Usd.Stage.CreateInMemory(), app_name="observer-batches", persist_token=False,
         reconnect=False, observer=Record(),
     )
+    frames = [
+        encode_message({
+            "type": "event", "seq": seq,
+            "event": {"k": K_ENSURE_PRIM, "prim": prim, "typeName": "Xform"},
+        })
+        for seq, prim in ((1, "/World"), (2, "/World/A"))
+    ]
+    monkeypatch.setattr(client.receiver, "drain_queue", lambda max_messages=None: frames)
+    client._started = True
     try:
-        client.dispatcher._applying_seq = 4
-        client.dispatcher._apply([{"k": K_ENSURE_PRIM, "prim": "/World", "typeName": "Xform"}])
-        assert batches == [(4, ("/World",))]
+        assert client.update().applied_events == 2
+        assert batches == [(2, ("/World", "/World/A"))]
     finally:
         client.close()
 
 
 def test_notification_payloads_are_typed():
     observer = RecordingObserver()
-    callbacks = observer_callbacks(observer, lambda callback: callback, lambda: 0)
+    callbacks = observer_hooks(observer, lambda callback: callback).receiver_callbacks()
     callbacks["on_playback_state"](
         {"type": "playback_state", "playing": True, "time": 2.0, "rate": 1.0,
          "leader_client_id": "a"}

@@ -214,6 +214,20 @@ def mcp_session_with_receiver(port):
     return session
 
 
+def force_handshake(client, *, synchronized=False):
+    """Mark a high-level client started with a completed receiver handshake."""
+    client._started = True
+    receiver = getattr(client, "_receiver", None)
+    if receiver is not None:
+        receiver.connected = True
+        receiver.layered_replay_active = receiver.layered_replay
+        if synchronized:
+            receiver._synchronized_event.set()
+    graph = getattr(client, "_graph", None)
+    if graph is not None:
+        graph._ready = True
+
+
 class RecordingObserver(ClientObserver):
     """Records (method, value, thread id) for every observer call."""
 

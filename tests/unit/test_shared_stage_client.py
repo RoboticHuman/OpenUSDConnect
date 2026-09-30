@@ -233,15 +233,15 @@ def test_status_distinguishes_local_edit_targets_and_unsubmitted_changes(tmp_pat
     stage = _create_root(tmp_path / "root.usda")
     client = SharedStageClient(stage, app_name="authoring-scope", persist_token=False)
     try:
-        assert client.status.edit_target_is_shared
+        assert client.status.edit_target_is_published
         stage.SetEditTarget(stage.GetSessionLayer())
         stage.DefinePrim("/Local", "Xform")
-        assert not client.status.edit_target_is_shared
+        assert not client.status.edit_target_is_published
         assert not client.status.has_unsent_changes
 
         stage.SetEditTarget(stage.GetRootLayer())
         stage.DefinePrim("/Shared", "Xform")
-        assert client.status.edit_target_is_shared
+        assert client.status.edit_target_is_published
         assert client.status.has_unsent_changes
         assert client.status.prepared_events == 0
         assert client.status.pending_events == 0
@@ -541,7 +541,7 @@ def test_shared_use_server_abandons_only_after_rejected_layer_detaches(
         client._receiver.connected = True
         client._receiver._synchronized_event.set()
 
-    monkeypatch.setattr(client, "_refresh_recovery_checkpoint", _detach)
+    monkeypatch.setattr(client, "_replay_to_fresh_checkpoint", _detach)
     try:
         assessment = client.refresh_recovery_assessment()
         assert assessment.all_layers_detached
@@ -575,7 +575,7 @@ def test_shared_use_server_refuses_a_quarantined_reachable_layer(tmp_path, monke
     sender = _RecoverySender(_stale_artifact("layer:child"))
     client._sender = sender
     client._started = True
-    monkeypatch.setattr(client, "_refresh_recovery_checkpoint", lambda _timeout: None)
+    monkeypatch.setattr(client, "_replay_to_fresh_checkpoint", lambda _timeout: None)
     try:
         assessment = client.refresh_recovery_assessment()
         assert assessment.recovery_artifact is sender.recovery_artifact
@@ -611,7 +611,7 @@ def test_shared_assessment_reports_an_unavailable_source_layer(tmp_path, monkeyp
     sender = _RecoverySender(_stale_artifact("layer:missing"))
     client._sender = sender
     client._started = True
-    monkeypatch.setattr(client, "_refresh_recovery_checkpoint", lambda _timeout: None)
+    monkeypatch.setattr(client, "_replay_to_fresh_checkpoint", lambda _timeout: None)
     try:
         assessment = client.refresh_recovery_assessment()
         assert assessment.source_unavailable_layers == assessment.layers
@@ -669,7 +669,7 @@ def test_shared_recovery_commands_distinguish_expected_policy_failures(
                 ],
             }
         )
-        monkeypatch.setattr(client, "_refresh_recovery_checkpoint", lambda _timeout: None)
+        monkeypatch.setattr(client, "_replay_to_fresh_checkpoint", lambda _timeout: None)
         assessment = client.refresh_recovery_assessment()
         with pytest.raises(RecoveryError) as not_synchronized:
             client.complete_recovery(assessment)
@@ -697,7 +697,7 @@ def test_shared_use_server_keeps_incident_when_checkpoint_refresh_fails(
     def _timeout(_timeout):
         raise TimeoutError("injected checkpoint timeout")
 
-    monkeypatch.setattr(client, "_refresh_recovery_checkpoint", _timeout)
+    monkeypatch.setattr(client, "_replay_to_fresh_checkpoint", _timeout)
     try:
         with pytest.raises(TimeoutError, match="injected checkpoint timeout"):
             client.refresh_recovery_assessment()
@@ -744,7 +744,7 @@ def test_shared_use_server_keeps_session_when_a_suffix_layer_is_still_live(
             },
         )
 
-    monkeypatch.setattr(client, "_refresh_recovery_checkpoint", _detach_child)
+    monkeypatch.setattr(client, "_replay_to_fresh_checkpoint", _detach_child)
     try:
         assessment = client.refresh_recovery_assessment()
         assert [layer.rejected_layer_key for layer in assessment.detached_layers] == [
@@ -809,7 +809,7 @@ def test_shared_use_server_refuses_automatic_layer_key_redirection(
             }
         )
 
-    monkeypatch.setattr(client, "_refresh_recovery_checkpoint", _remap)
+    monkeypatch.setattr(client, "_replay_to_fresh_checkpoint", _remap)
     try:
         assessment = client.refresh_recovery_assessment()
         remapped = assessment.remapped_layers
@@ -838,7 +838,7 @@ def test_shared_external_recovery_completes_a_structured_reachable_assessment(
     client._started = True
     client._receiver.connected = True
     client._receiver._synchronized_event.set()
-    monkeypatch.setattr(client, "_refresh_recovery_checkpoint", lambda _timeout: None)
+    monkeypatch.setattr(client, "_replay_to_fresh_checkpoint", lambda _timeout: None)
     try:
         assessment = client.refresh_recovery_assessment()
         assert not assessment.all_layers_detached
@@ -874,7 +874,7 @@ def test_shared_external_recovery_rejects_an_assessment_from_another_incident(
     client._started = True
     client._receiver.connected = True
     client._receiver._synchronized_event.set()
-    monkeypatch.setattr(client, "_refresh_recovery_checkpoint", lambda _timeout: None)
+    monkeypatch.setattr(client, "_replay_to_fresh_checkpoint", lambda _timeout: None)
     try:
         assessment = client.refresh_recovery_assessment()
         sender.recovery_artifact = _stale_artifact("layer:child")
@@ -905,7 +905,7 @@ def test_shared_external_recovery_rejects_a_stale_graph_assessment(
     client._started = True
     client._receiver.connected = True
     client._receiver._synchronized_event.set()
-    monkeypatch.setattr(client, "_refresh_recovery_checkpoint", lambda _timeout: None)
+    monkeypatch.setattr(client, "_replay_to_fresh_checkpoint", lambda _timeout: None)
     try:
         assessment = client.refresh_recovery_assessment()
         client._last_seq += 1
@@ -952,7 +952,7 @@ def test_shared_rebind_recovery_preserves_work_and_replays_clean_stage(
         client._receiver.connected = True
         client._receiver._synchronized_event.set()
 
-    monkeypatch.setattr(client, "_refresh_recovery_checkpoint", _refresh)
+    monkeypatch.setattr(client, "_replay_to_fresh_checkpoint", _refresh)
     try:
         with pytest.raises(RecoveryError, match="different clean stage") as error:
             client.recover_use_server(clean_stage=old_stage)
@@ -1024,7 +1024,7 @@ def test_shared_rebind_recovery_resumes_after_replacement_replay_timeout(
             assert client.stage.GetPrimAtPath("/Replayed")
             client._last_seq += 1
 
-    monkeypatch.setattr(client, "_refresh_recovery_checkpoint", refresh)
+    monkeypatch.setattr(client, "_replay_to_fresh_checkpoint", refresh)
     try:
         with pytest.raises(TimeoutError, match="replacement replay timed out"):
             client.recover_use_server(clean_stage=fresh_stage)
@@ -1113,7 +1113,7 @@ def test_shared_rebind_recovery_preflights_the_clean_stage(tmp_path, monkeypatch
     client._started = True
     client._receiver.connected = True
     client._receiver._synchronized_event.set()
-    monkeypatch.setattr(client, "_refresh_recovery_checkpoint", lambda _timeout: None)
+    monkeypatch.setattr(client, "_replay_to_fresh_checkpoint", lambda _timeout: None)
 
     clean_stage = _create_root(tmp_path / "clean-root.usda")
     clean_stage.SetEditTarget(Usd.EditTarget(clean_stage.GetSessionLayer()))
@@ -1165,7 +1165,7 @@ def test_shared_rebind_recovery_rejects_a_detached_source_reused_by_clean_stage(
     client._started = True
     client._receiver.connected = True
     client._receiver._synchronized_event.set()
-    monkeypatch.setattr(client, "_refresh_recovery_checkpoint", lambda _timeout: None)
+    monkeypatch.setattr(client, "_replay_to_fresh_checkpoint", lambda _timeout: None)
 
     clean_stage = _create_root(tmp_path / "clean-root.usda")
     clean_stage.GetRootLayer().subLayerPaths.append("./child.usda")

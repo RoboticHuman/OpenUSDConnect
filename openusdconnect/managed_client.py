@@ -1,58 +1,28 @@
 """Single bidirectional client for server-owned collaboration layers.
 
 ``ManagedClient`` composes the emitter, sender, receiver, and dispatcher so a
-USD-native application authors and observes one stage. It is the managed-mode
-counterpart of ``SharedStageClient`` with the same lifecycle shape
-(``start`` / ``connect`` / ``update`` / ``close``).
+USD-native application authors and observes one stage.
 """
 
 from __future__ import annotations
 
-import time
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 
 from pxr import Sdf, Usd
 
-from ._client_lifecycle import (
-    DEFAULT_WAIT_TIMEOUT_S,
-    ClientCallbackQueue,
-    deadline_after,
-    raise_if_rejected,
-    remaining_time,
-    sender_token_provider,
-    share_client_token,
-    stop_receiver,
-    submit_and_wait,
-    wait_until_ready,
-)
-from ._client_utils import (
-    client_origin,
-    client_token_handlers,
-    require_app_name,
-    resolve_client_token,
-    validate_layered_source,
-)
+from ._client_base import EmitterClientBase
+from ._client_lifecycle import DEFAULT_WAIT_TIMEOUT_S, deadline_after, remaining_time
+from ._client_utils import client_origin, require_app_name, validate_layered_source
 from .adapters import UsdStageAdapter
 from .client_id import make_stable_client_id
-from .client_observer import (
-    ClientObserver,
-    StageMetadata,
-    observer_callbacks,
-    stage_metadata_from_message,
-)
-from .client_types import ClientPhase, ClientStatus, SyncUpdate
-from .coalescing import TransformCoalescingWindow
+from .client_observer import ClientObserver
+from .client_types import SyncUpdate
 from .defaults import DEFAULT_HOST, DEFAULT_SYNC_PORT
 from .dispatcher import AssetDependencyRefreshResult, EventDispatcher
-from .emitter import NoticeEmitter, PrimChannel
+from .emitter import PrimChannel
 from .receiver import ReceiverThread
-from .recovery import (
-    RecoveryArtifact,
-    RecoveryError,
-    RejectionDisposition,
-    TransactionFailure,
-)
+from .recovery import RecoveryArtifact, RecoveryError
 from .sender import EventSender
 
 
@@ -64,7 +34,7 @@ class ManagedRecoveryResult:
     preserved_authoring_layer: Sdf.Layer
 
 
-class ManagedClient:
+class ManagedClient(EmitterClientBase):
     """Bidirectional sync through one client-owned transient authoring layer.
 
     The stage edit target is moved to :attr:`authoring_layer` at construction
@@ -95,75 +65,42 @@ class ManagedClient:
         app_name = require_app_name(app_name)
         if not isinstance(stage, Usd.Stage):
             raise TypeError("ManagedClient requires a Usd.Stage")
-        adapter = UsdStageAdapter(stage)
         validate_layered_source(stage)
-        self._transform_coalescing = TransformCoalescingWindow(transform_coalesce_seconds)
-        self._callbacks = ClientCallbackQueue()
-        observed = observer_callbacks(
-            observer, self._callbacks.wrap, lambda: self._dispatcher.applying_seq,
+        super().__init__(
+            host=host, port=port, token=token, persist_token=persist_token, observer=observer,
         )
-        stable_client_id = client_id or make_stable_client_id(app_name)
-        connection_origin = origin or client_origin(app_name, "sync")
-        resolved_token = resolve_client_token(host, port, token, persist_token)
-        token_callback = client_token_handlers(
-            host, port, persist_token, observed.get("on_token_issued"),
-        )
-
-        def _on_token_issued(token: str) -> None:
-            share_client_token(token, self._sender, self._receiver, token_callback)
-
-        self._stage = stage
-        self._host = host
-        self._port = port
-        self._persist_token = persist_token
+        self._stage: Usd.Stage | None = stage
         self._app_name = app_name
         self._authoring_layer: Sdf.Layer | None = None
         self._last_recovery_result: ManagedRecoveryResult | None = None
-
-        self._emitter = NoticeEmitter(
+        self._init_emitter(
             stage,
             attr_filter=attr_filter,
             replicated_api_schemas=replicated_api_schemas,
             extra_channels=extra_channels,
+            transform_coalesce_seconds=transform_coalesce_seconds,
         )
+        identity = {
+            "client_id": client_id or make_stable_client_id(app_name),
+            "origin": origin or client_origin(app_name, "sync"),
+        }
+        credential = self._credential.endpoint_kwargs()
         self._sender = EventSender(
-            host,
-            port,
-            client_id=stable_client_id,
-            origin=connection_origin,
-            department=department,
-            token=resolved_token,
-            on_token_issued=_on_token_issued,
-            token_provider=sender_token_provider(
-                lambda: self._receiver.token,
-                host=host, port=port, persist_token=persist_token,
-            ),
-            background_send=background_send,
+            host, port, department=department, background_send=background_send,
+            **identity, **credential,
         )
         self._receiver = ReceiverThread(
-            host=host,
-            port=port,
-            sync_from=1,
-            reconnect=reconnect,
-            client_id=stable_client_id,
-            origin=connection_origin,
-            token=resolved_token,
-            on_token_issued=_on_token_issued,
-            on_stage_metadata=observed.get("on_stage_metadata"),
-            on_playback_state=observed.get("on_playback_state"),
-            on_playback_claimed=observed.get("on_playback_claimed"),
-            on_playback_rejected=observed.get("on_playback_rejected"),
-            layered_replay=True,
+            host=host, port=port, sync_from=1, reconnect=reconnect, layered_replay=True,
+            **identity, **credential, **self._hooks.receiver_callbacks(),
         )
         self._dispatcher = EventDispatcher(
             receiver=self._receiver,
-            adapter=adapter,
+            adapter=UsdStageAdapter(stage),
             emitter=self._emitter,
-            on_resync=observed.get("on_resync"),
-            on_applied_events=observed.get("on_applied_events"),
+            on_resync=self._hooks.on_resync,
         )
-        self._started = False
-        self._closed = False
+        self._dispatcher.on_applied_events = self._hooks.applied_events_for(self._dispatcher)
+        # Modify the stage last so a failed construction leaves it untouched.
         with self._emitter.suppressed():
             self._authoring_layer = self._create_authoring_layer(stage, app_name)
 
@@ -173,109 +110,27 @@ class ManagedClient:
         return self._stage
 
     @property
-    def client_id(self) -> str:
-        """Stable identity used by both connection roles."""
-        return self._receiver.client_id
-
-    @property
-    def status(self) -> ClientStatus:
-        """Current transport, replay, durability, and recovery state."""
-        auth_rejected = self._receiver.auth_rejected or self._sender.auth_rejected
-        rejected = auth_rejected or self._receiver.hello_rejected or self._sender.hello_rejected
-        failure = self._sender.transaction_failure
-        reason = str(failure) if failure is not None else (
-            self._sender.rejection_reason or self._receiver.rejection_reason
-        )
-        if self._closed:
-            phase = ClientPhase.CLOSED
-        elif failure is not None:
-            phase = ClientPhase.RECOVERY_REQUIRED
-        elif rejected:
-            phase = ClientPhase.REJECTED
-        elif self._stage is None:
-            phase = ClientPhase.PARKED
-        elif self._receiver.connected and not self._receiver.synchronized:
-            phase = ClientPhase.REPLAYING
-        elif self._connected and self._synchronized:
-            phase = ClientPhase.READY
-        elif self._started:
-            phase = ClientPhase.CONNECTING
-        else:
-            phase = ClientPhase.OFFLINE
-        return ClientStatus(
-            phase=phase,
-            connected=self._connected,
-            synchronized=self._synchronized,
-            receiver_connected=self._receiver.connected,
-            sender_connected=self._sender.connected,
-            prepared_events=self._emitter.prepared_event_count,
-            pending_events=self._sender.pending_event_count,
-            acknowledged_events_total=self._sender.acknowledged_event_count,
-            failure=failure,
-            recovery=self._sender.recovery_incident,
-            reason=reason,
-            auth_rejected=auth_rejected,
-            has_unsent_changes=self._has_unsent_changes,
-            edit_target_is_shared=self._edit_target_is_shared,
-        )
-
-    @property
-    def sender(self):
-        """The underlying :class:`EventSender`. Read access is safe; mutating
-        configuration on this object is at your own risk."""
-        return self._sender
-
-    @property
-    def receiver(self):
-        """The underlying :class:`ReceiverThread`."""
-        return self._receiver
-
-    @property
-    def dispatcher(self):
-        """The underlying :class:`EventDispatcher`."""
-        return self._dispatcher
-
-    @property
-    def emitter(self):
-        """The underlying :class:`NoticeEmitter`."""
-        return self._emitter
-
-    @property
     def authoring_layer(self) -> Sdf.Layer | None:
         """Client-owned transient layer for all local managed-mode edits."""
         return self._authoring_layer
 
     @property
-    def _has_unsent_changes(self) -> bool:
-        """Whether local notices or a prepared batch still need submission."""
-        return not self._closed and self._stage is not None and self._emitter.has_local_changes
+    def receiver(self) -> ReceiverThread:
+        """The underlying :class:`ReceiverThread`; a diagnostic handle."""
+        return self._receiver
 
     @property
-    def _edit_target_is_shared(self) -> bool:
-        """Whether edits currently target this client's synchronized authoring layer."""
-        return (
-            self._stage is not None
-            and self._stage.GetEditTarget().GetLayer() is self._authoring_layer
-        )
+    def dispatcher(self) -> EventDispatcher:
+        """The underlying :class:`EventDispatcher`; a diagnostic handle."""
+        return self._dispatcher
 
     @property
-    def _connected(self) -> bool:
-        return not self._closed and self._receiver.connected and self._sender.connected
+    def last_seq(self) -> int:
+        return self._dispatcher.last_seq
 
     @property
-    def _synchronized(self) -> bool:
-        """Whether the local stage applied replay through the server watermark."""
-        return (
-            not self._closed
-            and self._stage is not None
-            and self._receiver.synchronized
-            and not self._sender.recovery_required
-        )
-
-    @property
-    def recovery_artifact(self) -> RecoveryArtifact | None:
-        """Exact quarantined transactions for integration-owned recovery."""
-        return self._sender.recovery_artifact
+    def pending_asset_dependencies(self) -> tuple[str, ...]:
+        return self._dispatcher.pending_asset_dependencies
 
     @property
     def last_recovery_result(self) -> ManagedRecoveryResult | None:
@@ -286,11 +141,81 @@ class ManagedClient:
         """Release references held for the most recently resolved incident."""
         self._last_recovery_result = None
 
+    def update(self, *, max_messages: int | None = None) -> SyncUpdate:
+        """Freeze local edits, apply the commit stream, then publish them.
+
+        ``max_messages`` bounds one call's receive work; local edits are held
+        until the backlog queued before them has been applied.
+        """
+        if not self._begin_update() or self._stage is None:
+            return self._progress()
+
+        # A queued authoritative record may touch the same field as a newer
+        # local opinion. Freeze the local delta before dispatcher invalidation
+        # advances emitter baselines, then send that exact batch after the
+        # authoritative prefix has applied. SharedStageClient follows the same
+        # prepare/apply/restore ordering at the Sdf-layer level.
+        self._validate_authoring_target()
+        outgoing = self._prepare_outgoing_events()
+        received = self._dispatcher.drain_and_apply(max_messages=max_messages)
+
+        sent = 0
+        if self._receiver.connected and not self._sender.connected:
+            self._sender.request_connect()
+        if (
+            self._sender.connected
+            and self._is_synchronized()
+            and not self._dispatcher.backlog_pending
+        ):
+            sent = self._send(outgoing)
+        return self._progress(received, sent)
+
+    def rebind_stage(self, stage: Usd.Stage | None, *, discard_unsent: bool = False) -> None:
+        """Move sending and receiving to a new stage with a fresh authoring layer.
+
+        ``None`` parks the client. Refuses while work is unacknowledged, or
+        unsent unless ``discard_unsent=True`` drops it.
+        """
+        self._require_open()
+        adapter = None
+        if stage is not None:
+            adapter = UsdStageAdapter(stage)
+            validate_layered_source(stage)
+        if self._sender.pending_event_count:
+            raise RuntimeError("cannot rebind with submitted work pending; call submit_and_wait()")
+        if self._has_unsent_changes() and not discard_unsent:
+            raise RuntimeError(
+                "cannot rebind with unsent changes; call submit_and_wait() "
+                "or pass discard_unsent=True"
+            )
+        if discard_unsent:
+            self._emitter.discard_prepared_events()
+            self._transform_coalescing.mark_submitted()
+        if stage is None:
+            self._dispatcher.unbind_stage()
+            self._emitter.cleanup()
+            self._stage = None
+            self._authoring_layer = None
+            return
+        self._dispatcher.adapter = adapter
+        self._dispatcher.bind_layered_stage(stage)
+        self._authoring_layer = self._create_authoring_layer(stage, self._app_name)
+        self._emitter.rebind_stage(stage)
+        self._stage = stage
+
+    def refresh_asset_dependency(
+        self,
+        asset_path: str | None = None,
+    ) -> AssetDependencyRefreshResult:
+        """Retry dependencies under the stage's current resolver context."""
+        self._require_open()
+        return self._dispatcher.refresh_asset_dependency(asset_path)
+
     def recover_use_server(
         self,
         *,
         session_id: str | None = None,
-        timeout: float | None = 10.0,
+        timeout: float | None = DEFAULT_WAIT_TIMEOUT_S,
     ) -> ManagedRecoveryResult:
         """Discard local optimistic opinions and start a fresh producer session.
 
@@ -298,30 +223,20 @@ class ManagedClient:
         layer is cleared. The producer reconnect is attempted within the same
         timeout budget; if it cannot complete, the normal update loop retries.
         """
-        if self._closed:
-            raise RuntimeError("ManagedClient is closed")
-        if not self._started:
-            raise RuntimeError("ManagedClient has not been started")
+        self._require_started()
         stage = self._stage
         authoring = self._authoring_layer
         if stage is None or authoring is None:
-            raise RecoveryError(
-                "stage_unavailable",
-                "ManagedClient has no bound stage to recover",
-            )
+            raise RecoveryError("stage_unavailable", "ManagedClient has no bound stage to recover")
         if not self._sender.recovery_required:
-            raise RecoveryError(
-                "no_incident",
-                "there is no recovery incident to resolve",
-            )
+            raise RecoveryError("no_incident", "there is no recovery incident to resolve")
         if stage.GetEditTarget().GetLayer() is not authoring:
             raise RecoveryError(
-                "edit_target_changed",
-                "the active edit target changed during recovery",
+                "edit_target_changed", "the active edit target changed during recovery",
             )
 
         deadline = deadline_after(timeout)
-        self._refresh_recovery_checkpoint(timeout)
+        self._replay_to_fresh_checkpoint(timeout)
 
         preserved = Sdf.Layer.CreateAnonymous("openusdconnect-recovery-authoring")
         preserved.TransferContent(authoring)
@@ -344,35 +259,8 @@ class ManagedClient:
         finally:
             self._emitter.rebind_stage(stage)
         self._transform_coalescing.mark_submitted()
-        remaining = remaining_time(deadline)
-        self._resume_sender_after_recovery(remaining)
+        self._resume_sender_after_recovery(remaining_time(deadline))
         return result
-
-    def _resume_sender_after_recovery(self, timeout: float | None) -> None:
-        """Best-effort producer reconnect after state recovery has committed."""
-        try:
-            self._connect_sender(timeout=timeout)
-        except (PermissionError, ConnectionError):
-            # Recovery already completed and must not look rolled back. Status
-            # exposes rejection/offline state; update() retries ordinary loss.
-            pass
-
-    def _refresh_recovery_checkpoint(self, timeout: float | None) -> None:
-        """Replay through a new server head before resolving optimistic state."""
-        deadline = deadline_after(timeout)
-        reconnect = self._receiver.reconnect
-        self._receiver.reconnect = True
-        try:
-            self._receiver.request_replay_from(self._dispatcher.last_seq + 1)
-            while True:
-                self._dispatcher.drain_and_apply()
-                if self._receiver.synchronized:
-                    return
-                if deadline is not None and time.monotonic() >= deadline:
-                    raise TimeoutError("authoritative recovery replay timed out")
-                time.sleep(0.01)
-        finally:
-            self._receiver.reconnect = reconnect
 
     def repair_and_resume(self, events: list[dict]) -> int:
         """Replace a recoverable transaction and resume its ordered outbox.
@@ -382,244 +270,47 @@ class ManagedClient:
         assigned the original rejected ID; later quarantined transactions keep
         their existing IDs and replay after it.
         """
-        if self._closed:
-            raise RuntimeError("ManagedClient is closed")
-        self._require_recoverable_failure()
-        txn_id = self._sender.repair_rejected_transaction(events)
-        if not self._connect_sender():
-            raise ConnectionError(
-                f"transaction {txn_id} repaired but reconnect to "
-                f"{self._host}:{self._port} failed; it remains queued"
-            )
-        return txn_id
+        return self._repair_and_reconnect(events)
 
-    def _require_recoverable_failure(self) -> TransactionFailure:
-        failure = self._sender.transaction_failure
-        if failure is None:
-            raise RecoveryError("no_incident", "there is no recovery incident to resolve")
-        if failure.disposition is not RejectionDisposition.RECOVERABLE_CONFLICT:
-            raise RecoveryError(
-                "wrong_recovery_kind",
-                f"{failure.code_name} is {failure.disposition.value}, not recoverable",
-            )
-        return failure
-
-    def flush(self, timeout: float | None = DEFAULT_WAIT_TIMEOUT_S) -> bool:
-        """Submit any coalesced transform, then wait for durable acknowledgement."""
-        if self._closed:
-            raise RuntimeError("ManagedClient is closed")
-        deadline = deadline_after(timeout)
-        if self._transform_coalescing.buffering:
-            try:
-                if not self._connect_sender(timeout=remaining_time(deadline)):
-                    return False
-            except (PermissionError, ConnectionError):
-                return False
-            if not self._synchronized:
-                return False
-            events = self._transform_coalescing.force(self._emitter)
-            if events and not self._send(events):
-                return False
-        return self._sender.flush(remaining_time(deadline))
-
-    @property
-    def last_seq(self) -> int:
-        return self._dispatcher.last_seq
-
-    @property
-    def stage_metadata(self) -> StageMetadata:
-        return stage_metadata_from_message(self._receiver.stage_metadata)
-
-    @property
-    def pending_asset_dependencies(self) -> tuple[str, ...]:
-        return self._dispatcher.pending_asset_dependencies
-
-    def start(self) -> ManagedClient:
-        """Start the background socket reader and return this client."""
-        if self._closed:
-            raise RuntimeError("ManagedClient is closed")
-        if not self._started:
-            self._receiver.token = resolve_client_token(
-                self._host, self._port, self._receiver.token, self._persist_token,
-            )
-            self._receiver.start()
-            self._started = True
-        return self
-
-    def connect(self, timeout: float | None = DEFAULT_WAIT_TIMEOUT_S) -> bool:
-        """Start and complete both handshakes within ``timeout``.
-
-        Queued replay still requires :meth:`update` on the stage-owning thread.
-        """
-        self.start()
-        deadline = deadline_after(timeout)
-        connected = self._receiver.wait_connected(timeout)
-        if connected:
-            self._require_layered_replay()
-            remaining = remaining_time(deadline)
-            return self._connect_sender(timeout=remaining)
-        elif self._receiver.auth_rejected:
-            raise PermissionError("authentication rejected")
-        elif self._receiver.hello_rejected:
-            raise ConnectionError(self._receiver.rejection_reason or "connection rejected")
-        return False
-
-    def wait_until_ready(self, timeout: float | None = DEFAULT_WAIT_TIMEOUT_S) -> bool:
-        """Pump updates until ``READY``; ``False`` only on timeout."""
-        return wait_until_ready(self, timeout)
-
-    def submit_and_wait(self, timeout: float | None = DEFAULT_WAIT_TIMEOUT_S) -> bool:
-        """Publish noticed edits and wait until durable; ``False`` only on timeout."""
-        return submit_and_wait(self, timeout)
-
-    def _require_layered_replay(self) -> None:
-        if self._receiver.connected and not self._receiver.layered_replay_active:
-            self.close()
-            raise RuntimeError("server did not negotiate required layered replay")
-
-    def _connect_sender(self, timeout: float | None = None) -> bool:
-        if self._sender.connected:
-            return True
-        if not self._sender.connect(timeout=timeout):
-            raise_if_rejected(self._sender, "sender")
-            return False
-        return True
-
-    def _send(self, events: list[dict]) -> int:
-        if not events:
-            return 0
-        if self._sender.send_events(events):
-            self._emitter.mark_prepared_events_sent(events)
-            self._transform_coalescing.mark_submitted()
-            return len(events)
-        return 0
-
-    def _prepare_outgoing_events(self) -> list[dict]:
-        return self._transform_coalescing.prepare(self._emitter)
-
-    def claim_playback(self, time: float | None = None) -> bool:
-        """Request the shared-playback leader role."""
-        if self._closed:
-            raise RuntimeError("ManagedClient is closed")
-        return self._sender.claim_playback(time=time)
-
-    def send_playback_control(
-        self,
-        action: str,
-        *,
-        time: float | None = None,
-        rate: float | None = None,
-    ) -> bool:
-        """Drive the shared playhead (leader only)."""
-        if self._closed:
-            raise RuntimeError("ManagedClient is closed")
-        return self._sender.send_playback_control(action, time=time, rate=rate)
-
-    def update(self, *, max_messages: int | None = None) -> SyncUpdate:
-        """Freeze local edits, apply the commit stream, then publish them.
-
-        ``max_messages`` bounds one call's receive work; local edits are held
-        until the backlog queued before them has been applied.
-        """
-        if self._closed:
-            raise RuntimeError("ManagedClient is closed")
-        if not self._started:
-            raise RuntimeError("ManagedClient has not been started")
-        self._callbacks.drain()
-        if self._closed:
-            return SyncUpdate(
-                applied_events=0,
-                submitted_events=0,
-                pending_events=self._sender.pending_event_count,
-            )
-        if self._stage is None:
-            return SyncUpdate(
-                applied_events=0,
-                submitted_events=0,
-                acknowledged_events_delta=self._sender.drain_acknowledged_event_count(),
-                pending_events=self._sender.pending_event_count,
-                recovery=self._sender.recovery_incident,
-            )
-        self._require_layered_replay()
-
-        # A queued authoritative record may touch the same field as a newer
-        # local opinion. Freeze the local delta before dispatcher invalidation
-        # advances emitter baselines, then send that exact batch after the
-        # authoritative prefix has applied. SharedStageClient follows the same
-        # prepare/apply/restore ordering at the Sdf-layer level.
-        self._validate_authoring_target()
-        outgoing = self._prepare_outgoing_events()
-        received = self._dispatcher.drain_and_apply(max_messages=max_messages)
-
-        sent = 0
-        if self._receiver.connected and not self._sender.connected:
-            self._sender.request_connect()
-        if self._sender.connected and self._synchronized and not self._dispatcher.backlog_pending:
-            sent = self._send(outgoing)
-
-        return SyncUpdate(
-            applied_events=received,
-            submitted_events=sent,
-            acknowledged_events_delta=self._sender.drain_acknowledged_event_count(),
-            pending_events=self._sender.pending_event_count,
-            recovery=self._sender.recovery_incident,
+    def _is_synchronized(self) -> bool:
+        return (
+            self._stage is not None
+            and self._receiver.synchronized
+            and not self._sender.recovery_required
         )
 
-    def publish_current_edit_target(self) -> int:
-        """Queue every opinion in the edit target; returns events this call submitted."""
-        if self._closed:
-            raise RuntimeError("ManagedClient is closed")
+    def _is_parked(self) -> bool:
+        return self._stage is None
+
+    def _has_unsent_changes(self) -> bool:
+        return self._stage is not None and super()._has_unsent_changes()
+
+    def _role_status(self) -> dict:
+        return {
+            "edit_target_is_published": (
+                self._stage is not None
+                and self._stage.GetEditTarget().GetLayer() is self._authoring_layer
+            ),
+        }
+
+    def _apply_queued(self) -> None:
+        self._dispatcher.drain_and_apply()
+
+    def _can_capture_edit_target(self) -> bool:
         if self._stage is None:
-            return 0
+            return False
         self._validate_authoring_target()
-        if self._emitter.prepared_event_count:
-            raise RuntimeError(
-                "an earlier publisher batch is still prepared; call update() "
-                "before publishing the current edit target"
-            )
-        self.start()
-        self._emitter.prepare_snapshot_events_for_send()
-        return self.update().submitted_events
+        return True
 
-    def rebind_stage(self, stage: Usd.Stage | None, *, discard_unsent: bool = False) -> None:
-        """Move sending and receiving to a new stage with a fresh authoring layer.
-
-        ``None`` parks the client. Refuses while work is unacknowledged, or
-        unsent unless ``discard_unsent=True`` drops it.
-        """
-        if self._closed:
-            raise RuntimeError("ManagedClient is closed")
-        adapter = None
-        if stage is not None:
-            adapter = UsdStageAdapter(stage)
-            validate_layered_source(stage)
-        if self._sender.pending_event_count:
-            raise RuntimeError("cannot rebind with submitted work pending; call submit_and_wait()")
-        if self._has_unsent_changes and not discard_unsent:
+    def _validate_authoring_target(self) -> None:
+        if self._stage.GetEditTarget().GetLayer() is not self._authoring_layer:
             raise RuntimeError(
-                "cannot rebind with unsent changes; call submit_and_wait() "
-                "or pass discard_unsent=True"
+                "ManagedClient publishes only from client.authoring_layer; "
+                "restore that edit target before update()"
             )
-        if discard_unsent:
-            self._emitter.discard_prepared_events()
-            self._transform_coalescing.mark_submitted()
-        if stage is None:
-            self._dispatcher.unbind_stage()
-            self._emitter.cleanup()
-            self._stage = None
-            self._authoring_layer = None
-            return
-        self._dispatcher.adapter = adapter
-        self._dispatcher.bind_layered_stage(stage)
-        self._authoring_layer = self._create_authoring_layer(stage, self._app_name)
-        self._emitter.rebind_stage(stage)
-        self._stage = stage
 
     @staticmethod
-    def _create_authoring_layer(
-        stage: Usd.Stage,
-        label: str,
-    ) -> Sdf.Layer:
+    def _create_authoring_layer(stage: Usd.Stage, label: str) -> Sdf.Layer:
         """Create and select the one transient layer owned by this client."""
         session = stage.GetSessionLayer()
         authoring = Sdf.Layer.CreateAnonymous(f"openusdconnect-{label}-authoring")
@@ -628,43 +319,9 @@ class ManagedClient:
         stage.SetEditTarget(Usd.EditTarget(authoring))
         return authoring
 
-    def _validate_authoring_target(self) -> None:
-        stage = self._stage
-        if stage is None:
-            return
-        layer = stage.GetEditTarget().GetLayer()
-        if layer is not self._authoring_layer:
-            raise RuntimeError(
-                "ManagedClient publishes only from client.authoring_layer; "
-                "restore that edit target before update()"
-            )
-
-    def refresh_asset_dependency(
-        self,
-        asset_path: str | None = None,
-    ) -> AssetDependencyRefreshResult:
-        """Retry dependencies under the stage's current resolver context."""
-        if self._closed:
-            raise RuntimeError("ManagedClient is closed")
-        return self._dispatcher.refresh_asset_dependency(asset_path)
-
-    def close(self) -> None:
-        """Stop networking and release receiver-owned collaboration layers."""
-        if self._closed:
-            return
-        self._callbacks.close()
-        self._sender.disconnect()
-        stop_receiver(self._receiver)
+    def _release(self) -> None:
         self._dispatcher.close()
-        self._emitter.cleanup()
-        self._closed = True
-
-    def __enter__(self) -> ManagedClient:
-        return self.start()
-
-    def __exit__(self, exc_type, exc, traceback) -> bool:
-        self.close()
-        return False
+        super()._release()
 
 
-__all__ = ["ManagedClient"]
+__all__ = ["ManagedClient", "ManagedRecoveryResult"]

@@ -47,6 +47,8 @@ State moves to `client.status`:
 - `recovery_required`, `native_scene_rebuild_required`, and
   `connection_rejected` are phases: check `status.phase` (and
   `status.auth_rejected` to tell rejections apart).
+- `UsdReceiver.layered_replay_active` is removed. A connected receiver always
+  has layered replay; the server's handshake is rejected otherwise.
 
 Return values and defaults:
 
@@ -66,6 +68,10 @@ Behavior:
   send it, instead of returning 0 and dropping it.
 - `ManagedClient.rebind_stage()` refuses unsent or unacknowledged work. Finish
   with `submit_and_wait()`, or pass `discard_unsent=True`.
+- `ManagedClient.flush()` raises when the server rejects the connection,
+  like `UsdPublisher.flush()`, instead of returning `False`.
+- `UsdReceiver.status` reports `CONNECTING` instead of `READY` while it
+  reconnects, like the other clients.
 
 The low-level `EventSender`, `ReceiverThread`, and `EventDispatcher` keep their
 callable arguments and properties.
@@ -79,7 +85,7 @@ callable arguments and properties.
 - `update(max_messages=)` on `ManagedClient` and `SharedStageClient` spreads a
   reconnect backlog over frames.
 - `ClientStatus` fields `auth_rejected`, `has_unsent_changes`,
-  `deferred_events`, `deferred_layer_keys`, `edit_target_is_shared`, and
+  `deferred_events`, `deferred_layer_keys`, `edit_target_is_published`, and
   `recovery_stage_pending`; the `can_author` property; `ClientPhase.PARKED`.
 - `SharedStageClient.resume_recovery()` (error code
   `no_pending_recovery_stage`), `claim_playback()`, and
@@ -87,8 +93,8 @@ callable arguments and properties.
 - Opt-in `background_send=True` moves transaction writes to a worker thread.
   The worker needs the GIL, adding about 5 ms per write while the host's main
   thread runs Python.
-- `EventSender(token_provider=)` resolves credentials once per connection
-  attempt.
+- `token_provider=` on `EventSender` and `ReceiverThread` supplies the token
+  for each connection attempt.
 - `EventDispatcher.backlog_pending` and `NoticeEmitter.has_local_changes`.
 - Receiver replay identity and optional post-commit transaction checkpoints.
 

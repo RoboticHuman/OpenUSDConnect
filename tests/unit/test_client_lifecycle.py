@@ -19,7 +19,7 @@ from openusdconnect import (
 )
 from openusdconnect import sender as sender_module
 from openusdconnect.client_observer import StageMetadata
-from tests.helpers import RecordingObserver
+from tests.helpers import RecordingObserver, force_handshake
 
 
 def test_wait_until_ready_returns_false_only_when_startup_expires():
@@ -52,6 +52,33 @@ def test_blocked_states_raise_instead_of_timing_out(phase, auth_rejected, failur
     )
     with pytest.raises(expected):
         _client_lifecycle.raise_if_blocked(SimpleNamespace(), status)
+
+
+def test_each_phase_outranks_the_phases_after_it():
+    flags = [
+        "closed", "recovery_required", "rejected", "parked", "replaying", "ready", "connecting",
+    ]
+    for index, flag in enumerate(flags):
+        state = {name: position >= index for position, name in enumerate(flags)}
+        assert _client_lifecycle.compute_phase(**state) is client_types.ClientPhase(flag)
+    offline = _client_lifecycle.compute_phase(**dict.fromkeys(flags, False))
+    assert offline is client_types.ClientPhase.OFFLINE
+
+
+@pytest.mark.parametrize("kind", [ManagedClient, SharedStageClient, UsdReceiver, UsdPublisher])
+def test_every_client_reports_the_same_lifecycle_phases(kind, tmp_path):
+    stage = Usd.Stage.CreateNew(str(tmp_path / "scene.usda"))
+    client = kind(stage, app_name="phases", port=1, persist_token=False)
+    try:
+        assert client.status.phase is client_types.ClientPhase.OFFLINE
+        assert not client.status.connected
+        client._started = True
+        assert client.status.phase is client_types.ClientPhase.CONNECTING
+    finally:
+        client.close()
+    assert client.status.phase is client_types.ClientPhase.CLOSED
+    with pytest.raises(RuntimeError, match=f"{kind.__name__} is closed"):
+        client.update()
 
 
 def test_queued_notifications_run_on_update_thread_and_bound_each_drain():
@@ -108,60 +135,66 @@ def test_public_status_types_keep_compatibility_identity():
         assert value is getattr(_client_utils, name)
 
 
-@pytest.mark.parametrize(
-    ("receiver_token", "persist", "expected"),
-    [
-        ("issued", True, "issued"),
-        ("issued", False, "issued"),
-        (None, True, "stored"),
-        (None, False, None),
-    ],
-)
-def test_sender_token_provider_prefers_receiver_then_storage(
-    monkeypatch, receiver_token, persist, expected,
-):
+def test_credential_reads_storage_only_while_no_token_is_known(monkeypatch):
+    stored = [None]
     reads = []
 
     def load_token(host, port):
         reads.append((host, port))
-        return "stored"
+        return stored[0]
 
     monkeypatch.setattr(_client_utils, "load_token", load_token)
-    provide = _client_lifecycle.sender_token_provider(
-        lambda: receiver_token, host="test-host", port=7200, persist_token=persist,
-    )
-    assert provide() == expected
-    assert reads == ([("test-host", 7200)] if expected == "stored" else [])
+    credential = _client_utils.ClientCredential("test-host", 7200, None, True)
+    assert credential.current() is None
+    stored[0] = "stored"
+    assert credential.current() == "stored"
+    assert credential.current() == "stored"
+    assert len(reads) == 3
+    assert _client_utils.ClientCredential("test-host", 7200, None, False).current() is None
+    assert len(reads) == 3
 
 
-@pytest.mark.parametrize(
-    ("configured", "expected"), [("configured", "configured"), (None, "provided")],
-)
-def test_sender_asks_provider_only_for_missing_credentials(configured, expected):
-    calls = []
+def test_credential_keeps_a_token_issued_while_storage_loads(monkeypatch):
+    monkeypatch.setattr(_client_utils, "save_token", lambda host, port, token: None)
+    monkeypatch.setattr(_client_utils, "load_token", lambda host, port: None)
+    credential = _client_utils.ClientCredential("localhost", 1, None, True)
 
-    def provide():
-        calls.append(True)
-        return "provided"
+    def load_during_issue(host, port):
+        credential.issued("issued-during-load")
+        return "old-stored-token"
 
+    monkeypatch.setattr(_client_utils, "load_token", load_during_issue)
+    assert credential.current() == "issued-during-load"
+
+
+def test_sender_takes_its_token_from_the_provider_on_every_attempt(monkeypatch):
+    tokens = iter(["first", "second"])
+    presented = []
+
+    def refuse(*args, **kwargs):
+        presented.append(sender.token)
+        raise OSError("refused")
+
+    monkeypatch.setattr(sender_module.socket, "create_connection", refuse)
     sender = sender_module.EventSender(
-        "localhost", 1, client_id="token-fill", token=configured, token_provider=provide,
+        "localhost", 1, client_id="token-attempts", token="stale",
+        token_provider=lambda: next(tokens),
     )
-    sender._fill_missing_token()
-    assert sender.token == expected
-    assert calls == ([] if configured else [True])
+    assert not sender.connect(timeout=0.5)
+    assert not sender.connect(timeout=0.5)
+    assert presented == ["first", "second"]
 
 
 @pytest.mark.parametrize("kind", [ManagedClient, SharedStageClient])
 @pytest.mark.parametrize("issuer", ["_sender", "_receiver"])
 @pytest.mark.parametrize("failure", [None, "persistence", "observer"])
-def test_issued_token_updates_both_connections_before_callbacks(
+def test_issued_token_is_persisted_before_notifying_and_used_by_both_roles(
     kind, issuer, failure, tmp_path, monkeypatch,
 ):
     calls = []
 
     def record(name, token):
-        calls.append((name, token, client._sender.token, client._receiver.token))
+        calls.append((name, token))
         if failure == name:
             raise RuntimeError(f"injected {name} failure")
 
@@ -181,32 +214,20 @@ def test_issued_token_updates_both_connections_before_callbacks(
                 callback("replacement")
         else:
             callback("replacement")
-        assert client._sender.token == client._receiver.token == "replacement"
-        # The host observer is queued; credentials are shared and persisted first.
-        assert calls == [("persistence", "replacement", "replacement", "replacement")]
+        # The host observer is queued; the token is adopted and persisted first.
+        assert calls == [("persistence", "replacement")]
+        for endpoint in (client._sender, client._receiver):
+            assert endpoint._token_provider() == "replacement"
 
         if failure != "persistence":
-            client._started = True
             if failure == "observer":
                 with pytest.raises(RuntimeError, match="injected observer failure"):
                     client._callbacks.drain()
             else:
                 client._callbacks.drain()
-            assert calls[-1] == ("observer", "replacement", "replacement", "replacement")
+            assert calls[-1] == ("observer", "replacement")
     finally:
         client.close()
-
-
-def test_token_issued_while_provider_reads_storage_is_not_overwritten():
-    def provide():
-        sender.token = "issued-during-load"
-        return "old-stored-token"
-
-    sender = sender_module.EventSender(
-        "localhost", 1, client_id="token-race", token_provider=provide,
-    )
-    sender._fill_missing_token()
-    assert sender.token == "issued-during-load"
 
 
 @pytest.mark.parametrize("kind", [ManagedClient, SharedStageClient, UsdPublisher])
@@ -221,12 +242,7 @@ def test_disconnected_update_does_no_token_io(kind, tmp_path, monkeypatch):
     stage = Usd.Stage.CreateNew(str(tmp_path / "scene.usda"))
     client = kind(stage, app_name="token-io", port=1, persist_token=True)
     try:
-        client._started = True
-        if kind is not UsdPublisher:
-            client._receiver.connected = True
-            client._receiver.layered_replay_active = True
-        if kind is SharedStageClient:
-            client._graph._ready = True
+        force_handshake(client)
         reads.clear()
         for _ in range(20):
             client.update()
@@ -258,11 +274,7 @@ def test_update_schedules_handshake_without_waiting_or_touching_stage_in_worker(
             finished.set()
 
     monkeypatch.setattr(sender_module.socket, "create_connection", connect)
-    client._started = True
-    client._receiver.connected = True
-    client._receiver.layered_replay_active = True
-    if isinstance(client, SharedStageClient):
-        client._graph._ready = True
+    force_handshake(client)
     try:
         result = client.update()
         assert entered.wait(2)
@@ -301,6 +313,8 @@ def test_flush_shares_timeout_between_reconnect_and_acknowledgement(kind, monkey
     if isinstance(client, ManagedClient):
         client._receiver.connected = True
         client._receiver._synchronized_event.set()
+    else:
+        monkeypatch.setattr(client, "_is_synchronized", lambda: True)
     try:
         assert client.flush(timeout=1.0)
         assert calls == [("connect", 1.0), ("flush", 0.25)]
@@ -319,7 +333,7 @@ def test_receiver_exposes_its_client_id():
 
 
 @pytest.mark.parametrize(
-    ("phase", "sender_connected", "edit_target_is_shared", "expected"),
+    ("phase", "sender_connected", "edit_target_is_published", "expected"),
     [
         ("ready", True, True, True),
         ("ready", True, None, True),
@@ -330,14 +344,14 @@ def test_receiver_exposes_its_client_id():
     ],
 )
 def test_can_author_combines_readiness_role_and_edit_target(
-    phase, sender_connected, edit_target_is_shared, expected,
+    phase, sender_connected, edit_target_is_published, expected,
 ):
     status = client_types.ClientStatus(
         phase=client_types.ClientPhase(phase),
         connected=True,
         synchronized=True,
         sender_connected=sender_connected,
-        edit_target_is_shared=edit_target_is_shared,
+        edit_target_is_published=edit_target_is_published,
     )
     assert status.can_author is expected
 

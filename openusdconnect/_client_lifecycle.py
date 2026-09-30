@@ -1,4 +1,4 @@
-"""Shared client progress, callback delivery, and transport lifecycle helpers."""
+"""Stateless helpers shared by the high-level clients."""
 
 from __future__ import annotations
 
@@ -9,13 +9,11 @@ import time
 from collections.abc import Callable
 from typing import TYPE_CHECKING
 
-from ._client_utils import resolve_client_token
 from .client_types import ClientPhase, ClientStatus
 from .sender import TransactionRejectedError
 
 if TYPE_CHECKING:
     from .receiver import ReceiverThread
-    from .sender import EventSender
 
 LOG = logging.getLogger(__name__)
 
@@ -37,6 +35,34 @@ def _pause_before_poll(deadline: float | None) -> bool:
         return False
     time.sleep(_POLL_INTERVAL_S if remaining is None else min(_POLL_INTERVAL_S, remaining))
     return True
+
+
+def compute_phase(
+    *,
+    closed: bool,
+    recovery_required: bool,
+    rejected: bool,
+    parked: bool,
+    replaying: bool,
+    ready: bool,
+    connecting: bool,
+) -> ClientPhase:
+    """The one precedence order every client uses for ``ClientStatus.phase``."""
+    if closed:
+        return ClientPhase.CLOSED
+    if recovery_required:
+        return ClientPhase.RECOVERY_REQUIRED
+    if rejected:
+        return ClientPhase.REJECTED
+    if parked:
+        return ClientPhase.PARKED
+    if replaying:
+        return ClientPhase.REPLAYING
+    if ready:
+        return ClientPhase.READY
+    if connecting:
+        return ClientPhase.CONNECTING
+    return ClientPhase.OFFLINE
 
 
 def raise_if_blocked(client, status: ClientStatus) -> None:
@@ -125,37 +151,6 @@ def raise_if_rejected(endpoint, role: str) -> None:
         raise PermissionError(f"{role} authentication rejected")
     if endpoint.hello_rejected:
         raise ConnectionError(endpoint.rejection_reason or f"{role} connection rejected")
-
-
-def sender_token_provider(
-    receiver_token: Callable[[], str | None] | None,
-    *,
-    host: str,
-    port: int,
-    persist_token: bool,
-) -> Callable[[], str | None]:
-    """Credentials for a sender connect attempt: the receiver's, else stored ones."""
-
-    def provide() -> str | None:
-        token = receiver_token() if receiver_token is not None else None
-        return token if token is not None else resolve_client_token(
-            host, port, None, persist_token,
-        )
-
-    return provide
-
-
-def share_client_token(
-    token: str,
-    sender: EventSender,
-    receiver: ReceiverThread,
-    callback: Callable[[str], None] | None,
-) -> None:
-    """Update both connections before persistence or application callbacks can fail."""
-    sender.token = token
-    receiver.token = token
-    if callback is not None:
-        callback(token)
 
 
 def stop_receiver(receiver: ReceiverThread) -> None:

@@ -2002,6 +2002,7 @@ class NoticeEmitter:
         # User-provided attr_filter wins; otherwise derive it from the active
         # channel set.
         self._attr_filter = attr_filter or _make_attr_filter(self._channels)
+        # Last, so no notice reaches a partially constructed emitter.
         self.listener = Tf.Notice.Register(Usd.Notice.ObjectsChanged, self._on_changed, stage)
 
     def _local_prim_spec(self, prim_path: str):

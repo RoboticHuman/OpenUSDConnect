@@ -114,6 +114,7 @@ class EventSender:
         self.rejection_reason = ""
         self.stage_metadata: dict = {}
 
+        # Reentrant: background submission holds it while appending to the outbox.
         self._condition = threading.Condition(threading.RLock())
         self._connect_lock = threading.Lock()
         self._connect_epoch = 0
@@ -322,7 +323,8 @@ class EventSender:
             if self._session.recovery_required or time.monotonic() < self._retry_after_until:
                 return False
 
-        self._fill_missing_token()
+        if self._token_provider is not None:
+            self.token = self._token_provider()
         connect_timeout = deadline - time.monotonic()
         if connect_timeout <= 0.0:
             return False
@@ -445,15 +447,6 @@ class EventSender:
             replayed,
         )
         return True
-
-    def _fill_missing_token(self) -> None:
-        """Ask the provider for credentials once per connect attempt."""
-        if self.token is not None or self._token_provider is None:
-            return
-        token = self._token_provider()
-        # A handshake on another connection can issue a token meanwhile.
-        if self.token is None:
-            self.token = token
 
     def _accept_handshake_response(
         self, sock: socket.socket, env, payload_type: int, generation: int

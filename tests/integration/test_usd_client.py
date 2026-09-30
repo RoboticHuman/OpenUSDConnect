@@ -93,7 +93,6 @@ def test_layered_receiver_preserves_and_clears_an_override(live_server):
 
         receiver.start()
         assert receiver.connect(timeout=2)
-        assert receiver.layered_replay_active
         assert _pump_until(receiver, lambda: _value(target) == 17)
 
         router = receiver._dispatcher.layer_router
