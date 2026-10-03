@@ -1,20 +1,24 @@
-"""Shared transport lifecycle operations; no stage or layer policy."""
+"""Helpers shared by the high-level clients."""
 
 from __future__ import annotations
 
 import logging
+import queue
 import threading
 import time
 from collections.abc import Callable
 from typing import TYPE_CHECKING
 
-from ._client_utils import resolve_client_token
+from .client_types import ClientPhase, ClientStatus
+from .sender import TransactionRejectedError
 
 if TYPE_CHECKING:
     from .receiver import ReceiverThread
-    from .sender import EventSender
 
 LOG = logging.getLogger(__name__)
+
+DEFAULT_WAIT_TIMEOUT_S = 10.0
+_POLL_INTERVAL_S = 0.01
 
 
 def deadline_after(timeout: float | None) -> float | None:
@@ -25,43 +29,173 @@ def remaining_time(deadline: float | None) -> float | None:
     return None if deadline is None else max(0.0, deadline - time.monotonic())
 
 
+def _pause_before_poll(deadline: float | None) -> bool:
+    remaining = remaining_time(deadline)
+    if remaining is not None and remaining <= 0:
+        return False
+    time.sleep(_POLL_INTERVAL_S if remaining is None else min(_POLL_INTERVAL_S, remaining))
+    return True
+
+
+def compute_phase(
+    *,
+    closed: bool,
+    recovery_required: bool,
+    rejected: bool,
+    parked: bool,
+    replaying: bool,
+    ready: bool,
+    connecting: bool,
+) -> ClientPhase:
+    """The one precedence order every client uses for ``ClientStatus.phase``."""
+    if closed:
+        return ClientPhase.CLOSED
+    if recovery_required:
+        return ClientPhase.RECOVERY_REQUIRED
+    if rejected:
+        return ClientPhase.REJECTED
+    if parked:
+        return ClientPhase.PARKED
+    if replaying:
+        return ClientPhase.REPLAYING
+    if ready:
+        return ClientPhase.READY
+    if connecting:
+        return ClientPhase.CONNECTING
+    return ClientPhase.OFFLINE
+
+
+def raise_if_blocked(client, status: ClientStatus) -> None:
+    """Raise for a state that further updates cannot resolve."""
+    if status.failure is not None:
+        raise TransactionRejectedError(status.failure)
+    name = type(client).__name__
+    if status.phase is ClientPhase.CLOSED:
+        raise RuntimeError(f"{name} is closed")
+    if status.phase is ClientPhase.REJECTED:
+        if status.auth_rejected:
+            raise PermissionError(status.reason or f"{name} authentication rejected")
+        raise ConnectionError(status.reason or f"{name} connection rejected")
+    if status.phase is ClientPhase.OFFLINE:
+        raise ConnectionError(status.reason or f"{name} is offline and not reconnecting")
+    if status.phase is ClientPhase.PARKED:
+        raise RuntimeError(f"{name} has no bound stage; call rebind_stage() first")
+    if status.phase is ClientPhase.RECOVERY_REQUIRED:
+        raise RuntimeError(status.reason or f"{name} requires recovery")
+
+
+def wait_until_ready(client, timeout: float | None) -> bool:
+    """Pump updates on the calling thread until ready; ``False`` only on timeout."""
+    client.start()
+    deadline = deadline_after(timeout)
+    while True:
+        client.update()
+        status = client.status
+        if status.phase is ClientPhase.READY:
+            return True
+        raise_if_blocked(client, status)
+        if not _pause_before_poll(deadline):
+            return False
+
+
+def submit_and_wait(client, timeout: float | None) -> bool:
+    """Submit noticed edits and wait until durable; ``False`` only on timeout."""
+    client.start()
+    deadline = deadline_after(timeout)
+    while True:
+        client.update()
+        status = client.status
+        raise_if_blocked(client, status)
+        # flush(0) also releases transform coalescing and must not block the pump.
+        if status.phase is ClientPhase.READY and client.flush(timeout=0):
+            status = client.status
+            if not status.has_unsent_changes and not status.pending_events:
+                return True
+        if not _pause_before_poll(deadline):
+            return False
+
+
+class BacklogHold:
+    """Hold a local batch until the messages queued before it have been drained.
+
+    Counting those messages, rather than checking whether a drain used its
+    whole budget, keeps sustained inbound traffic from holding edits forever.
+    """
+
+    __slots__ = ("_ahead",)
+
+    def __init__(self):
+        self._ahead = 0
+
+    @property
+    def holding(self) -> bool:
+        return self._ahead > 0
+
+    def freeze(self, queued: int) -> None:
+        """Record the queue depth when a new local batch is frozen."""
+        self._ahead = queued
+
+    def drained(self, count: int, queued: int) -> None:
+        # The messages ahead of the batch are at the front of the queue, so a
+        # replay request that discards the queue also bounds them.
+        self._ahead = min(max(0, self._ahead - count), queued)
+
+
+class ClientCallbackQueue:
+    """Deliver notifications raised on network threads during update() or close()."""
+
+    def __init__(self):
+        self._queue = queue.SimpleQueue()
+        self._lock = threading.Lock()
+        self._closed = False
+
+    def wrap(self, callback: Callable) -> Callable:
+        def enqueue(value):
+            with self._lock:
+                if not self._closed:
+                    self._queue.put((callback, value))
+
+        return enqueue
+
+    def drain(self) -> None:
+        # Only notifications queued before this tick, so a busy receiver cannot
+        # starve update().
+        for _ in range(self._queue.qsize()):
+            try:
+                callback, value = self._queue.get_nowait()
+            except queue.Empty:
+                break
+            callback(value)
+
+    def close(self) -> None:
+        """Refuse new notifications and deliver the queued ones.
+
+        Every queued notification runs even if one raises; the first error is
+        re-raised after the rest have been delivered.
+        """
+        with self._lock:
+            self._closed = True
+        error = None
+        while True:
+            try:
+                callback, value = self._queue.get_nowait()
+            except queue.Empty:
+                break
+            try:
+                callback(value)
+            except Exception as exc:
+                if error is not None:
+                    LOG.exception("Observer notification failed while closing")
+                error = error or exc
+        if error is not None:
+            raise error
+
+
 def raise_if_rejected(endpoint, role: str) -> None:
     if endpoint.auth_rejected:
         raise PermissionError(f"{role} authentication rejected")
     if endpoint.hello_rejected:
         raise ConnectionError(endpoint.rejection_reason or f"{role} connection rejected")
-
-
-def prepare_sender_token(
-    sender: EventSender,
-    receiver: ReceiverThread | None,
-    *,
-    host: str,
-    port: int,
-    persist_token: bool,
-) -> None:
-    """Fill missing sender credentials; issued tokens are shared by callbacks."""
-    if sender.token is not None:
-        return
-    token = receiver.token if receiver is not None else None
-    if token is None:
-        token = resolve_client_token(host, port, None, persist_token)
-    # A handshake can supply a token while stored credentials are being read.
-    if sender.token is None:
-        sender.token = token
-
-
-def share_client_token(
-    token: str,
-    sender: EventSender,
-    receiver: ReceiverThread,
-    callback: Callable[[str], None] | None,
-) -> None:
-    """Update both connections before persistence or application callbacks can fail."""
-    sender.token = token
-    receiver.token = token
-    if callback is not None:
-        callback(token)
 
 
 def stop_receiver(receiver: ReceiverThread) -> None:

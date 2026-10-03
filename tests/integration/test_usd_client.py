@@ -89,11 +89,10 @@ def test_layered_receiver_preserves_and_clears_an_override(live_server):
         assert publisher.connect()
         source.GetAttributeAtPath(_VALUE_PATH).Set(17)
         UsdGeom.SetStageUpAxis(source, UsdGeom.Tokens.z)
-        assert publisher.update() > 0
+        assert publisher.update().submitted_events > 0
 
         receiver.start()
         assert receiver.connect(timeout=2)
-        assert receiver.layered_replay_active
         assert _pump_until(receiver, lambda: _value(target) == 17)
 
         router = receiver._dispatcher.layer_router
@@ -112,7 +111,7 @@ def test_layered_receiver_preserves_and_clears_an_override(live_server):
         assert UsdGeom.GetStageUpAxis(target) == UsdGeom.Tokens.z
 
         source.GetAttributeAtPath(_VALUE_PATH).Clear()
-        assert publisher.update() > 0
+        assert publisher.update().submitted_events > 0
         assert _pump_until(receiver, lambda: _value(target) == 5)
         assert not managed.GetAttributeAtPath(_VALUE_PATH).HasInfo("default")
 

@@ -65,6 +65,9 @@ def _client_stage(tmp_path, name="client"):
 
 
 def _translation(prim: Usd.Prim):
+    """Local translation, or ``None`` before the prim has arrived."""
+    if not prim:
+        return None
     m = UsdGeom.Xformable(prim).GetLocalTransformation(Usd.TimeCode.Default())
     return (m[3][0], m[3][1], m[3][2])
 
@@ -108,11 +111,12 @@ def test_managed_client_tight_loop_round_trips_without_crash(live_server, tmp_pa
     try:
         assert _drain_until(
             client,
-            lambda: _translation(sync_server.stage.GetPrimAtPath("/World/Test"))[0] == 199.0,
+            lambda: _translation(sync_server.stage.GetPrimAtPath("/World/Test"))
+            == (199.0, 0.0, 0.0),
         )
         assert _drain_until(
             client,
-            lambda: _translation(stage.GetPrimAtPath("/World/Test"))[0] == 199.0,
+            lambda: _translation(stage.GetPrimAtPath("/World/Test")) == (199.0, 0.0, 0.0),
         )
         assert _translation(sync_server.stage.GetPrimAtPath("/World/Test")) == (199.0, 0.0, 0.0)
         assert _translation(stage.GetPrimAtPath("/World/Test")) == (199.0, 0.0, 0.0)
@@ -154,7 +158,9 @@ def test_managed_client_emits_structural_events_exactly_once(live_server, tmp_pa
     for i in range(50):
         tr.Set(Gf.Vec3d(float(i), 0, 0))
         client.update()
-    _drain_until(client, lambda: _translation(stage.GetPrimAtPath("/World/Test"))[0] == 49.0)
+    _drain_until(
+        client, lambda: _translation(stage.GetPrimAtPath("/World/Test")) == (49.0, 0.0, 0.0),
+    )
     client.close()
 
     # /World and /World/Test are both locally defined by the first
@@ -248,13 +254,13 @@ def test_managed_client_recovers_rejection_with_fresh_producer_session(
     try:
         client.start()
         assert client.connect(timeout=5)
-        assert _drain_until(client, lambda: client.synchronized)
+        assert _drain_until(client, lambda: client.status.synchronized)
         rejected_session = client.sender.session_id
 
         stage.DefinePrim("/World/Rejected", "Xform")
         assert client.update().submitted_events > 0
-        assert _drain_until(client, lambda: client.recovery_required)
-        incident = client.recovery_incident
+        assert _drain_until(client, lambda: client.status.phase is ClientPhase.RECOVERY_REQUIRED)
+        incident = client.status.recovery
         assert incident is not None
         assert incident.producer_session_id == rejected_session
         assert incident.event_count > 0
@@ -265,8 +271,7 @@ def test_managed_client_recovers_rejection_with_fresh_producer_session(
         assert recovered.preserved_authoring_layer.GetPrimAtPath("/World/Rejected")
         assert not stage.GetPrimAtPath("/World/Rejected")
         assert client.sender.session_id == "managed-replacement-session"
-        assert not client.recovery_required
-        assert client.connected
+        assert client.status.connected
         assert client.status.phase is ClientPhase.READY
         assert client.receiver.reconnect is False
         assert client.receiver.replay_head_seq == sync_server.store.get_max_seq()
@@ -405,7 +410,7 @@ def test_managed_client_shares_reissued_tokens(tmp_path, background, first_recon
         try:
             assert client.connect(timeout=5)
             sender_readers.append(client.sender._reader_thread)
-            assert _drain_until(client, lambda: client.synchronized)
+            assert _drain_until(client, lambda: client.status.synchronized)
             old_token = client.sender.token
             assert old_token == client.receiver.token
             assert runtime.sync_server.revoke_token(client.client_id)
@@ -427,9 +432,9 @@ def test_managed_client_shares_reissued_tokens(tmp_path, background, first_recon
                 client.sender.disconnect()
                 if background:
                     assert _drain_until(
-                        client, lambda: client.connected or client.sender.auth_rejected,
+                        client, lambda: client.status.connected or client.sender.auth_rejected,
                     )
-                    assert client.connected
+                    assert client.status.connected
                 else:
                     assert client.connect(timeout=3)
                 sender_readers.append(client.sender._reader_thread)
@@ -437,15 +442,14 @@ def test_managed_client_shares_reissued_tokens(tmp_path, background, first_recon
                 assert not client.sender.auth_rejected
             assert sender_tokens[0] != old_token
             assert sender_tokens[1] == sender_tokens[0]
-            assert client.receiver.token == sender_tokens[0]
 
             # The other connection must also authenticate with the replacement.
             client.receiver.request_replay_from(1)
             assert not client.receiver.synchronized
             assert _drain_until(
-                client, lambda: client.synchronized or client.receiver.auth_rejected,
+                client, lambda: client.status.synchronized or client.receiver.auth_rejected,
             )
-            assert client.synchronized
+            assert client.status.synchronized
             assert not client.receiver.auth_rejected
             assert client.sender.token == client.receiver.token == sender_tokens[0]
         finally:
@@ -484,10 +488,10 @@ def test_managed_client_hands_ephemeral_tofu_token_to_sender(tmp_path):
     try:
         client.start()
         assert client.connect(timeout=5)
-        assert client.connected
+        assert client.status.connected
         assert client.receiver.token
         assert client.sender.token == client.receiver.token
-        assert not client.auth_rejected
+        assert not client.status.auth_rejected
     finally:
         client.close()
         tcp_server.shutdown()

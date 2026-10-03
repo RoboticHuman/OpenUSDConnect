@@ -167,7 +167,7 @@ Use `ManagedClient` for a bidirectional application that owns a
 ```python
 from pxr import Usd
 
-from openusdconnect import ClientPhase, ManagedClient
+from openusdconnect import ManagedClient
 
 stage = Usd.Stage.Open("scene.usda")
 
@@ -177,12 +177,12 @@ with ManagedClient(stage, app_name="my-editor") as client:
 
     while application_is_running():
         client.update()
-        if client.status.phase is ClientPhase.READY:
+        if client.status.can_author:
             edit_scene(stage)
 ```
 
-Call `update()` on the stage-owning thread. Use `flush(timeout)` at save,
-publish, or orderly-shutdown boundaries when acknowledgement matters. Receive-
+Call `update()` on the stage-owning thread. Use `submit_and_wait(timeout)` at
+save, publish, or orderly-shutdown boundaries when acknowledgement matters. Receive-
 only tools can use `UsdReceiver`; send-only tools can use `UsdPublisher`.
 The [USD-native API guide](docs/usd-native-integration.md) covers ownership,
 replay, reconnection, recovery, and shared-stage clients.

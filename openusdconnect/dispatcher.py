@@ -407,7 +407,9 @@ class EventDispatcher:
         self.on_resync = on_resync
         self.on_applied = on_applied
         self.on_applied_events = on_applied_events
-        self._last_seq = 0
+        # A receiver resuming after sequence N already holds 1..N.
+        self._last_seq = receiver.sync_from - 1
+        self._drained_message_count = 0
         self._applying_seq: int | None = None
         self._asset_stage = None
         self._asset_events: dict[tuple[str, str, str], _TrackedAssetEvent] = {}
@@ -419,6 +421,11 @@ class EventDispatcher:
     @property
     def last_seq(self) -> int:
         return self._last_seq
+
+    @property
+    def drained_message_count(self) -> int:
+        """Messages the last :meth:`drain_and_apply` took from the receiver queue."""
+        return self._drained_message_count
 
     @last_seq.setter
     def last_seq(self, value: int) -> None:
@@ -453,6 +460,7 @@ class EventDispatcher:
             if max_messages is None
             else self.receiver.drain_queue(max_messages=max_messages)
         )
+        self._drained_message_count = len(bufs)
         if not bufs:
             self.receiver.mark_replay_applied()
             return 0
@@ -479,7 +487,8 @@ class EventDispatcher:
             if result.resync_requested:
                 self._clear_asset_dependencies()
                 if self.on_resync is not None:
-                    self.on_resync()
+                    with self._suppressed():
+                        self.on_resync()
             if self._layer_router is not None:
                 applied = self._apply_layered(
                     result.received_records,
@@ -515,8 +524,7 @@ class EventDispatcher:
         """Move layered and shared receiver state to a replacement stage."""
         if self._layer_router is None:
             return
-        suppress_ctx = self.emitter.suppressed() if self.emitter else nullcontext()
-        with suppress_ctx:
+        with self._suppressed():
             self._layer_router.bind(stage)
             self._stage_session_state.bind(stage)
             if self._projection_state is not None:
@@ -549,8 +557,7 @@ class EventDispatcher:
         self._release_layered_state()
 
     def _release_layered_state(self) -> None:
-        suppress_ctx = self.emitter.suppressed() if self.emitter else nullcontext()
-        with suppress_ctx:
+        with self._suppressed():
             self._stage_session_state.close()
             if self._layer_router is not None:
                 self._layer_router.close()
@@ -716,7 +723,7 @@ class EventDispatcher:
                     self.emitter.invalidate_for_event(event)
             self._observe_asset_dependencies(run, edit_target=edit_target)
 
-        suppress_ctx = self.emitter.suppressed() if self.emitter else nullcontext()
+        suppress_ctx = self._suppressed()
         projection_ctx = projection if projection is not None else nullcontext()
         native_adapter_events: list[dict] = []
         with projection_ctx, suppress_ctx:
@@ -755,8 +762,7 @@ class EventDispatcher:
         """
         from .event_apply import apply_events, atomic_apply
 
-        suppress_ctx = self.emitter.suppressed() if self.emitter else nullcontext()
-        with suppress_ctx:
+        with self._suppressed():
             # Arc skip decisions must inspect composition before this batch.
             stage_skip = self._compute_stage_skip(events)
             adapter_skip = self._compute_adapter_skip(events, stage_skip)
@@ -1012,8 +1018,7 @@ class EventDispatcher:
         stage = self._asset_dependency_stage()
         if stage is None:
             return False
-        suppress_ctx = self.emitter.suppressed() if self.emitter else nullcontext()
-        with suppress_ctx:
+        with self._suppressed():
             self._refresh_resolver_context_suppressed(stage)
         return True
 
@@ -1039,8 +1044,7 @@ class EventDispatcher:
                 "pending": [],
             }
 
-        suppress_ctx = self.emitter.suppressed() if self.emitter else nullcontext()
-        with suppress_ctx:
+        with self._suppressed():
             self._refresh_resolver_context_suppressed(stage)
             self._discard_stale_asset_events(stage)
             dependencies = {
@@ -1196,11 +1200,12 @@ class EventDispatcher:
                         self.emitter.invalidate_for_event(event)
             tracked_event.dependencies = dependencies
 
-        affected = self._run_post_apply_callbacks(
-            adapter_events,
-            notify_empty_events=True,
-            unique_paths=True,
-        )
+        with self._suppressed():
+            affected = self._run_post_apply_callbacks(
+                adapter_events,
+                notify_empty_events=True,
+                unique_paths=True,
+            )
 
         return {
             "status": "refreshed",
@@ -1208,6 +1213,10 @@ class EventDispatcher:
             "affected_prims": affected,
             "pending": list(self.pending_asset_dependencies),
         }
+
+    def _suppressed(self):
+        """Keep stage edits made by callbacks from being published."""
+        return self.emitter.suppressed() if self.emitter else nullcontext()
 
     def _compute_stage_skip(self, events: list[dict]) -> set[int]:
         """Find arc events whose composed state already matches the stage.

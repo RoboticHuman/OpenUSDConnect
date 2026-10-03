@@ -21,7 +21,7 @@ from tests.helpers import (
 def _drain_ready(session):
     def ready():
         session.receiver.update()
-        return session.receiver.synchronized
+        return session.receiver.status.synchronized
     wait_until(ready)
 
 

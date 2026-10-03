@@ -12,8 +12,8 @@ _REPO_ROOT = Path(__file__).resolve().parents[2]
 if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
-from openusdconnect import ClientPhase, SharedStageClient  # noqa: E402, I001
-from pxr import Gf, Usd, UsdGeom  # noqa: E402
+from openusdconnect import ClientPhase, SharedStageClient, TransactionRejectedError  # noqa: E402, I001
+from pxr import Gf, Sdf, Usd, UsdGeom  # noqa: E402
 
 DEFAULT_STAGE = Path(__file__).with_name("scene.usda")
 SPHERE_PATH = "/World/SharedSphere"
@@ -54,6 +54,17 @@ def main() -> int:
         return 1
     content = _content_layer(stage)
 
+    try:
+        return _run(args, stage, content)
+    except (PermissionError, ConnectionError) as exc:
+        print(f"server rejected the client: {exc}", file=sys.stderr)
+        return 1
+    except TransactionRejectedError as exc:
+        print(str(exc), file=sys.stderr)
+        return 2
+
+
+def _run(args: argparse.Namespace, stage: Usd.Stage, content: Sdf.Layer) -> int:
     with SharedStageClient(
         stage,
         app_name=args.app_name,
@@ -62,21 +73,9 @@ def main() -> int:
         persist_token=False,
         delegate_bridge_path=args.sdf_notice_bridge,
     ) as client:
-        if not client.connect(timeout=5):
-            print("server is unavailable", file=sys.stderr)
+        if not client.wait_until_ready(timeout=5):
+            print(f"client did not become ready: {client.status.phase.value}", file=sys.stderr)
             return 1
-
-        deadline = time.monotonic() + 5.0
-        while client.status.phase is not ClientPhase.READY:
-            client.update()
-            status = client.status
-            if status.phase in (ClientPhase.RECOVERY_REQUIRED, ClientPhase.REJECTED):
-                print(status.reason or status.phase.value, file=sys.stderr)
-                return 2
-            if time.monotonic() >= deadline:
-                print(f"client did not become ready: {status.phase.value}", file=sys.stderr)
-                return 1
-            time.sleep(0.01)
 
         if not client.is_layer_reachable(content):
             print("content layer is outside the synchronized graph", file=sys.stderr)
@@ -118,6 +117,9 @@ def main() -> int:
             next_tick += interval
             if (sleep_for := next_tick - time.monotonic()) > 0:
                 time.sleep(sleep_for)
+        if not client.submit_and_wait(timeout=5):
+            print("local edits were not durably acknowledged", file=sys.stderr)
+            return 1
     return 0
 
 

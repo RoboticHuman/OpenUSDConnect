@@ -46,9 +46,12 @@ class TestEventSenderConnect:
         assert sender.pending_transaction_count == 0
         assert sender._next_txn_id == 1
 
-    def test_handshake_and_send_events(self):
+    @pytest.mark.parametrize("background_send", [False, True])
+    def test_handshake_and_send_events(self, background_send):
         srv, port = _make_server()
-        sender = EventSender("127.0.0.1", port, client_id="test-client")
+        sender = EventSender(
+            "127.0.0.1", port, client_id="test-client", background_send=background_send
+        )
         conn = None
         try:
             import threading
@@ -288,10 +291,15 @@ class TestEventSenderConnect:
         assert 0 < observed[0] <= 0.1
         assert 0 < observed[1] <= 0.5
 
-    def test_reconnect_replays_identical_bytes_until_duplicate_ack(self):
+    @pytest.mark.parametrize("background_send", [False, True])
+    def test_reconnect_replays_identical_bytes_until_duplicate_ack(self, background_send):
         srv, port = _make_server()
         sender = EventSender(
-            "127.0.0.1", port, client_id="test-client", session_id="stable-session"
+            "127.0.0.1",
+            port,
+            client_id="test-client",
+            session_id="stable-session",
+            background_send=background_send,
         )
         observed = []
         first_closed = threading.Event()
@@ -340,7 +348,8 @@ class TestEventSenderConnect:
             thread.join(timeout=2)
             srv.close()
 
-    def test_bounded_outbox_and_rejection_are_terminal(self):
+    @pytest.mark.parametrize("background_send", [False, True])
+    def test_bounded_outbox_and_rejection_are_terminal(self, background_send):
         srv, port = _make_server()
         sender = EventSender(
             "127.0.0.1",
@@ -348,6 +357,7 @@ class TestEventSenderConnect:
             client_id="test-client",
             session_id="bounded-session",
             max_pending_transactions=1,
+            background_send=background_send,
         )
 
         def _serve():
@@ -387,13 +397,15 @@ class TestEventSenderConnect:
             thread.join(timeout=2)
             srv.close()
 
-    def test_rejection_closes_transport_and_quarantines_later_transactions(self):
+    @pytest.mark.parametrize("background_send", [False, True])
+    def test_rejection_closes_transport_and_quarantines_later_transactions(self, background_send):
         srv, port = _make_server()
         sender = EventSender(
             "127.0.0.1",
             port,
             client_id="test-client",
             session_id="quarantine-session",
+            background_send=background_send,
         )
         received = threading.Event()
 
@@ -493,13 +505,15 @@ class TestEventSenderConnect:
             thread.join(timeout=2)
             srv.close()
 
-    def test_recoverable_rejection_reuses_boundary_before_later_transactions(self):
+    @pytest.mark.parametrize("background_send", [False, True])
+    def test_recoverable_rejection_reuses_boundary_before_later_transactions(self, background_send):
         srv, port = _make_server()
         sender = EventSender(
             "127.0.0.1",
             port,
             client_id="retry-client",
             session_id="retry-session",
+            background_send=background_send,
         )
         observed = []
 
@@ -565,13 +579,15 @@ class TestEventSenderConnect:
                 [{"k": "ensure_prim", "prim": "/World/X", "typeName": "Xform"}]
             )
 
-    def test_abandon_rejected_session_never_replays_its_suffix(self):
+    @pytest.mark.parametrize("background_send", [False, True])
+    def test_abandon_rejected_session_never_replays_its_suffix(self, background_send):
         srv, port = _make_server()
         sender = EventSender(
             "127.0.0.1",
             port,
             client_id="abandon-client",
             session_id="rejected-session",
+            background_send=background_send,
         )
         observed = []
 

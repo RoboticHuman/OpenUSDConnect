@@ -35,6 +35,7 @@ def _state(
 class _LayeredQueue:
     layered_replay = True
     layered_replay_active = True
+    sync_from = 1
     origin = None
 
     def __init__(self, messages):

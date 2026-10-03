@@ -56,6 +56,8 @@ linked from the shorter workflow guides.
 - [Profiling](profiling.md): server and Blender sampling workflows.
 - [Development commands](cli-reference.md#development-commands): packaging,
   test launchers, benchmarks, and diagnostics.
+- [Changelog](../CHANGELOG.md): release notes, breaking changes with migration
+  notes, and wire compatibility per release.
 
 ## Troubleshoot
 

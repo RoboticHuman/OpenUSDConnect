@@ -6,8 +6,11 @@ import subprocess
 import sys
 import threading
 import time
+from collections import deque
 from contextlib import contextmanager
 
+from openusdconnect.client_observer import ClientObserver
+from openusdconnect.codec import encode_message
 from openusdconnect.protocol_constants import (
     K_SET_REFERENCE,
     K_SET_XFORM_TRS,
@@ -211,3 +214,69 @@ def mcp_session_with_receiver(port):
     # These tests drive one connection attempt directly to control reconnect timing.
     session.receiver._started = True
     return session
+
+
+class PeerTraffic:
+    """Replaces a receiver's queue with ping messages that peers keep sending."""
+
+    def __init__(self, receiver, monkeypatch, *, queued=0):
+        self._ping = encode_message({"type": "ping"})
+        self._frames = deque()
+        self.arrive(queued)
+        monkeypatch.setattr(receiver, "drain_queue", self._drain)
+        monkeypatch.setattr(
+            type(receiver), "queued_message_count",
+            property(lambda _receiver: len(self._frames)),
+        )
+
+    def arrive(self, count):
+        self._frames.extend([self._ping] * count)
+
+    def _drain(self, max_messages=None):
+        count = len(self._frames) if max_messages is None else min(max_messages, len(self._frames))
+        return deque(self._frames.popleft() for _ in range(count))
+
+
+def force_handshake(client, *, synchronized=False):
+    """Mark a high-level client started with a completed receiver handshake."""
+    client._started = True
+    receiver = getattr(client, "_receiver", None)
+    if receiver is not None:
+        receiver.connected = True
+        receiver.layered_replay_active = receiver.layered_replay
+        if synchronized:
+            receiver._synchronized_event.set()
+    graph = getattr(client, "_graph", None)
+    if graph is not None:
+        graph._ready = True
+
+
+class RecordingObserver(ClientObserver):
+    """Records (method, value, thread id) for every observer call."""
+
+    def __init__(self, on_call=None):
+        self.calls = []
+        self._on_call = on_call
+
+    def _record(self, name, value):
+        self.calls.append((name, value, threading.get_ident()))
+        if self._on_call is not None:
+            self._on_call(name, value)
+
+    def on_applied(self, batch):
+        self._record("applied", batch)
+
+    def on_resync(self):
+        self._record("resync", None)
+
+    def on_stage_metadata(self, metadata):
+        self._record("stage_metadata", metadata)
+
+    def on_playback_state(self, state):
+        self._record("playback_state", state)
+
+    def on_playback_claim(self, result):
+        self._record("playback_claim", result)
+
+    def on_token_issued(self, token):
+        self._record("token_issued", token)

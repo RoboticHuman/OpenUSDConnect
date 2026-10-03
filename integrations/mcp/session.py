@@ -14,6 +14,7 @@ import time
 import uuid
 
 from openusdconnect import token_client
+from openusdconnect.client_observer import AppliedBatch, ClientObserver, PlaybackState
 from openusdconnect.event_apply import apply_events
 from openusdconnect.protocol_constants import K_SET_STAGE_METADATA, STAGE_METADATA_KEYS
 from openusdconnect.sender import EventSender, TransactionRejectedError
@@ -23,6 +24,20 @@ from .config import McpConfig
 from .errors import ToolError
 from .introspection import select_changes
 
+
+class _MirrorObserver(ClientObserver):
+    """Feed changes_since() and playback_status() from the mirror receiver."""
+
+    def __init__(self, session: ConnectionSession):
+        self._session = session
+
+    def on_applied(self, batch: AppliedBatch) -> None:
+        # A whole drain shares its final seq; enough for "changed since N".
+        for path in batch.prim_paths:
+            self._session._dirty[path] = batch.seq
+
+    def on_playback_state(self, state: PlaybackState) -> None:
+        self._session._playback_state = state
 
 class ConnectionSession:
     """Owns the network client and the mirror stage for one MCP process."""
@@ -34,11 +49,11 @@ class ConnectionSession:
         self.mirror_stage = None
         self.auth_rejected = False
         self._origin_base = f"mcp-{uuid.uuid4().hex[:8]}"
-        # prim_path -> sequence it last changed at, fed by the dispatcher's
-        # on_applied hook; powers changes_since() diff queries.
+        # prim_path -> sequence it last changed at, fed by _MirrorObserver;
+        # powers changes_since() diff queries.
         self._dirty: dict[str, int] = {}
-        # Latest PlaybackState the server broadcast, set on the receiver thread.
-        self._playback_state: dict | None = None
+        # Latest PlaybackState the server broadcast, delivered during pump().
+        self._playback_state: PlaybackState | None = None
 
     @property
     def connected(self) -> bool:
@@ -123,29 +138,9 @@ class ConnectionSession:
             origin=f"{self._origin_base}-recv",
             token=recv_token,
             persist_token=False,
-            on_playback_state=self._on_playback_state,
-            on_applied=self._on_applied,
+            observer=_MirrorObserver(self),
         )
         self.receiver.start()
-
-    def _on_applied(self, prim_paths: list) -> None:
-        """Stamp each applied prim with the current sequence so changes_since can
-        report it. Coarse at drain granularity (a whole drain shares its final
-        seq), which is fine for 'what changed since N' polling."""
-        seq = self.receiver.applying_seq if self.receiver else 0
-        for path in prim_paths:
-            self._dirty[path] = seq
-
-    def _on_playback_state(self, msg: dict) -> None:
-        """Store the latest shared-playhead snapshot. Runs on the receiver
-        thread, so assign a fresh dict (an atomic reference swap) rather than
-        mutating in place."""
-        self._playback_state = {
-            "playing": msg.get("playing"),
-            "time": msg.get("time"),
-            "rate": msg.get("rate"),
-            "leader_client_id": msg.get("leader_client_id") or "",
-        }
 
     def _seed_metadata(self, metadata: dict | None) -> None:
         payload = {k: v for k, v in (metadata or {}).items() if k in STAGE_METADATA_KEYS}
@@ -174,7 +169,7 @@ class ConnectionSession:
         """Send one txn and drain the mirror until it reflects the write."""
         if not self.connected:
             raise ToolError("not connected, call usd_connect first", code="not_connected")
-        if self.receiver is not None and not self.receiver.synchronized:
+        if self.receiver is not None and not self.receiver.status.synchronized:
             if not self._drain_initial_replay():
                 raise ToolError(
                     "the mirror is still applying the initial replay",
@@ -201,7 +196,7 @@ class ConnectionSession:
             # A nonblocking poll avoids a reconnect handshake extending the read budget.
             try:
                 acknowledged = self.sender.flush(timeout=0)
-                applied = self.receiver.update()
+                applied = self.receiver.update().applied_events
                 if not acknowledged:
                     # The acknowledgement may arrive while queued events are applied.
                     acknowledged = self.sender.flush(timeout=0)
@@ -213,7 +208,7 @@ class ConnectionSession:
                 return False
             if checkpoint is not None:
                 if (
-                    self.receiver.synchronized
+                    self.receiver.status.synchronized
                     and self.receiver.server_instance == checkpoint.server_instance
                     and self.receiver.replay_epoch == checkpoint.epoch
                     and self.receiver.last_seq >= checkpoint.head_seq
@@ -230,16 +225,16 @@ class ConnectionSession:
         if self.receiver is None:
             return False
         deadline = time.monotonic() + self.config.read_after_write_timeout_s
-        while not self.receiver.synchronized and time.monotonic() < deadline:
+        while not self.receiver.status.synchronized and time.monotonic() < deadline:
             if self.pump() == 0:
                 time.sleep(0.005)
-        return self.receiver.synchronized
+        return self.receiver.status.synchronized
 
     def pump(self) -> int:
         """Non-blocking drain so introspection reflects recent foreign edits."""
         if self.receiver is None:
             return 0
-        return self.receiver.update()
+        return self.receiver.update().applied_events
 
     def require_mirror(self):
         """Return the mirror stage or raise if introspection is unavailable."""
@@ -298,16 +293,17 @@ class ConnectionSession:
         mirror's receiver; disabled under --no-mirror)."""
         if not self.connected:
             raise ToolError("not connected, call usd_connect first", code="not_connected")
+        self.pump()
         state = self._playback_state
         if state is None:
             return {"ok": True, "observed": False}
-        leader = state.get("leader_client_id") or ""
+        leader = state.leader_client_id
         return {
             "ok": True,
             "observed": True,
-            "playing": bool(state.get("playing")),
-            "time": state.get("time"),
-            "rate": state.get("rate"),
+            "playing": state.playing,
+            "time": state.time,
+            "rate": state.rate,
             "leader_client_id": leader,
             "has_leader": bool(leader),
             "is_leader": bool(leader) and leader == self.config.client_id,
@@ -326,7 +322,7 @@ class ConnectionSession:
 
     def status(self) -> dict:
         if self.receiver is not None:
-            if not self.receiver.synchronized:
+            if not self.receiver.status.synchronized:
                 self.pump()
         return {
             "ok": True,
@@ -336,7 +332,7 @@ class ConnectionSession:
             "client_id": self.config.client_id,
             "department": self.config.department,
             "mirror_enabled": self.config.mirror_enabled,
-            "mirror_synchronized": bool(self.receiver and self.receiver.synchronized),
+            "mirror_synchronized": bool(self.receiver and self.receiver.status.synchronized),
             "mirror_prim_count": self._mirror_prim_count(),
             "last_seq": self.receiver.last_seq if self.receiver else 0,
             "auth_rejected": self.auth_rejected,

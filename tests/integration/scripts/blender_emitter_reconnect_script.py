@@ -57,6 +57,12 @@ _edit_time = 0.0
 def _tick():
     global _phase, _edit_time
     try:
+        if _phase == "setup":
+            # Importing the add-on first would load its native module, which
+            # Windows then refuses to overwrite during the reinstall.
+            bpy.ops.preferences.addon_install(filepath=ARGS.addon, overwrite=True)
+            bpy.ops.preferences.addon_enable(module="usd_connect")
+
         from usd_connect import capture
 
         if time.monotonic() > _deadline:
@@ -71,8 +77,6 @@ def _tick():
             return None
 
         if _phase == "setup":
-            bpy.ops.preferences.addon_install(filepath=ARGS.addon, overwrite=True)
-            bpy.ops.preferences.addon_enable(module="usd_connect")
             scene = bpy.context.scene
             scene.usd_connect_live_auto_start_emitter = False
             scene.usd_connect_live_auto_start_receiver = False

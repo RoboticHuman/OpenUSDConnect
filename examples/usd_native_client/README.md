@@ -2,8 +2,8 @@
 
 This example runs two independent USD-native clients:
 
-- `demo.py` publishes a moving sphere while receiving authoritative layered
-  replay into a separate mirror stage.
+- `demo.py` uses `ManagedClient` to publish a moving sphere and receive
+  authoritative layered replay on the same application stage.
 - `peer.py` pre-authors a cube in another stage and publishes its current edit
   target from a separate process.
 
@@ -24,9 +24,8 @@ reports `local_valid=True` and `peer_valid=True`. The launcher then stops its
 temporary server and peer process and removes its temporary event log. Pressing
 `Ctrl+C` performs the same cleanup during an unbounded run.
 
-The ownership rule is visible in `demo.py`: its publisher observes
-the author stage's session layer, while `UsdReceiver` owns different session
-layers on the mirror stage. All three stages share the same read-only base
-layer.
+The ownership rule is visible in `demo.py`: `ManagedClient` selects its own
+transient authoring layer below the authoritative collaboration layers. Both
+processes open equivalent read-only base content.
 See the [USD-native integration contract](../../docs/usd-native-integration.md)
 for the corresponding host integration rules.

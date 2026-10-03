@@ -71,6 +71,7 @@ class ReceiverThread(threading.Thread):
         origin: str | None = None,
         department: str | None = None,
         token: str | None = None,
+        token_provider: Callable[[], str | None] | None = None,
         on_token_issued: Callable[[str], None] | None = None,
         on_stage_metadata: Callable[[dict], None] | None = None,
         on_playback_state: Callable[[dict], None] | None = None,
@@ -94,6 +95,7 @@ class ReceiverThread(threading.Thread):
         self.layered_replay_active = False
         self.layer_mode = LayerMode(layer_mode)
         self.layer_mode_active = LayerMode.MANAGED
+        self._token_provider = token_provider
         self._on_token_issued = on_token_issued
         self._on_stage_metadata = on_stage_metadata
         self._on_playback_state = on_playback_state
@@ -149,6 +151,11 @@ class ReceiverThread(threading.Thread):
     @property
     def last_seq(self) -> int:
         return self._inbox.last_sequence
+
+    @property
+    def stopped(self) -> bool:
+        """Whether the thread ran and exited, so it will not reconnect."""
+        return self.ident is not None and not self.is_alive()
 
     @property
     def queued_message_count(self) -> int:
@@ -262,6 +269,8 @@ class ReceiverThread(threading.Thread):
             prefix_identity = self._received_replay_identity
             self._synchronized_event.clear()
 
+        if self._token_provider is not None:
+            self.token = self._token_provider()
         hello = make_hello(
             "receiver",
             sync_from=sync_from,

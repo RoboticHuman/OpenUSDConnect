@@ -1,4 +1,4 @@
-"""Layer-preserving client lifecycle for USD-native Python applications.
+"""Directional clients for USD-native Python applications.
 
 The classes in this module compose the low-level sender, receiver, emitter,
 and dispatcher without changing their event or stage semantics. Applications
@@ -12,40 +12,20 @@ from collections.abc import Callable, Sequence
 
 from pxr import Usd
 
-from ._client_lifecycle import (
-    deadline_after,
-    prepare_sender_token,
-    raise_if_rejected,
-    remaining_time,
-    stop_receiver,
-)
-from ._client_utils import (
-    client_origin,
-    client_token_handlers,
-    require_app_name,
-    resolve_client_token,
-    validate_layered_source,
-)
+from ._client_base import ClientBase, EmitterClientBase
+from ._client_utils import client_origin, require_app_name, validate_layered_source
 from .adapters import DCCAdapter, UsdStageAdapter
 from .client_id import make_stable_client_id
-from .client_types import ClientPhase, ClientStatus
-from .coalescing import TransformCoalescingWindow
+from .client_observer import ClientObserver
+from .client_types import SyncUpdate
 from .defaults import DEFAULT_HOST, DEFAULT_SYNC_PORT
 from .dispatcher import AssetDependencyRefreshResult, EventDispatcher
-from .emitter import NoticeEmitter, PrimChannel
+from .emitter import PrimChannel
 from .receiver import ReceiverThread
-from .recovery import (
-    RecoveryArtifact,
-    RecoveryError,
-    RecoveryIncident,
-    RejectionDisposition,
-    TransactionFailure,
-)
 from .sender import EventSender
-from .token_client import load_token
 
 
-class UsdReceiver:
+class UsdReceiver(ClientBase):
     """Receive authoritative layered replay through a high-level lifecycle.
 
     ``start`` launches only the socket reader. ``update`` drains and applies
@@ -68,27 +48,18 @@ class UsdReceiver:
         persist_token: bool = True,
         reconnect: bool = True,
         adapter: DCCAdapter | None = None,
-        on_imported: Callable[[list[str]], None] | None = None,
-        on_resync: Callable[[], None] | None = None,
-        on_applied: Callable[[list[str]], None] | None = None,
-        on_applied_events: Callable[[list[dict]], None] | None = None,
-        on_stage_metadata: Callable[[dict], None] | None = None,
-        on_playback_state: Callable[[dict], None] | None = None,
-        on_playback_claimed: Callable[[dict], None] | None = None,
-        on_playback_rejected: Callable[[dict], None] | None = None,
-        on_token_issued: Callable[[str], None] | None = None,
+        observer: ClientObserver | None = None,
     ):
         app_name = require_app_name(app_name)
         if not isinstance(stage, Usd.Stage):
             raise TypeError("UsdReceiver requires a Usd.Stage composition source")
         validate_layered_source(stage)
+        super().__init__(
+            host=host, port=port, token=token, persist_token=persist_token, observer=observer,
+        )
+        self._stage: Usd.Stage | None = stage
         self._owns_stage_adapter = adapter is None
-        destination_adapter = adapter or UsdStageAdapter(stage)
-        resolved_token = resolve_client_token(host, port, token, persist_token)
-        self._stage = stage
-        self._host = host
-        self._port = port
-        self._persist_token = persist_token
+        destination = adapter or UsdStageAdapter(stage)
         self._receiver = ReceiverThread(
             host=host,
             port=port,
@@ -96,25 +67,17 @@ class UsdReceiver:
             reconnect=reconnect,
             client_id=client_id or make_stable_client_id(app_name),
             origin=origin or client_origin(app_name, "recv"),
-            token=resolved_token,
-            on_token_issued=client_token_handlers(host, port, persist_token, on_token_issued),
-            on_stage_metadata=on_stage_metadata,
-            on_playback_state=on_playback_state,
-            on_playback_claimed=on_playback_claimed,
-            on_playback_rejected=on_playback_rejected,
             layered_replay=True,
+            **self._credential.endpoint_kwargs(),
+            **self._hooks.receiver_callbacks(),
         )
         self._dispatcher = EventDispatcher(
             receiver=self._receiver,
-            adapter=destination_adapter,
-            mirror_stage=(None if destination_adapter.targets_stage() is stage else stage),
-            on_imported=on_imported,
-            on_resync=on_resync,
-            on_applied=on_applied,
-            on_applied_events=on_applied_events,
+            adapter=destination,
+            mirror_stage=None if destination.targets_stage() is stage else stage,
+            on_resync=self._hooks.on_resync,
         )
-        self._started = False
-        self._closed = False
+        self._dispatcher.on_applied_events = self._hooks.applied_events_for(self._dispatcher)
 
     @property
     def stage(self) -> Usd.Stage | None:
@@ -126,65 +89,14 @@ class UsdReceiver:
         return self._stage
 
     @property
-    def status(self) -> ClientStatus:
-        """Current receiver transport and replay state."""
-        if self._closed:
-            phase = ClientPhase.CLOSED
-        elif self.auth_rejected or self.connection_rejected:
-            phase = ClientPhase.REJECTED
-        elif self.native_scene_rebuild_required:
-            phase = ClientPhase.RECOVERY_REQUIRED
-        elif self.synchronized:
-            phase = ClientPhase.READY
-        elif self.connected:
-            phase = ClientPhase.REPLAYING
-        elif self._started:
-            phase = ClientPhase.CONNECTING
-        else:
-            phase = ClientPhase.OFFLINE
-        return ClientStatus(
-            phase=phase,
-            connected=self.connected,
-            synchronized=self.synchronized,
-            receiver_connected=self._receiver.connected,
-            reason=(
-                "the adapter-owned scene must be rebuilt after resolver recomposition"
-                if self.native_scene_rebuild_required
-                else self._receiver.rejection_reason
-            ),
-        )
-
-    @property
-    def receiver(self):
-        """The underlying :class:`ReceiverThread`."""
+    def receiver(self) -> ReceiverThread:
+        """The underlying :class:`ReceiverThread`; a diagnostic handle."""
         return self._receiver
 
     @property
-    def client_id(self) -> str:
-        """Stable identity used by this receiver."""
-        return self._receiver.client_id
-
-    @property
-    def applying_seq(self) -> int:
-        """Sequence of the current delivery, available inside apply callbacks."""
-        return self._dispatcher.applying_seq
-
-    @property
-    def dispatcher(self):
-        """The underlying :class:`EventDispatcher`."""
+    def dispatcher(self) -> EventDispatcher:
+        """The underlying :class:`EventDispatcher`; a diagnostic handle."""
         return self._dispatcher
-
-    @property
-    def connected(self) -> bool:
-        return not self._closed and self._receiver.connected
-
-    @property
-    def synchronized(self) -> bool:
-        return not self._closed and self._receiver.synchronized
-
-    @property
-    def layered_replay_active(self) -> bool:
-        return not self._closed and self._receiver.layered_replay_active
 
     @property
     def last_seq(self) -> int:
@@ -201,82 +113,29 @@ class UsdReceiver:
         return self._receiver.replay_epoch
 
     @property
-    def auth_rejected(self) -> bool:
-        return self._receiver.auth_rejected
-
-    @property
-    def connection_rejected(self) -> bool:
-        return self._receiver.hello_rejected
-
-    @property
-    def stage_metadata(self) -> dict:
-        return dict(self._receiver.stage_metadata)
-
-    @property
     def pending_asset_dependencies(self) -> tuple[str, ...]:
         return self._dispatcher.pending_asset_dependencies
 
-    @property
-    def native_scene_rebuild_required(self) -> bool:
-        """Whether an external adapter destination needs a complete rebuild."""
-        return self._dispatcher.native_scene_rebuild_required
-
-    def start(self) -> UsdReceiver:
-        """Start the background socket reader and return this receiver."""
-        if self._closed:
-            raise RuntimeError("UsdReceiver is closed")
-        if not self._started:
-            if self._receiver.token is None and self._persist_token:
-                self._receiver.token = load_token(self._host, self._port)
-            self._receiver.start()
-            self._started = True
-        return self
-
-    def connect(self, timeout: float | None = None) -> bool:
-        """Start and complete the receiver handshake within ``timeout``.
-
-        Queued replay still requires :meth:`update` on the stage-owning thread.
-        """
-        self.start()
-        connected = self._receiver.wait_connected(timeout)
-        if connected:
-            self._require_layered_replay()
-        elif self._receiver.auth_rejected:
-            raise PermissionError("receiver authentication rejected")
-        elif self._receiver.hello_rejected:
-            raise ConnectionError(self._receiver.rejection_reason or "receiver connection rejected")
-        return connected
-
-    def _require_layered_replay(self) -> None:
-        if self._receiver.connected and not self._receiver.layered_replay_active:
-            self.close()
-            raise RuntimeError("server did not negotiate required layered replay")
-
-    def update(self, *, max_messages: int | None = None) -> int:
+    def update(self, *, max_messages: int | None = None) -> SyncUpdate:
         """Apply queued messages on the calling thread.
 
         ``max_messages`` bounds one call's receive work for interactive
         applications. Replay becomes ready only after every message preceding
         the server's synchronization watermark has been applied.
         """
-        if self._closed:
-            raise RuntimeError("UsdReceiver is closed")
-        if not self._started:
-            raise RuntimeError("UsdReceiver has not been started")
-        if self._stage is None:
-            return 0
-        self._require_layered_replay()
-        return self._dispatcher.drain_and_apply(max_messages=max_messages)
+        if not self._begin_update() or self._stage is None:
+            return self._progress()
+        return self._progress(
+            self._dispatch(self._dispatcher.drain_and_apply, max_messages=max_messages)
+        )
 
     def rebind_stage(self, stage: Usd.Stage | None) -> None:
         """Move receive-side composition and managed layers to a new stage.
 
-        Pass ``None`` to park: the receiver stays connected and the queue
-        continues to fill, but ``update()`` returns zero until a new stage
-        is bound. A caller-provided external adapter remains attached.
+        ``None`` parks the receiver: it stays connected and the queue keeps
+        filling until a stage is bound. A caller-provided adapter stays attached.
         """
-        if self._closed:
-            raise RuntimeError("UsdReceiver is closed")
+        self._require_open()
         if stage is None:
             self._stage = None
             self._dispatcher.unbind_stage()
@@ -299,33 +158,30 @@ class UsdReceiver:
         asset_path: str | None = None,
     ) -> AssetDependencyRefreshResult:
         """Retry dependencies under the stage's current resolver context."""
-        if self._closed:
-            raise RuntimeError("UsdReceiver is closed")
-        return self._dispatcher.refresh_asset_dependency(asset_path)
+        self._require_open()
+        return self._dispatch(self._dispatcher.refresh_asset_dependency, asset_path)
 
     def acknowledge_native_scene_rebuilt(self) -> None:
         """Resume projection after rebuilding an external adapter destination."""
-        if self._closed:
-            raise RuntimeError("UsdReceiver is closed")
+        self._require_open()
         self._dispatcher.acknowledge_native_scene_rebuilt()
 
-    def close(self) -> None:
-        """Stop networking and release receiver-owned collaboration layers."""
-        if self._closed:
-            return
-        stop_receiver(self._receiver)
+    def _is_synchronized(self) -> bool:
+        return self._stage is not None and self._receiver.synchronized
+
+    def _is_parked(self) -> bool:
+        return self._stage is None
+
+    def _rebuild_reason(self) -> str:
+        if self._dispatcher.native_scene_rebuild_required:
+            return "the adapter-owned scene must be rebuilt after resolver recomposition"
+        return ""
+
+    def _release(self) -> None:
         self._dispatcher.close()
-        self._closed = True
-
-    def __enter__(self) -> UsdReceiver:
-        return self.start()
-
-    def __exit__(self, exc_type, exc, traceback) -> bool:
-        self.close()
-        return False
 
 
-class UsdPublisher:
+class UsdPublisher(EmitterClientBase):
     """Publish current-edit-target opinions authored on a USD stage."""
 
     def __init__(
@@ -340,26 +196,26 @@ class UsdPublisher:
         department: str | None = None,
         token: str | None = None,
         persist_token: bool = True,
-        on_token_issued: Callable[[str], None] | None = None,
-        on_stage_metadata: Callable[[dict], None] | None = None,
+        observer: ClientObserver | None = None,
         attr_filter: Callable[[str], bool] | None = None,
         replicated_api_schemas: set[str] | None = None,
         extra_channels: Sequence[PrimChannel] | None = None,
         transform_coalesce_seconds: float = 0.0,
+        background_send: bool = False,
     ):
         app_name = require_app_name(app_name)
         if not isinstance(stage, Usd.Stage):
             raise TypeError("UsdPublisher requires a Usd.Stage")
+        super().__init__(
+            host=host, port=port, token=token, persist_token=persist_token, observer=observer,
+        )
         self._stage = stage
-        self._host = host
-        self._port = port
-        self._persist_token = persist_token
-        self._transform_coalescing = TransformCoalescingWindow(transform_coalesce_seconds)
-        self._emitter = NoticeEmitter(
+        self._init_emitter(
             stage,
             attr_filter=attr_filter,
             replicated_api_schemas=replicated_api_schemas,
             extra_channels=extra_channels,
+            transform_coalesce_seconds=transform_coalesce_seconds,
         )
         self._sender = EventSender(
             host,
@@ -367,240 +223,43 @@ class UsdPublisher:
             client_id=client_id or make_stable_client_id(app_name),
             origin=origin or client_origin(app_name, "emit"),
             department=department,
-            token=resolve_client_token(host, port, token, persist_token),
-            on_token_issued=client_token_handlers(host, port, persist_token, on_token_issued),
-            on_stage_metadata=on_stage_metadata,
+            on_stage_metadata=self._hooks.on_stage_metadata,
+            background_send=background_send,
+            **self._credential.endpoint_kwargs(),
         )
-        self._closed = False
-        self._started = False
-        self._connecting = False
 
     @property
     def stage(self) -> Usd.Stage:
         """Application-owned stage observed for authored changes."""
         return self._stage
 
-    @property
-    def status(self) -> ClientStatus:
-        """Current publisher transport, durability, and recovery state."""
-        failure = self._sender.transaction_failure
-        reason = str(failure) if failure is not None else self._sender.rejection_reason
-        if self._closed:
-            phase = ClientPhase.CLOSED
-        elif failure is not None:
-            phase = ClientPhase.RECOVERY_REQUIRED
-        elif self._sender.auth_rejected or self._sender.hello_rejected:
-            phase = ClientPhase.REJECTED
-        elif self.connected:
-            phase = ClientPhase.READY
-        elif self._connecting:
-            phase = ClientPhase.CONNECTING
-        else:
-            phase = ClientPhase.OFFLINE
-        return ClientStatus(
-            phase=phase,
-            connected=self.connected,
-            synchronized=self.synchronized,
-            sender_connected=self._sender.connected,
-            prepared_events=self.prepared_event_count,
-            pending_events=self.pending_event_count,
-            acknowledged_events_total=self.acknowledged_event_count,
-            failure=failure,
-            recovery=self._sender.recovery_incident,
-            reason=reason,
-        )
-
-    @property
-    def sender(self):
-        """The underlying :class:`EventSender`."""
-        return self._sender
-
-    @property
-    def client_id(self) -> str:
-        """Stable identity used by this publisher."""
-        return self._sender.client_id
-
-    @property
-    def emitter(self):
-        """The underlying :class:`NoticeEmitter`."""
-        return self._emitter
-
-    @property
-    def connected(self) -> bool:
-        return not self._closed and self._sender.connected
-
-    @property
-    def synchronized(self) -> bool:
-        """Send-only clients are synchronized whenever their transport is connected."""
-        return self.connected
-
-    @property
-    def auth_rejected(self) -> bool:
-        return self._sender.auth_rejected
-
-    @property
-    def stage_metadata(self) -> dict:
-        return dict(self._sender.stage_metadata)
-
-    @property
-    def prepared_event_count(self) -> int:
-        """Number of events not yet accepted by the sender outbox."""
-        return self._emitter.prepared_event_count
-
-    @property
-    def pending_event_count(self) -> int:
-        """Submitted events not yet durably acknowledged by the server."""
-        return self._sender.pending_event_count
-
-    @property
-    def acknowledged_event_count(self) -> int:
-        """Cumulative events durably acknowledged by the server."""
-        return self._sender.acknowledged_event_count
-
-    @property
-    def transaction_error(self) -> str:
-        """Terminal producer rejection, or an empty string."""
-        return self._sender.transaction_error
-
-    @property
-    def transaction_failure(self) -> TransactionFailure | None:
-        """Structured rejection including its recovery disposition, if any."""
-        return self._sender.transaction_failure
-
-    @property
-    def recovery_incident(self) -> RecoveryIncident | None:
-        """Structured recovery summary for polling and host UI."""
-        return self._sender.recovery_incident
-
-    @property
-    def recovery_artifact(self) -> RecoveryArtifact | None:
-        """Exact quarantined transactions for integration-owned recovery."""
-        return self._sender.recovery_artifact
-
-    @property
-    def recovery_disposition(self) -> RejectionDisposition | None:
-        """Recovery policy category for the current rejection, if any."""
-        return self._sender.recovery_disposition
-
-    def repair_and_resume(self, events: list[dict]) -> int:
-        """Replace a recoverable transaction and resume its ordered outbox.
-
-        The application must first reconcile its stage with authoritative
-        state and rebuild *events* for that state. The repaired transaction is
-        assigned the original rejected ID; later quarantined transactions keep
-        their existing IDs and replay after it.
-        """
-        if self._closed:
-            raise RuntimeError("UsdPublisher is closed")
-        failure = self._sender.transaction_failure
-        if failure is None:
-            raise RecoveryError("no_incident", "there is no recovery incident to resolve")
-        if failure.disposition is not RejectionDisposition.RECOVERABLE_CONFLICT:
-            raise RecoveryError(
-                "wrong_recovery_kind",
-                f"{failure.code_name} is {failure.disposition.value}, not recoverable",
-            )
-        txn_id = self._sender.repair_rejected_transaction(events)
-        if not self.connect():
-            raise ConnectionError(
-                f"transaction {txn_id} repaired but reconnect to "
-                f"{self._host}:{self._port} failed; it remains queued"
-            )
-        return txn_id
-
-    def flush(self, timeout: float | None = None) -> bool:
-        """Submit any coalesced transform, then wait for durable acknowledgement."""
-        if self._closed:
-            raise RuntimeError("UsdPublisher is closed")
-        deadline = deadline_after(timeout)
-        if self._transform_coalescing.buffering:
-            if not self.connected and not self.connect(timeout=remaining_time(deadline)):
-                return False
-            events = self._transform_coalescing.force(self._emitter)
-            if events and not self._send(events):
-                return False
-        return self._sender.flush(remaining_time(deadline))
-
-    def start(self) -> UsdPublisher:
-        """Enter the nonblocking lifecycle without opening a socket."""
-        if self._closed:
-            raise RuntimeError("UsdPublisher is closed")
-        self._started = True
-        return self
-
-    def connect(self, timeout: float | None = None) -> bool:
-        """Start and complete the publisher handshake within ``timeout``."""
-        self.start()
-        prepare_sender_token(
-            self._sender, None,
-            host=self._host, port=self._port, persist_token=self._persist_token,
-        )
-        self._connecting = True
-        try:
-            connected = self._sender.connect(timeout=timeout)
-        finally:
-            self._connecting = False
-        if connected:
-            return True
-        raise_if_rejected(self._sender, "publisher")
-        return False
-
     def disconnect(self) -> None:
-        """Close the socket while retaining dirty and prepared emitter state."""
+        """Close the socket and pause reconnection until :meth:`connect`."""
         if not self._closed:
+            self._paused = True
             self._sender.disconnect()
 
-    def _send(self, events: list[dict]) -> int:
-        if not events:
-            return 0
-        if self._sender.send_events(events):
-            self._emitter.mark_prepared_events_sent(events)
-            self._transform_coalescing.mark_submitted()
-            return len(events)
-        return 0
+    def update(self, *, max_messages: int | None = None) -> SyncUpdate:
+        """Submit one retryable batch, or schedule a reconnect while disconnected.
 
-    def _prepare_outgoing_events(self) -> list[dict]:
-        return self._transform_coalescing.prepare(self._emitter)
-
-    def update(self) -> int:
-        """Build and send one retryable batch of authored stage changes."""
-        if self._closed:
-            raise RuntimeError("UsdPublisher is closed")
-        if not self.connected:
-            return 0
-        return self._send(self._prepare_outgoing_events())
-
-    def publish_current_edit_target(self) -> int:
-        """Publish all opinions currently authored in the active edit target.
-
-        An earlier retained batch must be retried with :meth:`update` first.
-        This keeps one call from ambiguously mixing two transport transactions.
+        ``max_messages`` is accepted for a uniform host loop; a publisher
+        receives nothing.
         """
-        if self._closed:
-            raise RuntimeError("UsdPublisher is closed")
-        if not self.connected:
-            return 0
-        if self._emitter.prepared_event_count:
-            raise RuntimeError(
-                "an earlier publisher batch is still prepared; call update() "
-                "before publishing the current edit target"
-            )
-        return self._send(self._emitter.prepare_snapshot_events_for_send())
+        if not self._begin_update():
+            return self._progress()
+        sent = 0
+        if self._sender.connected:
+            sent = self._send(self._prepare_outgoing_events())
+        elif not self._paused:
+            self._sender.request_connect()
+        return self._progress(submitted=sent)
 
-    def close(self) -> None:
-        """Disconnect and release the stage notice listener."""
-        if self._closed:
-            return
-        self._sender.disconnect()
-        self._emitter.cleanup()
-        self._closed = True
+    def _is_synchronized(self) -> bool:
+        return self._sender.connected
 
-    def __enter__(self) -> UsdPublisher:
-        return self.start()
-
-    def __exit__(self, exc_type, exc, traceback) -> bool:
-        self.close()
-        return False
+    def _connect_sender(self, timeout: float | None = None) -> bool:
+        self._paused = False
+        return super()._connect_sender(timeout)
 
 
 __all__ = ["UsdPublisher", "UsdReceiver"]

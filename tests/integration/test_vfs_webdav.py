@@ -797,7 +797,7 @@ class TestSnapshotReplayContract:
 
         def pump_until_ready():
             client.update()
-            return client.synchronized
+            return client.status.synchronized
 
         try:
             client.start()
@@ -814,7 +814,7 @@ class TestSnapshotReplayContract:
             )
             assert 200 <= status < 300
 
-            assert _wait_until(lambda: client.connected and not client.synchronized)
+            assert _wait_until(lambda: client.status.connected and not client.status.synchronized)
             assert _wait_until(
                 lambda: pump_until_ready()
                 and bool(stage.GetPrimAtPath("/Root/FromVfsPut"))

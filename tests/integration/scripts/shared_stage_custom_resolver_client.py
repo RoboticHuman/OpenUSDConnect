@@ -65,7 +65,7 @@ def main() -> int:
                 raise RuntimeError(
                     "first custom-resolver edit was not committed: "
                     f"update={update!r}, mapped={client.is_layer_reachable(content)}, "
-                    f"prepared={client.prepared_event_count}, value={value.Get()!r}, "
+                    f"prepared={client.status.prepared_events}, value={value.Get()!r}, "
                     f"content_default={content_spec.default if content_spec else None!r}, "
                     f"dirty={content.dirty}, editable={content.permissionToEdit}, "
                     f"tracker={type(client._tracker).__name__}, "
@@ -80,7 +80,7 @@ def main() -> int:
                 raise RuntimeError(
                     "second custom-resolver edit was not committed: "
                     f"update={update!r}, mapped={client.is_layer_reachable(content)}, "
-                    f"prepared={client.prepared_event_count}, value={value.Get()!r}"
+                    f"prepared={client.status.prepared_events}, value={value.Get()!r}"
                 )
 
         print(

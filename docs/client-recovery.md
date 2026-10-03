@@ -7,9 +7,11 @@ producer session and transaction ID.
 A deterministic producer rejection requires an explicit policy. The rejected
 transaction and its ordered suffix are quarantined because later IDs cannot
 safely pass the gap.
-`ManagedClient` and `SharedStageClient` report this through
+`ManagedClient`, `SharedStageClient`, and `UsdPublisher` report this through
 `client.status.phase == ClientPhase.RECOVERY_REQUIRED`,
-`client.status.recovery`, and `client.recovery_artifact`.
+`client.status.recovery`, and `client.recovery_artifact`. `UsdPublisher`
+recovers only by repair (`repair_and_resume(events)`), because it holds no
+authoritative state to fall back to.
 
 Ordinary `update()` calls report the condition without raising. Explicit
 recovery commands may raise `RecoveryError`, `TimeoutError`, or
@@ -90,13 +92,23 @@ This operation requires an equivalent clean stage whose loaded
 
 ```python
 clean_stage = open_clean_equivalent_stage()
-assessment = client.recover_use_server(clean_stage=clean_stage, timeout=5)
+previous_stage = client.stage
+try:
+    assessment = client.recover_use_server(clean_stage=clean_stage, timeout=5)
+finally:
+    # Recovery may bind the replacement before replay completes.
+    if client.stage is not previous_stage:
+        replace_stage_in_host(client.stage)
 
 for index, snapshot in enumerate(assessment.rejected_snapshots):
     snapshot.Export(f"rejected-work-{index}.usda")
-
-replace_stage_in_host(client.stage)
 ```
+
+If replay times out after the replacement is bound,
+`client.status.recovery_stage_pending`
+is `True`: keep authoring disabled and continue with
+`client.resume_recovery(timeout=5)`, which keeps the original rejected
+snapshots. A failure before replacement is retried with `recover_use_server()`.
 
 Opening the same asset path again in the same process is usually not enough.
 OpenUSD's layer registry may return the same loaded `Sdf.Layer` objects.
@@ -170,14 +182,18 @@ except (TimeoutError, ConnectionError):
 Stable codes include `no_incident`, `wrong_recovery_kind`,
 `stale_assessment`, `stage_not_synchronized`, `invalid_clean_stage`,
 `shared_loaded_layers`, `invalid_repair_target`, `local_changes_pending`,
-`transactions_pending`, `stage_unavailable`, and `edit_target_changed`.
+`transactions_pending`, `no_pending_recovery_stage`, `stage_unavailable`, and
+`edit_target_changed`.
 
 ## UI guidance
 
-Drive editing state from `client.status.phase`:
+Enable authoring only when `client.status.can_author` is true; use
+`client.status.phase` for the message:
 
-- `READY`: enable authoring
-- `CONNECTING` or `REPLAYING`: keep calling `update()`, but disable authoring
+- `CONNECTING` or `REPLAYING`: keep calling `update()`
+- `OFFLINE`: nothing will reconnect; call `connect()` after `disconnect()`, or
+  create a new client if its receiver used `reconnect=False`
+- `PARKED`: bind a stage with `rebind_stage()`
 - `RECOVERY_REQUIRED`: disable authoring and present Use Server, repair, or
   application-specific merge choices
 - `REJECTED`: show the authentication or layer-mode reason

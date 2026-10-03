@@ -9,6 +9,7 @@ from integrations.mcp.config import McpConfig
 from integrations.mcp.errors import ToolError
 from openusdconnect import usd_client
 from openusdconnect.checkpoints import MirrorCheckpoint
+from openusdconnect.client_types import SyncUpdate
 
 
 class _FakeSender:
@@ -30,17 +31,26 @@ class _FakeSender:
         self.is_connected = False
 
 
+def _applied(count: int) -> SyncUpdate:
+    return SyncUpdate(applied_events=count, submitted_events=0)
+
+
 def _patch_net(monkeypatch, started, stopped):
     class _FakeReceiver:
         synchronized = True
         connected = True
+        auth_rejected = False
+        hello_rejected = False
+        rejection_reason = ""
         layered_replay_active = True
         server_instance = "test-server"
         replay_epoch = 0
+        stopped = False
 
         def __init__(self, **kwargs):
             self.options = kwargs
             self.token = kwargs["token"]
+            self.sync_from = kwargs["sync_from"]
             self.joined = False
 
         def start(self):
@@ -55,6 +65,12 @@ def _patch_net(monkeypatch, started, stopped):
         def join(self, timeout=None):
             assert self in stopped
             self.joined = True
+
+        def drain_queue(self, max_messages=None):
+            return []
+
+        def mark_replay_applied(self):
+            return False
 
     monkeypatch.setattr(session_mod, "EventSender", _FakeSender)
     monkeypatch.setattr(usd_client, "ReceiverThread", _FakeReceiver)
@@ -106,17 +122,14 @@ def test_playback_status_reflects_broadcast(monkeypatch):
 
     assert session.playback_status()["observed"] is False  # nothing broadcast yet
 
-    session._on_playback_state(
-        {"playing": True, "time": 12.0, "rate": 2.0, "leader_client_id": "mcp-x"}
-    )
+    notify = session.receiver.receiver.options["on_playback_state"]
+    notify({"playing": True, "time": 12.0, "rate": 2.0, "leader_client_id": "mcp-x"})
     st = session.playback_status()
     assert st["observed"] and st["playing"] is True
     assert st["time"] == 12.0 and st["rate"] == 2.0
     assert st["has_leader"] is True and st["is_leader"] is True
 
-    session._on_playback_state(
-        {"playing": False, "time": 0.0, "rate": 1.0, "leader_client_id": "someone-else"}
-    )
+    notify({"playing": False, "time": 0.0, "rate": 1.0, "leader_client_id": "someone-else"})
     st2 = session.playback_status()
     assert st2["is_leader"] is False
     assert st2["leader_client_id"] == "someone-else"
@@ -162,7 +175,7 @@ def test_concurrent_foreign_write_cannot_confirm_own_transaction(monkeypatch):
     def apply_foreign_write():
         session.mirror_stage.DefinePrim("/Foreign", "Xform")
         session.receiver.dispatcher.last_seq += 1
-        return 1
+        return _applied(1)
 
     monkeypatch.setattr(session.receiver, "update", apply_foreign_write)
     try:
@@ -196,7 +209,7 @@ def test_confirmation_requires_matching_applied_checkpoint(
     def apply():
         session.receiver.dispatcher.last_seq = 1
         session.receiver.receiver.synchronized = ready
-        return 0
+        return _applied(0)
 
     monkeypatch.setattr(session.receiver, "update", apply)
     try:
@@ -225,7 +238,7 @@ def test_confirmation_waits_for_ack_and_mirror(monkeypatch):
     def apply():
         updates.append(True)
         session.receiver.dispatcher.last_seq = 50 if len(updates) >= 2 else 1
-        return 1
+        return _applied(1)
 
     monkeypatch.setattr(session.sender, "flush", flush)
     monkeypatch.setattr(session.receiver, "update", apply)
@@ -256,7 +269,7 @@ def test_ack_arriving_during_apply_is_confirmed_without_sleep(monkeypatch, appli
         acknowledged = True
         session.sender.acknowledged_checkpoint = MirrorCheckpoint("test-server", 0, 1)
         session.receiver.dispatcher.last_seq = 1
-        return applied
+        return _applied(applied)
 
     monkeypatch.setattr(session.sender, "send_events", lambda events: True, raising=False)
     monkeypatch.setattr(session.sender, "flush", flush)
@@ -283,7 +296,7 @@ def test_confirmation_respects_budget_with_or_without_progress(monkeypatch, appl
         nonlocal elapsed
         elapsed += 0.001
         session.receiver.dispatcher.last_seq += applied
-        return applied
+        return _applied(applied)
 
     def sleep(seconds):
         nonlocal elapsed
@@ -313,7 +326,7 @@ def test_pending_ack_times_out_without_false_confirmation(monkeypatch):
     monkeypatch.setattr(session.sender, "send_events", lambda events: True, raising=False)
     monkeypatch.setattr(session.sender, "flush", lambda timeout: False)
     session.sender.acknowledged_checkpoint = MirrorCheckpoint("test-server", 0, 1)
-    monkeypatch.setattr(session.receiver, "update", lambda: 0)
+    monkeypatch.setattr(session.receiver, "update", lambda: _applied(0))
     session.receiver.dispatcher.last_seq = 100
     try:
         assert not session.send([{}])["mirror_synced"]
@@ -335,7 +348,7 @@ def test_rejected_transaction_is_reported_as_tool_error(monkeypatch, after_apply
     def apply():
         nonlocal applied
         applied = True
-        return 0
+        return _applied(0)
 
     def reject(timeout):
         if after_apply and not applied:
@@ -377,12 +390,14 @@ def test_mirror_preserves_identity_token_and_callbacks(monkeypatch, saved_token)
         assert options["client_id"] == "mcp-identity"
         assert options["origin"] == f"{session._origin_base}-recv"
         assert options["layered_replay"] is True
-        options["on_playback_state"]({"playing": True})
+        options["on_playback_state"](
+            {"playing": True, "time": 1.0, "rate": 1.0, "leader_client_id": ""}
+        )
         assert session.playback_status()["playing"] is True
         dispatcher = session.receiver.dispatcher
         dispatcher.last_seq = 3
         dispatcher._applying_seq = 7
-        dispatcher.on_applied(["/World"])
+        dispatcher.on_applied_events([{"k": "ensure_prim", "prim": "/World"}])
         assert session._dirty == {"/World": 7}
         assert session.receiver.last_seq == 3
     finally:
