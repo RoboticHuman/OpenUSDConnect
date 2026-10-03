@@ -333,7 +333,6 @@ class EventSender:
         if connection is None:
             return False
         generation = connection.generation
-        self._socket_generation = generation
 
         self.auth_rejected = False
         self.hello_rejected = False
@@ -380,6 +379,7 @@ class EventSender:
                 if epoch != self._connect_epoch or time.monotonic() >= deadline:
                     return False
                 self.sock = sock
+                self._socket_generation = generation
                 self._connecting_socket = None
                 published = True
             sock.settimeout(max(0.001, deadline - time.monotonic()))
@@ -907,11 +907,12 @@ class EventSender:
     def _close(self, *, expected: socket.socket | None = None) -> None:
         with self._condition:
             sock = self.sock
-            if expected is not None and sock is not expected:
+            if sock is None or (expected is not None and sock is not expected):
                 return
             self.sock = None
-            generation = self._socket_generation
-            self._session.disconnect(generation)
+            # An unpublished handshake still owns its native connection and
+            # ends it itself; only the published socket's generation ends here.
+            self._session.disconnect(self._socket_generation)
             self._condition.notify_all()
         self._close_socket_object(sock)
 

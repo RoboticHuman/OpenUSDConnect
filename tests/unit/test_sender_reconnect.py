@@ -275,35 +275,51 @@ def test_background_handshake_honors_short_timeout():
             sender.disconnect()
 
 
-def test_cancel_after_hello_before_publication(monkeypatch):
+@pytest.mark.parametrize("background_send", [False, True], ids=["synchronous", "background"])
+def test_cancel_after_hello_before_publication(monkeypatch, background_send):
     with socket.socket() as server:
         server.bind(("127.0.0.1", 0))
         server.listen()
         server.settimeout(3)
         entered, release = threading.Event(), threading.Event()
-        sender = EventSender(*server.getsockname(), client_id="late")
+        sender = EventSender(
+            *server.getsockname(), client_id="late", background_send=background_send,
+        )
         accept = sender._accept_handshake_response
 
         def blocked(*args):
-            result = accept(*args)
             entered.set()
             assert release.wait(3)
-            return result
+            return accept(*args)
+
+        def handshake(conn):
+            conn.settimeout(2)
+            recv_framed(conn)
+            send_framed(conn, encode_message({"type": "hello_ok"}))
 
         monkeypatch.setattr(sender, "_accept_handshake_response", blocked)
         try:
             assert sender.request_connect()
             conn, _ = server.accept()
             with conn:
-                conn.settimeout(2)
-                recv_framed(conn)
-                send_framed(conn, encode_message({"type": "hello_ok"}))
+                handshake(conn)
                 assert entered.wait(2)
                 sender.disconnect()
                 release.set()
                 _finish(sender)
             assert not sender.connected
-            assert not sender.recovery_required
+
+            # The canceled attempt must not quarantine the producer session.
+            monkeypatch.setattr(sender, "_accept_handshake_response", accept)
+            assert sender.request_connect()
+            conn, _ = server.accept()
+            with conn:
+                handshake(conn)
+                _finish(sender)
+                assert sender.send_events(
+                    [{"k": "ensure_prim", "prim": "/After", "typeName": "Xform"}],
+                ), sender.transaction_error
+                assert recv_framed(conn)
         finally:
             release.set()
             sender.disconnect()
