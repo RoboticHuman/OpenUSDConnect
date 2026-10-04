@@ -1,6 +1,7 @@
 #pragma once
 
 #include "openusdconnect/client/detail/ordered_outbox_storage.h"
+#include "openusdconnect/client/producer_recovery.h"
 
 #include <cstddef>
 #include <cstdint>
@@ -36,14 +37,6 @@ enum class ProducerResult : std::uint8_t
 	TransactionMissing,
 	RecoveryNotRecoverable,
 	InvalidArgument,
-};
-
-enum class ProducerRecoveryDisposition : std::uint8_t
-{
-	None,
-	RecoverableConflict,
-	InvalidOperation,
-	SessionFatal,
 };
 
 struct ProducerConnectionStart final

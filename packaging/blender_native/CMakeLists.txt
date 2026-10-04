@@ -23,7 +23,7 @@ add_subdirectory(
 nanobind_add_module(_native_client
     "${OPENUSDCONNECT_SOURCE_DIR}/native/python/client_module.cpp"
 )
-target_link_libraries(_native_client PRIVATE OpenUSDConnectClientCore)
+target_link_libraries(_native_client PRIVATE OpenUSDConnect::ClientProtocol)
 target_compile_features(_native_client PRIVATE cxx_std_17)
 
 if(MSVC)

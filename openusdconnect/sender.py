@@ -834,18 +834,9 @@ class EventSender:
                     reason=reason,
                     expected_txn_id=int(result.ExpectedTxnId()),
                 )
-                native_disposition = {
-                    RejectionDisposition.RECOVERABLE_CONFLICT: (
-                        _client_backend.ProducerRecoveryDisposition.RECOVERABLE_CONFLICT
-                    ),
-                    RejectionDisposition.INVALID_OPERATION: (
-                        _client_backend.ProducerRecoveryDisposition.INVALID_OPERATION
-                    ),
-                    RejectionDisposition.SESSION_FATAL: (
-                        _client_backend.ProducerRecoveryDisposition.SESSION_FATAL
-                    ),
-                }[failure.disposition]
-                accepted = self._session.reject(generation, txn_id, native_disposition)
+                accepted = self._session.reject(
+                    generation, txn_id, _client_backend.rejection_disposition(code)
+                )
                 if accepted == _client_backend.ProducerResult.STALE_GENERATION:
                     return
                 if accepted == _client_backend.ProducerResult.TRANSACTION_MISSING:

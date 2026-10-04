@@ -2,8 +2,9 @@
 
 The native core is split into two composable C++17 targets:
 
-- `OpenUSDConnect::ClientCore` provides framing, receiver ordering/replay, and producer outbox
-  state. It has no FlatBuffers or OpenUSD dependency.
+- `OpenUSDConnect::ClientCore` provides framing, receiver ordering/replay, producer outbox state,
+  and the client phase and rejection policy (`engine/status.h`). It has no FlatBuffers or OpenUSD
+  dependency.
 - `OpenUSDConnect::ClientProtocol` adds the generated FlatBuffers schema plus transport-neutral
   handshake, control-message, and transaction construction helpers.
 
@@ -26,6 +27,7 @@ and `ControlMessageView` then classify the verified envelope without further val
 All borrowed pointers remain valid only while the original receive buffer remains alive and
 unchanged.
 
-When included with `add_subdirectory`, link `OpenUSDConnect::ClientProtocol`. FlatBuffers remains a
-consumer-provided header dependency; if `flatbuffers::flatbuffers` already exists, the target links
-it automatically.
+When included with `add_subdirectory`, link `OpenUSDConnect::ClientProtocol`. If
+`flatbuffers::flatbuffers` already exists, the target links it. Otherwise CMake fetches the pinned
+FlatBuffers release headers with `FetchContent`; for offline builds, set
+`FETCHCONTENT_SOURCE_DIR_FLATBUFFERS` to an existing copy that contains `include/flatbuffers`.

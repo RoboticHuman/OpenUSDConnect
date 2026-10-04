@@ -9,6 +9,7 @@ import time
 from collections.abc import Callable
 from typing import TYPE_CHECKING
 
+from . import _client_backend
 from .client_types import ClientPhase, ClientStatus
 from .sender import TransactionRejectedError
 
@@ -19,6 +20,17 @@ LOG = logging.getLogger(__name__)
 
 DEFAULT_WAIT_TIMEOUT_S = 10.0
 _POLL_INTERVAL_S = 0.01
+
+_PHASES = {
+    _client_backend.ClientPhase.OFFLINE: ClientPhase.OFFLINE,
+    _client_backend.ClientPhase.CONNECTING: ClientPhase.CONNECTING,
+    _client_backend.ClientPhase.REPLAYING: ClientPhase.REPLAYING,
+    _client_backend.ClientPhase.READY: ClientPhase.READY,
+    _client_backend.ClientPhase.RECOVERY_REQUIRED: ClientPhase.RECOVERY_REQUIRED,
+    _client_backend.ClientPhase.REJECTED: ClientPhase.REJECTED,
+    _client_backend.ClientPhase.CLOSED: ClientPhase.CLOSED,
+    _client_backend.ClientPhase.PARKED: ClientPhase.PARKED,
+}
 
 
 def deadline_after(timeout: float | None) -> float | None:
@@ -48,21 +60,17 @@ def compute_phase(
     connecting: bool,
 ) -> ClientPhase:
     """The one precedence order every client uses for ``ClientStatus.phase``."""
-    if closed:
-        return ClientPhase.CLOSED
-    if recovery_required:
-        return ClientPhase.RECOVERY_REQUIRED
-    if rejected:
-        return ClientPhase.REJECTED
-    if parked:
-        return ClientPhase.PARKED
-    if replaying:
-        return ClientPhase.REPLAYING
-    if ready:
-        return ClientPhase.READY
-    if connecting:
-        return ClientPhase.CONNECTING
-    return ClientPhase.OFFLINE
+    return _PHASES[
+        _client_backend.compute_phase(
+            closed=closed,
+            recovery_required=recovery_required,
+            rejected=rejected,
+            parked=parked,
+            replaying=replaying,
+            ready=ready,
+            connecting=connecting,
+        )
+    ]
 
 
 def raise_if_blocked(client, status: ClientStatus) -> None:

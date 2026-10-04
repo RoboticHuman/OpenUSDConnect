@@ -12,25 +12,14 @@ endif()
 
 add_subdirectory(../../native/client_core client_core)
 
-set(OPENUSDCONNECT_FLATBUFFERS_INCLUDE_DIR
-    "${CMAKE_CURRENT_SOURCE_DIR}/../../integrations/unreal/OpenUSDConnect/Source/OpenUSDConnectPXR/ThirdParty/flatbuffers/include"
-    CACHE PATH "Directory containing the pinned FlatBuffers C++ headers"
-)
-if(NOT EXISTS "${OPENUSDCONNECT_FLATBUFFERS_INCLUDE_DIR}/flatbuffers/flatbuffers.h")
-    message(FATAL_ERROR
-        "FlatBuffers headers are missing. Run "
-        "integrations/unreal/OpenUSDConnect/setup_flatbuffers.py before configuring native tests, "
-        "or set OPENUSDCONNECT_FLATBUFFERS_INCLUDE_DIR."
-    )
-endif()
-
 add_executable(OpenUSDConnectProtocolTests test_protocol_codec.cpp)
 target_link_libraries(OpenUSDConnectProtocolTests PRIVATE OpenUSDConnect::ClientProtocol)
-target_include_directories(OpenUSDConnectProtocolTests PRIVATE
-    "${OPENUSDCONNECT_FLATBUFFERS_INCLUDE_DIR}"
-)
 add_test(NAME OpenUSDConnectProtocolTests COMMAND OpenUSDConnectProtocolTests)
 
 add_executable(OpenUSDConnectReplayIdentityTests test_replay_identity.cpp)
 target_link_libraries(OpenUSDConnectReplayIdentityTests PRIVATE OpenUSDConnect::ClientCore)
 add_test(NAME OpenUSDConnectReplayIdentityTests COMMAND OpenUSDConnectReplayIdentityTests)
+
+add_executable(OpenUSDConnectClientEngineTests test_client_engine.cpp)
+target_link_libraries(OpenUSDConnectClientEngineTests PRIVATE OpenUSDConnect::ClientProtocol)
+add_test(NAME OpenUSDConnectClientEngineTests COMMAND OpenUSDConnectClientEngineTests)
