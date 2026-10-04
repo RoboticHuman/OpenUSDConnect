@@ -23,9 +23,6 @@ _RECONNECT_MAX_DELAY = 30.0
 _SOCKET_TIMEOUT = 30.0
 _MAX_QUEUE_DEPTH = 50_000
 
-# The transport a receiver connects with, read when it starts.
-_SOCKET_FACTORY = _client_backend.TcpSocketFactory()
-
 _NATIVE_LAYER_MODES = {
     LayerMode.MANAGED: _client_backend.LayerMode.MANAGED,
     LayerMode.SHARED_STAGE: _client_backend.LayerMode.SHARED_STAGE,
@@ -329,7 +326,7 @@ class ReceiverThread:
         self._driver = _client_backend.ReceiverDriver(
             self._endpoint,
             self._notifications,
-            _SOCKET_FACTORY,
+            _client_backend.TcpSocketFactory(),
             token_provider=self._connection_token,
             notification_sink=self._deliver,
             log=_log,

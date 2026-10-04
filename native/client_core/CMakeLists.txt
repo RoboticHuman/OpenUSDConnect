@@ -70,8 +70,9 @@ target_link_libraries(OpenUSDConnectClientDriver
 )
 openusdconnect_configure_client_library(OpenUSDConnectClientDriver)
 
-# Scripted sockets that let tests drive the reference driver without a network.
-add_library(OpenUSDConnectClientDriverTesting STATIC
+# Scripted sockets that let the C++ tests drive the reference driver without a
+# network. Built only for a target that links it; no shipped module does.
+add_library(OpenUSDConnectClientDriverTesting STATIC EXCLUDE_FROM_ALL
     src/driver/testing/scripted_socket.cpp
 )
 add_library(OpenUSDConnect::ClientDriverTesting ALIAS OpenUSDConnectClientDriverTesting)

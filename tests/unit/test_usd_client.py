@@ -25,10 +25,22 @@ from openusdconnect.usd_client import UsdPublisher, UsdReceiver
 from tests.helpers import (
     PeerTraffic,
     RecordingObserver,
-    force_handshake,
-    handshake,
-    scripted_start,
+    connect_client,
+    embedded_server,
+    ensure_prim_event,
+    wait_until,
 )
+
+
+@pytest.fixture(scope="module")
+def server():
+    with embedded_server() as runtime:
+        yield runtime
+
+
+@pytest.fixture
+def port(server):
+    return server.server_address[1]
 
 
 class _SenderStub:
@@ -205,7 +217,7 @@ def test_receiver_rebinds_an_explicit_usd_stage_adapter():
         receiver.close()
 
 
-def test_receiver_surfaces_and_acknowledges_native_scene_rebuild():
+def test_receiver_surfaces_and_acknowledges_native_scene_rebuild(port):
     class _ProjectionState:
         native_scene_rebuild_required = True
 
@@ -225,11 +237,12 @@ def test_receiver_surfaces_and_acknowledges_native_scene_rebuild():
         adapter=MockAdapter(),
         persist_token=False,
         reconnect=False,
+        port=port,
     )
-    state = _ProjectionState()
-    receiver._dispatcher._projection_state = state
-    handshake(receiver, synchronized=True)
     try:
+        connect_client(receiver)
+        state = _ProjectionState()
+        receiver._dispatcher._projection_state = state
         assert receiver.status.phase is ClientPhase.RECOVERY_REQUIRED
         assert "must be rebuilt" in receiver.status.reason
 
@@ -241,21 +254,25 @@ def test_receiver_surfaces_and_acknowledges_native_scene_rebuild():
         receiver.close()
 
 
-def test_receiver_status_distinguishes_connecting_replay_and_ready():
+def test_receiver_status_distinguishes_connecting_replay_and_ready(server):
     receiver = UsdReceiver(
         Usd.Stage.CreateInMemory(),
         app_name="status-receiver",
         persist_token=False,
         reconnect=False,
+        port=server.server_address[1],
     )
     try:
         assert receiver.status.phase is ClientPhase.OFFLINE
-        server = scripted_start(receiver)
-        assert receiver.status.phase is ClientPhase.CONNECTING
-        peer = server.connect(receiver.receiver)
+        # While a transaction holds the server's barrier, it cannot answer the hello.
+        with server.sync_server.txn_barrier.shared():
+            receiver.start()
+            assert receiver.status.phase is ClientPhase.CONNECTING
+        assert receiver.receiver.wait_connected(5)
         assert receiver.status.phase is ClientPhase.REPLAYING
-        peer.synchronize(receiver.receiver)
-        assert receiver.status.phase is ClientPhase.READY
+        wait_until(
+            lambda: receiver.update() is not None and receiver.status.phase is ClientPhase.READY
+        )
         assert receiver.status.receiver_connected is True
         assert receiver.status.sender_connected is None
     finally:
@@ -301,20 +318,21 @@ def test_publisher_context_start_is_nonblocking_and_update_connects_in_backgroun
     assert publisher.status.phase is ClientPhase.CLOSED
 
 
-def test_managed_status_exposes_partial_connection_and_event_counts():
+def test_managed_status_exposes_partial_connection_and_event_counts(port):
     client = ManagedClient(
         Usd.Stage.CreateInMemory(),
         app_name="status-managed",
         persist_token=False,
         reconnect=False,
+        port=port,
     )
     sender = _SenderStub([])
     sender.connected = False
     sender.pending_event_count = 4
     sender.acknowledged_event_count = 7
     client._sender = sender
-    force_handshake(client, synchronized=True)
     try:
+        connect_client(client)
         status = client.status
         assert status.phase is ClientPhase.CONNECTING
         assert status.connected is False
@@ -331,16 +349,16 @@ def test_managed_status_exposes_partial_connection_and_event_counts():
 
 
 @pytest.fixture
-def ready_managed_client(monkeypatch):
+def ready_managed_client(monkeypatch, port):
     client = ManagedClient(
-        Usd.Stage.CreateInMemory(), app_name="managed-api", persist_token=False,
+        Usd.Stage.CreateInMemory(), app_name="managed-api", persist_token=False, port=port,
     )
     sender = _SenderStub([True] * 10)
     client._sender = sender
-    peer = force_handshake(client, synchronized=True)
-    monkeypatch.setattr(client._dispatcher, "drain_and_apply", lambda max_messages=None: 0)
     try:
-        yield client, sender, peer
+        connect_client(client)
+        monkeypatch.setattr(client._dispatcher, "drain_and_apply", lambda max_messages=None: 0)
+        yield client, sender
     finally:
         client.close()
 
@@ -361,7 +379,7 @@ def test_managed_invalid_configuration_preserves_stage(options):
 
 
 def test_managed_metadata_only_changes_count_as_unsent_work(ready_managed_client):
-    client, _sender, _peer = ready_managed_client
+    client, _sender = ready_managed_client
     with Usd.EditContext(client.stage, client.stage.GetRootLayer()):
         client.stage.SetFramesPerSecond(48)
     assert client.status.has_unsent_changes
@@ -379,13 +397,15 @@ def test_managed_metadata_only_changes_count_as_unsent_work(ready_managed_client
 
 
 def test_managed_snapshot_waits_for_replay_without_losing_newer_edits(
-    ready_managed_client, monkeypatch,
+    ready_managed_client, server, monkeypatch,
 ):
-    client, sender, peer = ready_managed_client
+    client, sender = ready_managed_client
     starts = []
     client._started = False
     monkeypatch.setattr(client._receiver, "start", lambda: starts.append(True))
-    peer.send({"type": "resync"})
+    # A purge resets the connected receiver in place.
+    server.sync_server.purge()
+    wait_until(lambda: not client.receiver.synchronized)
     value = UsdGeom.Sphere.Define(client.stage, "/Local").GetRadiusAttr()
     value.Set(1)
 
@@ -396,9 +416,11 @@ def test_managed_snapshot_waits_for_replay_without_losing_newer_edits(
     with pytest.raises(RuntimeError, match="earlier publisher batch"):
         client.publish_current_edit_target()
     value.Set(2)
-    # The stubbed dispatcher applies nothing, so take the reset directly.
-    client._receiver.drain_queue()
-    peer.synchronize(client._receiver)
+    # The stubbed dispatcher applies nothing, so take the replay directly.
+    wait_until(
+        lambda: client.receiver.drain_queue() is not None
+        and client.receiver.mark_replay_applied()
+    )
     assert client.update().submitted_events > 0
     assert client.status.has_unsent_changes
     assert client.update().submitted_events > 0
@@ -415,7 +437,7 @@ def test_managed_snapshot_waits_for_replay_without_losing_newer_edits(
 def test_managed_rebind_requires_explicit_unsent_discard(
     ready_managed_client, prepare, park,
 ):
-    client, _sender, _peer = ready_managed_client
+    client, _sender = ready_managed_client
     old_stage = client.stage
     old_stage.DefinePrim("/Local", "Xform")
     if prepare:
@@ -432,7 +454,7 @@ def test_managed_rebind_requires_explicit_unsent_discard(
 
 
 def test_managed_rebind_cannot_discard_submitted_work(ready_managed_client):
-    client, _sender, _peer = ready_managed_client
+    client, _sender = ready_managed_client
     old_stage = client.stage
     old_stage.DefinePrim("/Local", "Xform")
     assert client.update().submitted_events > 0
@@ -442,7 +464,7 @@ def test_managed_rebind_cannot_discard_submitted_work(ready_managed_client):
 
 
 def test_managed_parked_client_is_not_ready(ready_managed_client):
-    client, _sender, _peer = ready_managed_client
+    client, _sender = ready_managed_client
     client.rebind_stage(None)
     assert client.status.connected
     assert not client.status.synchronized
@@ -476,7 +498,7 @@ def test_managed_queued_callback_can_close_before_stage_work(monkeypatch):
 
 
 @pytest.mark.parametrize("reconnects", [True, False])
-def test_managed_use_server_preserves_and_clears_owned_authoring_layer(reconnects):
+def test_managed_use_server_preserves_and_clears_owned_authoring_layer(reconnects, port):
     stage = Usd.Stage.CreateInMemory()
     stage.SetEditTarget(Usd.EditTarget(stage.GetSessionLayer()))
     client = ManagedClient(
@@ -484,6 +506,7 @@ def test_managed_use_server_preserves_and_clears_owned_authoring_layer(reconnect
         app_name="managed-recovery",
         persist_token=False,
         reconnect=False,
+        port=port,
     )
     authoring = client.authoring_layer
     assert authoring is not None
@@ -513,8 +536,8 @@ def test_managed_use_server_preserves_and_clears_owned_authoring_layer(reconnect
     sender.connect_result = reconnects
     client._sender = sender
     client._replay_to_fresh_checkpoint = lambda timeout: None
-    force_handshake(client, synchronized=True)
     try:
+        connect_client(client)
         assert client.recovery_artifact is artifact
         result = client.recover_use_server(session_id="replacement-session")
 
@@ -533,18 +556,19 @@ def test_managed_use_server_preserves_and_clears_owned_authoring_layer(reconnect
         client.close()
 
 
-def test_managed_client_rejects_an_edit_target_switch_before_publishing():
+def test_managed_client_rejects_an_edit_target_switch_before_publishing(port):
     stage = Usd.Stage.CreateInMemory()
     client = ManagedClient(
         stage,
         app_name="managed-edit-target",
         persist_token=False,
         reconnect=False,
+        port=port,
     )
     sender = _SenderStub([])
     client._sender = sender
-    force_handshake(client, synchronized=True)
     try:
+        connect_client(client)
         stage.SetEditTarget(Usd.EditTarget(stage.GetRootLayer()))
         stage.DefinePrim("/World/WrongLayer", "Xform")
 
@@ -555,13 +579,14 @@ def test_managed_client_rejects_an_edit_target_switch_before_publishing():
         client.close()
 
 
-def test_managed_use_server_refuses_an_edit_target_switch():
+def test_managed_use_server_refuses_an_edit_target_switch(port):
     stage = Usd.Stage.CreateInMemory()
     client = ManagedClient(
         stage,
         app_name="managed-custom-recovery",
         persist_token=False,
         reconnect=False,
+        port=port,
     )
     authoring = client.authoring_layer
     assert authoring is not None
@@ -573,8 +598,8 @@ def test_managed_use_server_refuses_an_edit_target_switch():
     sender.recovery_required = True
     client._sender = sender
     client._replay_to_fresh_checkpoint = lambda timeout: None
-    force_handshake(client, synchronized=True)
     try:
+        connect_client(client)
         with pytest.raises(RecoveryError, match="edit target changed") as error:
             client.recover_use_server()
         assert error.value.code == "edit_target_changed"
@@ -583,7 +608,7 @@ def test_managed_use_server_refuses_an_edit_target_switch():
         client.close()
 
 
-def test_managed_use_server_restores_local_layer_when_session_abandonment_fails():
+def test_managed_use_server_restores_local_layer_when_session_abandonment_fails(port):
     stage = Usd.Stage.CreateInMemory()
     stage.SetEditTarget(Usd.EditTarget(stage.GetSessionLayer()))
     client = ManagedClient(
@@ -591,6 +616,7 @@ def test_managed_use_server_restores_local_layer_when_session_abandonment_fails(
         app_name="managed-recovery-rollback",
         persist_token=False,
         reconnect=False,
+        port=port,
     )
     authoring = client.authoring_layer
     assert authoring is not None
@@ -604,8 +630,8 @@ def test_managed_use_server_restores_local_layer_when_session_abandonment_fails(
     sender.abandon_rejected_session = _fail_abandonment
     client._sender = sender
     client._replay_to_fresh_checkpoint = lambda timeout: None
-    force_handshake(client, synchronized=True)
     try:
+        connect_client(client)
         with pytest.raises(RuntimeError, match="injected abandonment failure"):
             client.recover_use_server()
         assert authoring.GetPrimAtPath("/World/Local")
@@ -818,7 +844,7 @@ def test_publisher_rejects_invalid_transform_coalesce_window(value):
 
 
 def test_managed_client_gates_new_edits_until_replay_is_applied_but_not_on_acks(
-    monkeypatch,
+    monkeypatch, server,
 ):
     stage = Usd.Stage.CreateInMemory()
     client = ManagedClient(
@@ -826,25 +852,28 @@ def test_managed_client_gates_new_edits_until_replay_is_applied_but_not_on_acks(
         app_name="readiness-gate",
         persist_token=False,
         reconnect=False,
+        port=server.server_address[1],
     )
     sender = _SenderStub([True, True])
     client._sender = sender
-    peer = force_handshake(client)
     monkeypatch.setattr(client, "_connect_sender", lambda: None)
     try:
         prim = stage.DefinePrim("/World/Thing", "Xform")
         value = prim.CreateAttribute("value", Sdf.ValueTypeNames.Int)
         value.Set(1)
 
-        replaying = client.update()
+        # While a transaction holds the server's barrier, it cannot answer the hello.
+        with server.sync_server.txn_barrier.shared():
+            client.start()
+            replaying = client.update()
         assert replaying.submitted_events == 0
         assert sender.batches == []
         assert not client.status.synchronized
 
-        peer.synchronize(client._receiver)
-        first = client.update()
+        updates = []
+        wait_until(lambda: updates.append(client.update()) or client.status.synchronized)
+        first = updates[-1]
         assert first.submitted_events > 0
-        assert client.status.synchronized
         assert sender.pending_event_count == first.submitted_events
 
         value.Set(2)
@@ -857,7 +886,7 @@ def test_managed_client_gates_new_edits_until_replay_is_applied_but_not_on_acks(
         client.close()
 
 
-def test_managed_client_uses_the_same_pre_submission_transform_window(monkeypatch):
+def test_managed_client_uses_the_same_pre_submission_transform_window(monkeypatch, port):
     clock = [0.0]
     monkeypatch.setattr(coalescing_module, "monotonic", lambda: clock[0])
     stage = Usd.Stage.CreateInMemory()
@@ -866,6 +895,7 @@ def test_managed_client_uses_the_same_pre_submission_transform_window(monkeypatc
         app_name="managed-coalescing",
         persist_token=False,
         reconnect=False,
+        port=port,
         transform_coalesce_seconds=0.1,
     )
     prim = UsdGeom.Xform.Define(stage, "/World/Thing").GetPrim()
@@ -875,9 +905,9 @@ def test_managed_client_uses_the_same_pre_submission_transform_window(monkeypatc
     xformable.AddScaleOp(UsdGeom.XformOp.PrecisionDouble)
     sender = _SenderStub([True, True])
     client._sender = sender
-    force_handshake(client, synchronized=True)
     monkeypatch.setattr(client, "_connect_sender", lambda: None)
     try:
+        connect_client(client)
         translate.Set((1, 0, 0))
         assert client.update().submitted_events > 0
         translate.Set((2, 0, 0))
@@ -1088,21 +1118,26 @@ def test_app_name_is_required():
 
 
 def test_managed_budget_releases_local_edits_under_sustained_traffic():
-    client = ManagedClient(
-        Usd.Stage.CreateInMemory(), app_name="managed-budget", persist_token=False,
-    )
-    client._sender = _SenderStub([True] * 10)
-    traffic = PeerTraffic(force_handshake(client, synchronized=True), queued=3)
-    try:
-        client.stage.DefinePrim("/Local", "Xform")
-        submitted = []
-        for _ in range(2):
-            submitted.append(client.update(max_messages=2).submitted_events)
-            traffic.arrive(2)
-        # Held behind the three queued messages, then released although the
-        # peers keep every later drain at its budget.
-        assert submitted[0] == 0 and submitted[1] > 0
-        assert not client.status.has_unsent_changes
-    finally:
-        client.close()
+    # A server of its own: later clients of the shared one would replay the peer's records.
+    with embedded_server() as server:
+        client = ManagedClient(
+            Usd.Stage.CreateInMemory(), app_name="managed-budget", persist_token=False,
+            port=server.server_address[1],
+        )
+        client._sender = _SenderStub([True] * 10)
+        traffic = PeerTraffic(server.sync_server, client.receiver, ensure_prim_event)
+        try:
+            connect_client(client)
+            traffic.arrive(3)
+            client.stage.DefinePrim("/Local", "Xform")
+            submitted = []
+            for _ in range(2):
+                submitted.append(client.update(max_messages=2).submitted_events)
+                traffic.arrive(2)
+            # Held behind the three queued records, then released although the
+            # peer keeps every later drain at its budget.
+            assert submitted[0] == 0 and submitted[1] > 0
+            assert not client.status.has_unsent_changes
+        finally:
+            client.close()
 

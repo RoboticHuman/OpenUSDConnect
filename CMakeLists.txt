@@ -28,10 +28,7 @@ nanobind_add_module(_native_client STABLE_ABI
     native/python/client_module.cpp
     native/python/receiver_bindings.cpp
 )
-# The Python tests drive the real driver over scripted sockets.
-target_link_libraries(_native_client
-    PRIVATE OpenUSDConnect::ClientDriver OpenUSDConnect::ClientDriverTesting
-)
+target_link_libraries(_native_client PRIVATE OpenUSDConnect::ClientDriver)
 target_compile_features(_native_client PRIVATE cxx_std_17)
 
 if(MSVC)

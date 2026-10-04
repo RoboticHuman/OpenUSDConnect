@@ -1,5 +1,4 @@
 #include "openusdconnect/client/driver/socket.h"
-#include "openusdconnect/client/driver/testing/scripted_socket.h"
 #include "openusdconnect/client/driver/threaded_receiver_driver.h"
 #include "openusdconnect/client/engine/receiver_endpoint.h"
 
@@ -67,12 +66,6 @@ constexpr std::chrono::hours kLongestWait{24 * 365};
 		result.append(nb::bytes(frame.data(), frame.size()));
 	}
 	return result;
-}
-
-[[nodiscard]] std::vector<std::uint8_t> FromPythonBytes(const nb::bytes& value)
-{
-	const auto* data = static_cast<const std::uint8_t*>(value.data());
-	return {data, data + value.size()};
 }
 
 [[nodiscard]] nb::object ToPython(Notification notification)
@@ -463,56 +456,6 @@ void BindSockets(nb::module_& module)
 	nb::class_<SocketFactory>(module, "SocketFactory");
 
 	nb::class_<TcpSocketFactory, SocketFactory>(module, "TcpSocketFactory").def(nb::init<>());
-
-	nb::class_<ScriptedConnection>(module, "ScriptedConnection")
-		.def(
-			"deliver",
-			[](ScriptedConnection& connection, const nb::bytes& bytes)
-			{
-				return connection.Deliver(FromPythonBytes(bytes));
-			},
-			"bytes"_a)
-		.def("deliver_timeout", &ScriptedConnection::DeliverTimeout)
-		.def("close", &ScriptedConnection::Close)
-		.def_prop_ro("sent",
-					 [](const ScriptedConnection& connection)
-					 {
-						 const std::vector<std::uint8_t> sent = connection.Sent();
-						 return nb::bytes(sent.data(), sent.size());
-					 })
-		.def(
-			"wait_idle",
-			[](const ScriptedConnection& connection, double timeout)
-			{
-				return connection.WaitIdle(Milliseconds(timeout));
-			},
-			"timeout"_a = 5.0, nb::call_guard<nb::gil_scoped_release>())
-		.def(
-			"wait_closed",
-			[](const ScriptedConnection& connection, double timeout)
-			{
-				return connection.WaitClosed(Milliseconds(timeout));
-			},
-			"timeout"_a = 5.0, nb::call_guard<nb::gil_scoped_release>())
-		.def_prop_ro("closed_by_client", &ScriptedConnection::ClosedByClient);
-
-	nb::class_<ScriptedSocketFactory, SocketFactory>(module, "ScriptedSocketFactory")
-		.def(nb::init<>())
-		.def(
-			"accept",
-			[](ScriptedSocketFactory& sockets, double timeout)
-			{
-				return sockets.Accept(Milliseconds(timeout));
-			},
-			"timeout"_a = 5.0, nb::call_guard<nb::gil_scoped_release>())
-		.def(
-			"refuse",
-			[](ScriptedSocketFactory& sockets, int error, double timeout)
-			{
-				return sockets.Refuse(Milliseconds(timeout), error);
-			},
-			"error"_a, "timeout"_a = 5.0, nb::call_guard<nb::gil_scoped_release>())
-		.def_prop_ro("attempts", &ScriptedSocketFactory::Attempts);
 }
 
 void BindDriver(nb::module_& module)

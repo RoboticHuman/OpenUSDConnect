@@ -66,8 +66,9 @@ through an event the socket waits on, since `shutdown()` does not wake a blocked
 complete the replay, such as `RequestReplayFrom` or `MarkReplayApplied`, call `Wake()` so the loop
 applies the new actions and `WaitConnected`/`WaitSynchronized` re-check.
 
-`driver/testing/scripted_socket.h` is the test seam, built only into
-`OpenUSDConnect::ClientDriverTesting`. Each connect of a `ScriptedSocketFactory` socket waits until
+`driver/testing/scripted_socket.h` is a seam for the C++ tests only. It is built into
+`OpenUSDConnect::ClientDriverTesting`, which no shipped module links and which builds only when a
+target links it. Each connect of a `ScriptedSocketFactory` socket waits until
 the test accepts or refuses it; the accepted `ScriptedConnection` delivers scripted bytes, read
 timeouts, or a peer close, records what the client sent, and `WaitIdle` returns once the client
 handled every delivery and waits for more.

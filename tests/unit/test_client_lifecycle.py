@@ -4,7 +4,7 @@ import threading
 from types import SimpleNamespace
 
 import pytest
-from pxr import Usd
+from pxr import Sdf, Usd
 
 from openusdconnect import (
     ManagedClient,
@@ -19,7 +19,32 @@ from openusdconnect import (
 )
 from openusdconnect import sender as sender_module
 from openusdconnect.client_observer import StageMetadata
-from tests.helpers import RecordingObserver, force_handshake, handshake
+from openusdconnect.protocol_constants import LayerMode
+from tests.helpers import RecordingObserver, connect_client, embedded_server
+
+
+@pytest.fixture(scope="module")
+def managed_server():
+    with embedded_server() as runtime:
+        yield runtime
+
+
+@pytest.fixture(scope="module")
+def shared_server(tmp_path_factory):
+    root = tmp_path_factory.mktemp("shared") / "root.usda"
+    Sdf.Layer.CreateNew(str(root)).Save()
+    with embedded_server(base_usd_path=str(root), layer_mode=LayerMode.SHARED_STAGE) as runtime:
+        yield runtime
+
+
+@pytest.fixture
+def ports(managed_server, shared_server):
+    """Live server ports by client kind; publishers connect nowhere in these tests."""
+    return {
+        ManagedClient: managed_server.server_address[1],
+        SharedStageClient: shared_server.server_address[1],
+        UsdPublisher: 1,
+    }
 
 
 def test_wait_until_ready_returns_false_only_when_startup_expires():
@@ -263,7 +288,7 @@ def test_issued_token_is_persisted_before_notifying_and_used_by_both_roles(
 
 
 @pytest.mark.parametrize("kind", [ManagedClient, SharedStageClient, UsdPublisher])
-def test_disconnected_update_does_no_token_io(kind, tmp_path, monkeypatch):
+def test_disconnected_update_does_no_token_io(kind, tmp_path, monkeypatch, ports):
     reads = []
     monkeypatch.setattr(_client_utils, "load_token", lambda host, port: reads.append(1))
     requests = []
@@ -272,9 +297,12 @@ def test_disconnected_update_does_no_token_io(kind, tmp_path, monkeypatch):
         lambda self, timeout=2.0: requests.append(True) or True,
     )
     stage = Usd.Stage.CreateNew(str(tmp_path / "scene.usda"))
-    client = kind(stage, app_name="token-io", port=1, persist_token=True)
+    client = kind(stage, app_name="token-io", port=ports[kind], persist_token=True)
     try:
-        force_handshake(client)
+        if kind is UsdPublisher:
+            client.start()
+        else:
+            connect_client(client)
         reads.clear()
         for _ in range(20):
             client.update()
@@ -286,10 +314,12 @@ def test_disconnected_update_does_no_token_io(kind, tmp_path, monkeypatch):
 
 @pytest.mark.parametrize("kind", [ManagedClient, SharedStageClient])
 def test_update_schedules_handshake_without_waiting_or_touching_stage_in_worker(
-    kind, tmp_path, monkeypatch
+    kind, tmp_path, monkeypatch, ports
 ):
     stage = Usd.Stage.CreateNew(str(tmp_path / "scene.usda"))
-    client = kind(stage, app_name="background-connect-test", persist_token=False)
+    client = kind(
+        stage, app_name="background-connect-test", port=ports[kind], persist_token=False,
+    )
     entered = threading.Event()
     release = threading.Event()
     finished = threading.Event()
@@ -305,9 +335,9 @@ def test_update_schedules_handshake_without_waiting_or_touching_stage_in_worker(
         finally:
             finished.set()
 
-    monkeypatch.setattr(sender_module.socket, "create_connection", connect)
-    force_handshake(client)
     try:
+        connect_client(client)
+        monkeypatch.setattr(sender_module.socket, "create_connection", connect)
         result = client.update()
         assert entered.wait(2)
         assert not finished.is_set()
@@ -324,10 +354,8 @@ def test_update_schedules_handshake_without_waiting_or_touching_stage_in_worker(
 
 
 @pytest.mark.parametrize("kind", [ManagedClient, UsdPublisher])
-def test_flush_shares_timeout_between_reconnect_and_acknowledgement(kind, monkeypatch):
+def test_flush_shares_timeout_between_reconnect_and_acknowledgement(kind, monkeypatch, ports):
     clock = [10.0]
-    monkeypatch.setattr(_client_lifecycle.time, "monotonic", lambda: clock[0])
-    client = kind(Usd.Stage.CreateInMemory(), app_name="flush-budget", persist_token=False)
     calls = []
 
     def connect(timeout=None):
@@ -339,14 +367,19 @@ def test_flush_shares_timeout_between_reconnect_and_acknowledgement(kind, monkey
         calls.append(("flush", timeout))
         return True
 
-    monkeypatch.setattr(client._sender, "connect", connect)
-    monkeypatch.setattr(client._sender, "flush", flush)
-    client._transform_coalescing = SimpleNamespace(buffering=True, force=lambda emitter: [])
-    if isinstance(client, ManagedClient):
-        handshake(client, synchronized=True)
-    else:
-        monkeypatch.setattr(client, "_is_synchronized", lambda: True)
+    client = kind(
+        Usd.Stage.CreateInMemory(), app_name="flush-budget", port=ports[kind],
+        persist_token=False,
+    )
     try:
+        if isinstance(client, ManagedClient):
+            connect_client(client)
+        else:
+            monkeypatch.setattr(client, "_is_synchronized", lambda: True)
+        monkeypatch.setattr(_client_lifecycle.time, "monotonic", lambda: clock[0])
+        monkeypatch.setattr(client._sender, "connect", connect)
+        monkeypatch.setattr(client._sender, "flush", flush)
+        client._transform_coalescing = SimpleNamespace(buffering=True, force=lambda emitter: [])
         assert client.flush(timeout=1.0)
         assert calls == [("connect", 1.0), ("flush", 0.25)]
     finally:

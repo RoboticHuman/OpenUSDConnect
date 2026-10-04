@@ -1,23 +1,14 @@
 """Shared test helpers for integration tests."""
 
-import errno
 import json
 import os
-import socket
 import subprocess
 import sys
 import threading
 import time
-import weakref
 from contextlib import contextmanager
 
-import pytest
-
-from openusdconnect import _native_client as native
-from openusdconnect import receiver as receiver_module
 from openusdconnect.client_observer import ClientObserver
-from openusdconnect.codec import encode_message, message_to_dict
-from openusdconnect.framing import IncompleteRead, recv_framed
 from openusdconnect.protocol_constants import (
     K_SET_REFERENCE,
     K_SET_XFORM_TRS,
@@ -157,28 +148,78 @@ def ensure_prim_event(path):
 
 
 @contextmanager
-def in_process_server():
-    """Run an isolated TCP server on an ephemeral port."""
+def serving(state, port=0):
+    """Serve *state* on a loopback port; leaving closes the listener and its connections."""
     from openusdconnect.server.connection import ConnectionHandler, ThreadedTCPServer
-    from openusdconnect.server.state import UsdSyncServer
 
-    state = UsdSyncServer(log_path=":memory:", txn_batch_size=1)
-    tcp = ThreadedTCPServer(("127.0.0.1", 0), ConnectionHandler, state, max_workers=8)
-    thread = threading.Thread(target=tcp.serve_forever, daemon=True)
+    tcp = ThreadedTCPServer(("127.0.0.1", port), ConnectionHandler, state, max_workers=8)
+    # Shutdown waits for the next poll.
+    thread = threading.Thread(target=tcp.serve_forever, args=(0.05,), daemon=True)
     thread.start()
     try:
-        yield state, tcp.server_address[1]
+        yield tcp.server_address[1]
     finally:
         tcp.shutdown()
         tcp.server_close()
         thread.join(5)
-        state.shutdown()
-        state.store.close()
         assert not thread.is_alive()
 
 
-def wait_until(predicate):
-    deadline = time.monotonic() + 5
+@contextmanager
+def server_state():
+    """An isolated server state with an in-memory event log."""
+    from openusdconnect.server.state import UsdSyncServer
+
+    state = UsdSyncServer(log_path=":memory:", txn_batch_size=1)
+    try:
+        yield state
+    finally:
+        state.shutdown()
+        state.store.close()
+
+
+@contextmanager
+def in_process_server():
+    """Run an isolated TCP server on an ephemeral port."""
+    with server_state() as state, serving(state) as port:
+        yield state, port
+
+
+def recorded_hellos(monkeypatch):
+    """Record every hello the in-process server decodes, in arrival order."""
+    from openusdconnect.server import connection
+
+    hellos = []
+    decode = connection.decode_hello
+
+    def record(table):
+        hellos.append(decode(table))
+        return hellos[-1]
+
+    monkeypatch.setattr(connection, "decode_hello", record)
+    return hellos
+
+
+@contextmanager
+def embedded_server(**config):
+    """Run a ``ServerRuntime`` on an ephemeral loopback port with an in-memory event log."""
+    from openusdconnect.server import ServerConfig, ServerRuntime
+
+    runtime = ServerRuntime(
+        ServerConfig(
+            host="127.0.0.1", port=0, log_path=":memory:", preflight_plugins=False, **config
+        )
+    )
+    try:
+        with runtime:
+            yield runtime
+    finally:
+        if runtime.sync_server is not None and runtime.sync_server.token_store is not None:
+            runtime.sync_server.token_store.close()
+
+
+def wait_until(predicate, timeout=5.0):
+    deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
         if predicate():
             return
@@ -186,246 +227,42 @@ def wait_until(predicate):
     assert predicate()
 
 
-def framed(message):
-    """One server message as a receiver reads it from its socket."""
-    return native.encode_frame(encode_message(message))
+def connect_client(client, *, synchronized=True):
+    """Start a high-level client and complete its receiver's handshake with the server.
 
-
-def sent_messages(connection):
-    """Every message a receiver sent on a scripted connection."""
-    return [message_to_dict(frame) for frame in native.FrameDecoder().feed(connection.sent)]
-
-
-class ScriptedPeer:
-    """The server's end of one scripted receiver connection."""
-
-    def __init__(self, connection):
-        self.connection = connection
-        assert connection.wait_idle(), "the receiver did not send its hello"
-        self.hello = sent_messages(connection)[0]
-
-    def send(self, *messages):
-        """Deliver each message and wait until the receiver handled it."""
-        for message in messages:
-            assert self.connection.deliver(framed(message))
-            assert self.connection.wait_idle(), f"the receiver closed on {message['type']}"
-
-    def send_closing(self, message):
-        """Deliver a message the receiver answers by closing the connection."""
-        assert self.connection.deliver(framed(message))
-        assert self.connection.wait_closed()
-
-    def accept_hello(self, receiver, **fields):
-        """Accept the hello with the receiver's own replay and layer mode."""
-        hello_ok = {
-            "type": "hello_ok",
-            "server_instance": "scripted",
-            "replay_identity": True,
-            "replay_epoch": 0,
-            "layer_mode": receiver.layer_mode.value,
-            "layered_replay": receiver.layered_replay,
-            **fields,
-        }
-        self.send(hello_ok)
-        assert receiver.connected
-
-    def synchronize(self, receiver, *, epoch=0):
-        """Complete the replay at the received head and mark it applied."""
-        self.send({"type": "replay_complete", "head_seq": receiver.last_seq, "epoch": epoch})
-        assert receiver.mark_replay_applied()
-
-    def time_out(self, count=1):
-        """Make the receiver's next reads wait out its socket timeout."""
-        for _ in range(count):
-            assert self.connection.deliver_timeout()
-            assert self.connection.wait_idle()
-
-    def close(self):
-        """Close the connection as the server."""
-        self.connection.close()
-        assert self.connection.wait_closed()
-
-
-_SCRIPTED_SERVERS = weakref.WeakKeyDictionary()
-
-
-class ScriptedServer:
-    """Plays the server for the receivers started through it, without sockets.
-
-    Every connection attempt waits until the test accepts or refuses it.
+    ``synchronized`` also applies the server's replay the way ``update()`` does,
+    without publishing local edits.
     """
-
-    def __init__(self):
-        self.sockets = native.ScriptedSocketFactory()
-        self.peer = None
-
-    def start(self, target):
-        """Start a receiver, or a high-level client's receiver, on scripted sockets."""
-        with pytest.MonkeyPatch.context() as patch:
-            patch.setattr(receiver_module, "_SOCKET_FACTORY", self.sockets)
-            target.start()
-        _SCRIPTED_SERVERS[getattr(target, "_receiver", target)] = self
-
-    def accept(self):
-        connection = self.sockets.accept()
-        assert connection is not None, "the receiver made no connection attempt"
-        self.peer = ScriptedPeer(connection)
-        return self.peer
-
-    def refuse(self, error=errno.ECONNREFUSED):
-        assert self.sockets.refuse(error), "the receiver made no connection attempt"
-
-    def connect(self, receiver, *, synchronized=False):
-        """Accept the next attempt and complete the receiver's handshake."""
-        peer = self.accept()
-        peer.accept_hello(receiver)
-        if synchronized:
-            peer.synchronize(receiver)
-        return peer
-
-    def ready(self, receiver):
-        """Leave the receiver connected with its replay applied."""
-        if not receiver.connected:
-            self.connect(receiver)
-        if not receiver.synchronized:
-            self.peer.synchronize(receiver)
-
-
-def scripted_start(target):
-    server = ScriptedServer()
-    server.start(target)
-    return server
-
-
-def handshake(target, *, synchronized=False):
-    """Start a receiver or client whose scripted server accepted its hello."""
-    receiver = getattr(target, "_receiver", target)
-    return scripted_start(target).connect(receiver, synchronized=synchronized)
-
-
-def force_handshake(client, *, synchronized=False):
-    """Start a high-level client past its receiver handshake and layer graph."""
-    if client._receiver is None:
-        client.start()
-        return None
-    peer = handshake(client, synchronized=synchronized)
-    graph = getattr(client, "_graph", None)
-    if graph is not None:
-        graph._ready = True
-    return peer
+    client.start()
+    receiver = client._receiver
+    assert receiver.wait_connected(5), receiver.connection_error
+    if synchronized:
+        apply = client.update if client._sender is None else client._apply_queued
+        wait_until(lambda: apply() is not None and receiver.synchronized)
 
 
 class PeerTraffic:
-    """Queues messages that peers keep sending and the consumer applies as no-ops."""
+    """Records a peer producer commits, each queued by *receiver* when ``arrive`` returns."""
 
-    def __init__(self, peer, *, queued=0):
-        self._peer = peer
-        self.arrive(queued)
+    def __init__(self, state, receiver, make_event, *, layer_key=""):
+        self._state = state
+        self._receiver = receiver
+        self._make_event = make_event
+        self._layer_key = layer_key
+        self._txn_id = 0
 
     def arrive(self, count):
-        self._peer.send(*[{"type": "compact"}] * count)
-
-
-class ServerRelay:
-    """Relays a scripted receiver connection to a real server, one message at a time.
-
-    The receiver handles each message before the next is read, so callers
-    observe it at exact message boundaries.
-    """
-
-    def __init__(self, peer, port):
-        self.hello = peer.hello
-        self.received = []
-        self.held = threading.Event()
-        self._connection = peer.connection
-        self._resume = threading.Event()
-        self._server = socket.create_connection(("127.0.0.1", port), timeout=30)
-        self._server.sendall(peer.connection.sent)
-
-    def next(self):
-        """Relay the next server message; ``None`` once either side closed."""
-        try:
-            payload = recv_framed(self._server)
-        except (IncompleteRead, OSError):
-            return None
-        delivered = self._connection.deliver(native.encode_frame(payload))
-        if not (delivered and self._connection.wait_idle()):
-            return None
-        message = message_to_dict(payload)
-        self.received.append(message)
-        return message
-
-    def pump(self, until):
-        """Relay until a message matches ``until``; ``None`` if a side closed first."""
-        while (message := self.next()) is not None:
-            if until(message):
-                return message
-        return None
-
-    def run(self, hold_after=None):
-        """Relay until closed, pausing after the first message matching ``hold_after``."""
-        while (message := self.next()) is not None:
-            if hold_after is not None and hold_after(message):
-                hold_after = None
-                self.held.set()
-                self._resume.wait()
-
-    def release(self):
-        self._resume.set()
-
-    def close(self):
-        self._resume.set()
-        # The server answers the shutdown by closing, which ends a blocked read.
-        self._server.shutdown(socket.SHUT_RDWR)
-        self._server.close()
-        self._connection.close()
-
-
-def relay_connection(receiver, port=None):
-    """Accept the receiver's next connection attempt and relay it to a server.
-
-    The receiver starts on scripted sockets on first use, so between relays
-    its connection attempts wait and the test decides when the server sees it.
-    """
-    server = _SCRIPTED_SERVERS.get(receiver) or scripted_start(receiver)
-    return ServerRelay(server.accept(), receiver.port if port is None else port)
-
-
-@contextmanager
-def receiver_connection(receiver, port=None, *, hold_after=None):
-    """Relay one connection in the background and close it before returning."""
-    relay = relay_connection(receiver, port)
-    worker = threading.Thread(target=relay.run, args=(hold_after,), daemon=True)
-    worker.start()
-    try:
-        wait_until(lambda: receiver.connected)
-        yield relay
-    finally:
-        relay.close()
-        worker.join(5)
-        assert not worker.is_alive()
-        wait_until(lambda: not receiver.connected)
-
-
-def mcp_session_with_receiver(port):
-    """Build an MCP mirror whose connections the test relays one at a time."""
-    from pxr import Usd
-
-    from integrations.mcp.config import McpConfig
-    from integrations.mcp.session import ConnectionSession
-    from openusdconnect.usd_client import UsdReceiver
-
-    session = ConnectionSession(McpConfig(read_after_write_timeout_s=1))
-    session.mirror_stage = Usd.Stage.CreateInMemory()
-    session.receiver = UsdReceiver(
-        session.mirror_stage,
-        app_name="replay-identity-test",
-        host="127.0.0.1",
-        port=port,
-        persist_token=False,
-    )
-    scripted_start(session.receiver)
-    return session
+        queued = self._receiver.queued_message_count + count
+        for _ in range(count):
+            self._txn_id += 1
+            self._state.process_idempotent_txn(
+                [self._make_event(f"/Peer{self._txn_id}")],
+                session_id="peer",
+                txn_id=self._txn_id,
+                client_id="peer",
+                layer_key=self._layer_key,
+            )
+        wait_until(lambda: self._receiver.queued_message_count == queued)
 
 
 class RecordingObserver(ClientObserver):
