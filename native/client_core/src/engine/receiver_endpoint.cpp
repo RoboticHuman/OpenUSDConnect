@@ -1,7 +1,10 @@
 #include "openusdconnect/client/engine/receiver_endpoint.h"
 
+#include "message_fields.h"
+
 #include <algorithm>
 #include <cassert>
+#include <memory>
 #include <utility>
 
 namespace openusdconnect::client
@@ -9,41 +12,12 @@ namespace openusdconnect::client
 namespace
 {
 
+using detail::Text;
+using detail::Value;
+
 // The consumer drains on its own thread, so an overflowed receiver polls for
 // the empty queue.
 constexpr std::chrono::milliseconds kDrainPollInterval{100};
-
-[[nodiscard]] std::string Text(const flatbuffers::String* value)
-{
-	return value ? value->str() : std::string();
-}
-
-template <typename T>
-[[nodiscard]] std::optional<T> Value(flatbuffers::Optional<T> value) noexcept
-{
-	return value.has_value() ? std::optional<T>(*value) : std::nullopt;
-}
-
-[[nodiscard]] StageMetadata DecodeStageMetadata(const OpenUSDConnect::SetStageMetadata& table)
-{
-	StageMetadata metadata;
-	metadata.TimeCodesPerSecond = Value(table.timeCodesPerSecond());
-	metadata.FramesPerSecond = Value(table.framesPerSecond());
-	metadata.StartTimeCode = Value(table.startTimeCode());
-	metadata.EndTimeCode = Value(table.endTimeCode());
-	metadata.MetersPerUnit = Value(table.metersPerUnit());
-	if (table.upAxis() && table.upAxis()->size() != 0)
-	{
-		metadata.UpAxis = table.upAxis()->str();
-	}
-	return metadata;
-}
-
-[[nodiscard]] bool IsEmpty(const StageMetadata& metadata) noexcept
-{
-	return !metadata.TimeCodesPerSecond && !metadata.FramesPerSecond && !metadata.StartTimeCode &&
-		   !metadata.EndTimeCode && !metadata.MetersPerUnit && !metadata.UpAxis;
-}
 
 [[nodiscard]] std::vector<std::uint8_t> BuildResyncPayload()
 {
@@ -63,7 +37,7 @@ template <typename T>
 
 [[nodiscard]] std::string Address(const ReceiverConfig& config)
 {
-	return config.Host + ":" + std::to_string(config.Port);
+	return detail::Address(config.Host, config.Port);
 }
 
 } // namespace
@@ -149,7 +123,8 @@ void ReceiverEndpoint::OnConnected(std::string_view token)
 		return;
 	}
 	const std::uint8_t* bytes = builder.GetBufferPointer();
-	Actions.push_back(SendAction{{bytes, bytes + builder.GetSize()}});
+	Actions.push_back(SendAction{
+		std::make_shared<const std::vector<std::uint8_t>>(bytes, bytes + builder.GetSize())});
 }
 
 void ReceiverEndpoint::OnBytes(const std::uint8_t* data, std::size_t size)
@@ -488,13 +463,10 @@ void ReceiverEndpoint::AcceptHello(const OpenUSDConnect::HelloOk& hello)
 		Log(LogLevel::Info, "token issued by server");
 		Notify(TokenIssued{std::move(token)});
 	}
-	if (const OpenUSDConnect::SetStageMetadata* table = hello.stage_metadata())
+	if (std::optional<StageMetadata> metadata = detail::DecodeStageMetadata(hello.stage_metadata()))
 	{
-		if (StageMetadata metadata = DecodeStageMetadata(*table); !IsEmpty(metadata))
-		{
-			Metadata = metadata;
-			Notify(std::move(metadata));
-		}
+		Metadata = *metadata;
+		Notify(std::move(*metadata));
 	}
 
 	Identity.AcceptHello(ConnectionSyncFrom, hello.replay_identity(), Text(hello.server_instance()),
@@ -516,11 +488,7 @@ void ReceiverEndpoint::AcceptHello(const OpenUSDConnect::HelloOk& hello)
 
 void ReceiverEndpoint::Reject(HandshakeRejected rejection)
 {
-	const std::string description =
-		rejection.Authentication
-			? "authentication rejected"
-			: "connection rejected (code " + std::to_string(static_cast<int>(rejection.Code)) + ")";
-	Log(LogLevel::Error, description + ": " + rejection.Reason);
+	Log(LogLevel::Error, detail::DescribeRejection(rejection));
 	Notify(rejection);
 	Rejection = std::move(rejection);
 	CloseConnection(DisconnectReason::HandshakeRejected);

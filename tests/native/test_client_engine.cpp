@@ -87,6 +87,17 @@ static void TestRejectionNamesAndDispositions()
 	}
 }
 
+static void TestTransactionFailureDescription()
+{
+	TransactionFailure failure{3, 3, "layer was remapped", 2};
+	CHECK(failure.Disposition() == ProducerRecoveryDisposition::RecoverableConflict);
+	CHECK(failure.Describe() ==
+		  "transaction 3 rejected (stale_layer_graph, expected transaction 2): layer was remapped");
+	failure = {7, 9, "", 0};
+	CHECK(failure.Disposition() == ProducerRecoveryDisposition::SessionFatal);
+	CHECK(failure.Describe() == "transaction 7 rejected (unknown_9): no reason supplied");
+}
+
 using TestInbox = OrderedReceiverSession<int>;
 
 static void AcceptFrames(TestInbox& inbox, std::uint64_t generation, int count)
@@ -195,6 +206,7 @@ int main()
 {
 	TestEachPhaseOutranksThePhasesAfterIt();
 	TestRejectionNamesAndDispositions();
+	TestTransactionFailureDescription();
 	TestHoldCoversOnlyFramesQueuedBeforeTheMarker();
 	TestRejectedFramesDoNotExtendTheHold();
 	TestReplayRequestReleasesTheHold();

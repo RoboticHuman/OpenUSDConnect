@@ -2,6 +2,7 @@
 
 #include "test_check.h"
 #include <cstdint>
+#include <string>
 #include <string_view>
 
 using namespace openusdconnect::client;
@@ -48,6 +49,16 @@ int main()
 		  ProtocolResult::Success);
 	CHECK(BuildHelloFrame(anonymous_builder, HelloParameters{"emitter", 0, "", "origin"}) ==
 		  ProtocolResult::InvalidArgument);
+	HelloParameters emitter{"emitter", 0, "client"};
+	CHECK(!IsValidHelloParameters(emitter));
+	emitter.ProducerSessionId = "producer";
+	CHECK(IsValidHelloParameters(emitter));
+	const std::string longest(kMaxProducerSessionIdLength, 'p');
+	emitter.ProducerSessionId = longest;
+	CHECK(IsValidHelloParameters(emitter));
+	const std::string too_long = longest + "p";
+	emitter.ProducerSessionId = too_long;
+	CHECK(!IsValidHelloParameters(emitter));
 
 	flatbuffers::FlatBufferBuilder transaction_builder(256);
 	const VisibilityEventView visibility{"/World/Sphere", true};

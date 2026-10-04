@@ -3,6 +3,7 @@
 #include "openusdconnect/client/engine/clock.h"
 
 #include <cstdint>
+#include <memory>
 #include <string>
 #include <variant>
 #include <vector>
@@ -24,6 +25,10 @@ enum class DisconnectReason : std::uint8_t
 	QueueFull,
 	ReadTimeout,
 	ProtocolError,
+	Cancelled,
+	HandshakeTimeout,
+	RecoveryRequired,
+	RateLimited,
 };
 
 enum class LogLevel : std::uint8_t
@@ -46,7 +51,8 @@ struct ConnectAction final
 // Write complete length-prefixed frames, in order.
 struct SendAction final
 {
-	std::vector<std::uint8_t> Bytes;
+	// Shared with the producer outbox, so replaying a transaction copies nothing.
+	std::shared_ptr<const std::vector<std::uint8_t>> Bytes;
 };
 
 // Close the socket, or abandon the connect attempt, then report OnDisconnected.

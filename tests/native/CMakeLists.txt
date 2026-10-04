@@ -33,6 +33,18 @@ else()
 endif()
 add_test(NAME OpenUSDConnectReceiverEndpointTests COMMAND OpenUSDConnectReceiverEndpointTests)
 
+find_package(Threads REQUIRED)
+add_executable(OpenUSDConnectProducerEndpointTests test_producer_endpoint.cpp)
+target_link_libraries(OpenUSDConnectProducerEndpointTests
+    PRIVATE OpenUSDConnect::ClientEngine Threads::Threads
+)
+if(MSVC)
+    target_compile_options(OpenUSDConnectProducerEndpointTests PRIVATE /W4 /permissive-)
+else()
+    target_compile_options(OpenUSDConnectProducerEndpointTests PRIVATE -Wall -Wextra -Wpedantic)
+endif()
+add_test(NAME OpenUSDConnectProducerEndpointTests COMMAND OpenUSDConnectProducerEndpointTests)
+
 add_executable(OpenUSDConnectThreadedReceiverDriverTests test_threaded_receiver_driver.cpp)
 target_link_libraries(OpenUSDConnectThreadedReceiverDriverTests PRIVATE OpenUSDConnect::ClientDriver)
 if(MSVC)

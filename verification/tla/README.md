@@ -44,6 +44,28 @@ cannot advance after abandonment, the recovery artifact stays complete, and
 new-session transactions commit exactly once in order. Weak fairness also
 checks that recovery reaches the ready state and the new session completes.
 
+### `ProducerConnection.tla`
+
+The producer endpoint's connection attempts against one server, with the host
+loop that applies its actions. The application thread starts, cancels, and
+disconnects attempts at any time; the I/O loop takes actions in batches,
+blocks while connecting, and can report a socket's end before applying a
+close the endpoint queued for it. The Hello carries the server's committed
+highwater, which is checked before the outbox replays.
+
+The model checks that the host never opens a second socket or keeps one the
+endpoint has forgotten, that a cancelled handshake never publishes or
+quarantines the session, that the session is ready exactly while connected,
+that replay never skips a transaction, and that acknowledgement never
+regresses or covers an unsubmitted transaction. It covers the stale-close
+hazard: an attempt the host has not taken is withdrawn instead of closed, and
+a reported end voids the frames and close still queued for that socket.
+
+`ProducerConnection.cfg` uses an honest server and also checks that every
+transaction is eventually acknowledged; `ProducerConnectionDivergence.cfg`
+lets the server's progress for the session regress or run ahead once, and
+checks that only that divergence fails the Hello highwater check.
+
 ### `ReceiverSynchronization.tla`
 
 Replay and live frames flowing through a bounded receiver queue into the
@@ -161,6 +183,8 @@ TLC2 2026.08.11.125311 results from 2026-10-04:
 | Transaction recovery: reject transaction 1 | 1,669 | 634 | 25 | No error |
 | Transaction recovery: reject transaction 3 | 929 | 372 | 25 | No error |
 | Recovery session rollover: reject transaction 2 | 28 | 24 | 14 | No error |
+| Producer connection: honest server, eventual acknowledgement | 5,341 | 3,387 | 42 | No error |
+| Producer connection: server progress diverges once | 10,694 | 6,732 | 47 | No error |
 | Receiver: three-frame queue, live apply failure | 15,041 | 3,792 | 27 | No error |
 | Receiver: one-frame queue, replay apply failure | 3,723 | 1,024 | 25 | No error |
 | Replay identity: fresh receiver, two domain changes | 5,857,627 | 1,170,182 | 53 | No error |

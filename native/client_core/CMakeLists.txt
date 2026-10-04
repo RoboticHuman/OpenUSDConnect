@@ -47,6 +47,7 @@ endif()
 
 # Sans-IO endpoints: socket bytes and host time in, actions and notifications out.
 add_library(OpenUSDConnectClientEngine STATIC
+    src/engine/producer_endpoint.cpp
     src/engine/receiver_endpoint.cpp
 )
 add_library(OpenUSDConnect::ClientEngine ALIAS OpenUSDConnectClientEngine)

@@ -7,9 +7,10 @@ The native core is split into four composable C++17 targets:
   dependency.
 - `OpenUSDConnect::ClientProtocol` adds the generated FlatBuffers schema plus transport-neutral
   handshake, control-message, and transaction construction helpers.
-- `OpenUSDConnect::ClientEngine` adds sans-IO endpoints (`engine/receiver_endpoint.h`) that own
-  the connection protocol: handshake and negotiation, replay identity, control messages, and
-  reconnect policy. They start no threads and open no sockets.
+- `OpenUSDConnect::ClientEngine` adds sans-IO endpoints (`engine/receiver_endpoint.h`,
+  `engine/producer_endpoint.h`) that own the connection protocol: handshake and negotiation,
+  replay identity, outbox replay and transaction results, control messages, and reconnect policy.
+  They start no threads and open no sockets.
 - `OpenUSDConnect::ClientDriver` is an optional reference host loop
   (`driver/threaded_receiver_driver.h`): one thread with blocking Winsock or BSD sockets
   (`driver/tcp_socket.h`) drives an endpoint. The Python module links it; hosts with their own I/O
@@ -46,6 +47,15 @@ A host drives `ReceiverEndpoint` from its own I/O loop and scheduler:
    describes. Notifications arrive in the `NotificationQueue` the host drains.
 
 Every member is thread-safe, never blocks, and never calls into the host.
+
+`ProducerEndpoint` follows the same loop but connects only when asked: `RequestConnect` makes one
+attempt for a retry loop and backs off after a failed one, while `Connect` makes one attempt
+regardless of backoff. Apply its actions in order on the thread that reports socket events. A
+write that makes no progress for `HandshakeTimeout` is a `TransportError`; the outbox replays on
+the next connection. `Append` takes a complete length-prefixed `Txn` frame that encodes
+`NextTransactionId()`, so a host submitting from several threads holds one lock from reading the
+id through `Append`. A rejection stays in `Status().Failure` until `RepairRejected` or
+`AbandonRejectedSession` resolves it.
 
 `ThreadedReceiverDriver` is that loop on one thread. `Start()` runs it, and the optional
 `DriverCallbacks` supply the token for each handshake, receive the drained notifications, take

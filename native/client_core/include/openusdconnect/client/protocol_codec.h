@@ -4,6 +4,7 @@
 #include "openusdconnect/client/replay_identity.h"
 #include "openusdconnect/client/schema/messages_generated.h"
 
+#include <algorithm>
 #include <cstddef>
 #include <cstdint>
 #include <string_view>
@@ -210,11 +211,26 @@ struct HelloParameters final
 	ReplayPrefixClaim ReplayPrefix;
 };
 
-// Receivers may omit their identity; the server decodes empty strings as absent.
+inline constexpr std::size_t kMaxProducerSessionIdLength = 128;
+
+// Counts code points, as the server does.
+[[nodiscard]] inline bool IsValidProducerSessionId(std::string_view session_id) noexcept
+{
+	const auto code_points =
+		std::count_if(session_id.begin(), session_id.end(),
+					  [](char byte)
+					  {
+						  return (static_cast<unsigned char>(byte) & 0xC0U) != 0x80U;
+					  });
+	return code_points != 0 && static_cast<std::size_t>(code_points) <= kMaxProducerSessionIdLength;
+}
+
+// The server requires an emitter's client and producer session ids. Every other
+// identity field is optional, and the server decodes empty strings as absent.
 [[nodiscard]] inline bool IsValidHelloParameters(const HelloParameters& parameters) noexcept
 {
-	const bool identified_emitter =
-		parameters.Role == "emitter" && !parameters.ClientId.empty() && !parameters.Origin.empty();
+	const bool identified_emitter = parameters.Role == "emitter" && !parameters.ClientId.empty() &&
+									IsValidProducerSessionId(parameters.ProducerSessionId);
 	return (parameters.Role == "receiver" || identified_emitter) && parameters.SyncFrom >= 0;
 }
 

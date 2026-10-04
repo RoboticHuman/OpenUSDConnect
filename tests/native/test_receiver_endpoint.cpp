@@ -102,7 +102,7 @@ public:
 	{
 		static_cast<void>(Single<ConnectAction>());
 		Endpoint.OnConnected(token);
-		return DecodeHello(Single<SendAction>().Bytes);
+		return DecodeHello(*Single<SendAction>().Bytes);
 	}
 
 	SentHello Start(std::string_view token = {})

@@ -4,6 +4,7 @@
 
 #include <cstdint>
 #include <optional>
+#include <string>
 #include <string_view>
 #include <utility>
 
@@ -109,5 +110,32 @@ inline constexpr RejectionPolicy kRejectionPolicies[] = {
 	const detail::RejectionPolicy* policy = detail::FindRejectionPolicy(code);
 	return policy ? policy->Disposition : ProducerRecoveryDisposition::SessionFatal;
 }
+
+// A rejected transaction, or a server acknowledgement the outbox cannot accept.
+struct TransactionFailure final
+{
+	std::uint64_t TransactionId = 0;
+	// The wire value, which a newer server may extend.
+	std::uint8_t Code = 0;
+	std::string Reason;
+	std::uint64_t ExpectedTransactionId = 0;
+
+	[[nodiscard]] ProducerRecoveryDisposition Disposition() const noexcept
+	{
+		return RejectionDisposition(Code);
+	}
+
+	[[nodiscard]] std::string Describe() const
+	{
+		const std::optional<std::string_view> name = RejectionCodeName(Code);
+		std::string text = "transaction " + std::to_string(TransactionId) + " rejected (";
+		text += name ? std::string(*name) : "unknown_" + std::to_string(Code);
+		if (ExpectedTransactionId != 0)
+		{
+			text += ", expected transaction " + std::to_string(ExpectedTransactionId);
+		}
+		return text + "): " + (Reason.empty() ? "no reason supplied" : Reason);
+	}
+};
 
 } // namespace openusdconnect::client

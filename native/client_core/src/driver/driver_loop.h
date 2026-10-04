@@ -308,7 +308,7 @@ private:
 		{
 			return;
 		}
-		const SocketResult result = Connection->SendAll(action.Bytes.data(), action.Bytes.size());
+		const SocketResult result = Connection->SendAll(action.Bytes->data(), action.Bytes->size());
 		if (result != SocketResult::Success)
 		{
 			Fail(SocketOperation::Send, result, *Connection, "send failed");
