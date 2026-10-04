@@ -2,9 +2,9 @@
 
 The native core is split into four composable C++17 targets:
 
-- `OpenUSDConnect::ClientCore` provides framing, receiver ordering/replay, producer outbox state,
-  and the client phase and rejection policy (`engine/status.h`). It has no FlatBuffers or OpenUSD
-  dependency.
+- `OpenUSDConnect::ClientCore` provides framing, receiver ordering/replay, producer outbox state
+  and its rejection policy (`producer_recovery.h`), and the client phase (`engine/status.h`). It
+  has no FlatBuffers or OpenUSD dependency.
 - `OpenUSDConnect::ClientProtocol` adds the generated FlatBuffers schema plus transport-neutral
   handshake, control-message, and transaction construction helpers.
 - `OpenUSDConnect::ClientEngine` adds sans-IO endpoints (`engine/receiver_endpoint.h`,
@@ -13,7 +13,7 @@ The native core is split into four composable C++17 targets:
   They start no threads and open no sockets.
 - `OpenUSDConnect::ClientDriver` is an optional reference host loop
   (`driver/threaded_receiver_driver.h`): one thread with blocking Winsock or BSD sockets
-  (`driver/tcp_socket.h`) drives an endpoint. The Python module links it; hosts with their own I/O
+  (`driver/socket.h`) drives an endpoint. The Python module links it; hosts with their own I/O
   loop and scheduler drive the endpoint directly and never link it.
 
 The protocol layer deliberately does not own transport, threads, queues, event-offset storage, or
@@ -57,19 +57,20 @@ the next connection. `Append` takes a complete length-prefixed `Txn` frame that 
 id through `Append`. A rejection stays in `Status().Failure` until `RepairRejected` or
 `AbandonRejectedSession` resolves it.
 
-`ThreadedReceiverDriver` is that loop on one thread. `Start()` runs it, and the optional
-`DriverCallbacks` supply the token for each handshake, receive the drained notifications, take
-log lines, and report the thread's exit; they run on the driver thread with no lock held. `Stop()`
-never blocks: it stops the endpoint and interrupts a pending connect or read through an event the
-socket waits on, since `shutdown()` does not wake a blocked Winsock call. `Join(timeout)` waits
-for the thread. After a consumer-thread call that can close the connection or complete the
-replay, such as `RequestReplayFrom` or `MarkReplayApplied`, call `Wake()` so the loop applies the
-new actions and `WaitConnected`/`WaitSynchronized` re-check.
+`ThreadedReceiverDriver` is that loop on one thread. `Start()` starts the endpoint and runs it, and
+the optional `DriverCallbacks` supply the token for each handshake, receive the drained
+notifications, take log lines, and report the thread's exit; they run on the driver thread with no
+lock held. `Stop()` never blocks: it stops the endpoint and interrupts a pending connect or read
+through an event the socket waits on, since `shutdown()` does not wake a blocked Winsock call.
+`Join(timeout)` waits for the thread. After a consumer-thread call that can close the connection or
+complete the replay, such as `RequestReplayFrom` or `MarkReplayApplied`, call `Wake()` so the loop
+applies the new actions and `WaitConnected`/`WaitSynchronized` re-check.
 
-`driver/scripted_socket.h` is the test seam. Each connect of a `ScriptedSocketFactory` socket
-waits until the test accepts or refuses it; the accepted `ScriptedConnection` delivers scripted
-bytes, read timeouts, or a peer close, records what the client sent, and `WaitIdle` returns once
-the client handled every delivery and waits for more.
+`driver/testing/scripted_socket.h` is the test seam, built only into
+`OpenUSDConnect::ClientDriverTesting`. Each connect of a `ScriptedSocketFactory` socket waits until
+the test accepts or refuses it; the accepted `ScriptedConnection` delivers scripted bytes, read
+timeouts, or a peer close, records what the client sent, and `WaitIdle` returns once the client
+handled every delivery and waits for more.
 
 When included with `add_subdirectory`, link `OpenUSDConnect::ClientProtocol`,
 `OpenUSDConnect::ClientEngine`, or `OpenUSDConnect::ClientDriver` (which links `ws2_32` on

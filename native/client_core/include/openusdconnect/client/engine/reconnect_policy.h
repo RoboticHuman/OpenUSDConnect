@@ -1,6 +1,6 @@
 #pragma once
 
-#include "openusdconnect/client/engine/clock.h"
+#include "openusdconnect/client/engine/actions.h"
 
 #include <algorithm>
 #include <cassert>

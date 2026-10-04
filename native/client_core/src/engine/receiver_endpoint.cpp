@@ -1,10 +1,9 @@
 #include "openusdconnect/client/engine/receiver_endpoint.h"
 
-#include "message_fields.h"
+#include "endpoint_common.h"
 
 #include <algorithm>
 #include <cassert>
-#include <memory>
 #include <utility>
 
 namespace openusdconnect::client
@@ -12,6 +11,7 @@ namespace openusdconnect::client
 namespace
 {
 
+using detail::Address;
 using detail::Text;
 using detail::Value;
 
@@ -33,11 +33,6 @@ constexpr std::chrono::milliseconds kDrainPollInterval{100};
 [[nodiscard]] bool IsKnownPayload(OpenUSDConnect::Payload type) noexcept
 {
 	return type != OpenUSDConnect::Payload::NONE && type <= OpenUSDConnect::Payload::MAX;
-}
-
-[[nodiscard]] std::string Address(const ReceiverConfig& config)
-{
-	return detail::Address(config.Host, config.Port);
 }
 
 } // namespace
@@ -105,26 +100,14 @@ void ReceiverEndpoint::OnConnected(std::string_view token)
 	Rejection.reset();
 	State = ConnectionState::Handshaking;
 
-	HelloParameters hello;
-	hello.Role = "receiver";
+	HelloParameters hello = detail::CommonHello("receiver", Config, token);
 	hello.SyncFrom = ConnectionSyncFrom;
-	hello.ClientId = Config.ClientId;
-	hello.Origin = Config.Origin;
-	hello.Department = Config.Department;
-	hello.Token = token;
 	hello.LayeredReplay = Config.LayeredReplay;
-	hello.LayerMode = Config.LayerMode;
 	hello.ReplayPrefix = Identity.BeginConnection();
-	flatbuffers::FlatBufferBuilder builder(256);
-	if (BuildHelloFrame(builder, hello) != ProtocolResult::Success)
+	if (!detail::QueueHello(hello, Actions))
 	{
-		Log(LogLevel::Error, "could not build the Hello frame");
-		CloseConnection(DisconnectReason::ProtocolError);
-		return;
+		Close(DisconnectReason::ProtocolError);
 	}
-	const std::uint8_t* bytes = builder.GetBufferPointer();
-	Actions.push_back(SendAction{
-		std::make_shared<const std::vector<std::uint8_t>>(bytes, bytes + builder.GetSize())});
 }
 
 void ReceiverEndpoint::OnBytes(const std::uint8_t* data, std::size_t size)
@@ -138,20 +121,16 @@ void ReceiverEndpoint::OnBytes(const std::uint8_t* data, std::size_t size)
 	{
 		ConsecutiveTimeouts = 0;
 	}
-	std::vector<std::vector<std::uint8_t>> frames;
-	if (Decoder.Feed(data, size, frames) != FrameResult::Success)
+	const bool framed = detail::HandleFrames(Decoder, data, size,
+											 [this](std::vector<std::uint8_t>& frame)
+											 {
+												 HandleFrame(std::move(frame));
+												 return IsOpen();
+											 });
+	if (!framed)
 	{
 		Log(LogLevel::Warning, "invalid frame header");
-		CloseConnection(DisconnectReason::ProtocolError);
-		return;
-	}
-	for (std::vector<std::uint8_t>& frame : frames)
-	{
-		if (!IsOpen())
-		{
-			break;
-		}
-		HandleFrame(std::move(frame));
+		Close(DisconnectReason::ProtocolError);
 	}
 }
 
@@ -171,7 +150,7 @@ void ReceiverEndpoint::OnReadTimeout()
 		return;
 	}
 	Log(LogLevel::Warning, count + " consecutive read timeouts, reconnecting");
-	CloseConnection(DisconnectReason::ReadTimeout);
+	Close(DisconnectReason::ReadTimeout);
 }
 
 void ReceiverEndpoint::OnDisconnected(DisconnectReason reason, TimePoint now)
@@ -180,7 +159,7 @@ void ReceiverEndpoint::OnDisconnected(DisconnectReason reason, TimePoint now)
 	if (IsOpen())
 	{
 		Log(LogLevel::Warning, "connection to " + Address(Config) + " lost");
-		EndSession(reason);
+		EndConnection(reason);
 	}
 	else if (State != ConnectionState::Connecting && State != ConnectionState::Closing)
 	{
@@ -209,13 +188,9 @@ void ReceiverEndpoint::Stop()
 	{
 		return;
 	}
-	if (IsOpen())
+	if (State == ConnectionState::Connecting || IsOpen())
 	{
-		CloseConnection(DisconnectReason::Stopped);
-	}
-	else if (State == ConnectionState::Connecting)
-	{
-		Actions.push_back(CloseAction{DisconnectReason::Stopped});
+		Close(DisconnectReason::Stopped);
 	}
 	State = ConnectionState::Stopped;
 	Log(LogLevel::Info, "stopped");
@@ -370,20 +345,23 @@ void ReceiverEndpoint::PollDrain(TimePoint now)
 	}
 }
 
-void ReceiverEndpoint::CloseConnection(DisconnectReason reason)
+void ReceiverEndpoint::Close(DisconnectReason reason)
 {
+	EndConnection(reason);
 	Actions.push_back(CloseAction{reason});
-	EndSession(reason);
 	State = ConnectionState::Closing;
 }
 
-void ReceiverEndpoint::EndSession(DisconnectReason reason)
+void ReceiverEndpoint::EndConnection(DisconnectReason reason)
 {
 	if (State == ConnectionState::Connected)
 	{
 		Notify(Disconnected{reason});
 	}
-	Inbox.Disconnect(ConnectionGeneration);
+	if (IsOpen())
+	{
+		Inbox.Disconnect(ConnectionGeneration);
+	}
 }
 
 void ReceiverEndpoint::RequestReplay(std::int32_t sequence, DisconnectReason reason)
@@ -393,7 +371,7 @@ void ReceiverEndpoint::RequestReplay(std::int32_t sequence, DisconnectReason rea
 	assert(requested);
 	if (IsOpen())
 	{
-		CloseConnection(reason);
+		Close(reason);
 	}
 }
 
@@ -403,10 +381,8 @@ void ReceiverEndpoint::HandleFrame(std::vector<std::uint8_t> frame)
 	const ProtocolResult decoded = DecodeEnvelope(frame.data(), frame.size(), envelope);
 	if (decoded != ProtocolResult::Success || !IsKnownPayload(envelope.PayloadType()))
 	{
-		Log(LogLevel::Error, decoded == ProtocolResult::SchemaVersionMismatch
-								 ? "frame uses an unsupported schema version"
-								 : "malformed frame");
-		CloseConnection(DisconnectReason::ProtocolError);
+		Log(LogLevel::Error, detail::DescribeDecodeFailure(decoded));
+		Close(DisconnectReason::ProtocolError);
 		return;
 	}
 	if (State == ConnectionState::Handshaking)
@@ -421,24 +397,14 @@ void ReceiverEndpoint::HandleFrame(std::vector<std::uint8_t> frame)
 
 void ReceiverEndpoint::HandleHandshake(EnvelopeView envelope)
 {
-	const HandshakeResponseView response(envelope);
-	switch (response.Kind())
+	const detail::HandshakeOutcome outcome = detail::ClassifyHandshake(envelope);
+	if (outcome.Accepted)
 	{
-	case HandshakeResponseKind::Accepted:
-		AcceptHello(*response.Accepted());
-		return;
-	case HandshakeResponseKind::AuthenticationRejected:
-		Reject({true, OpenUSDConnect::HelloRejectionCode::Unspecified,
-				Text(response.AuthenticationRejection()->reason())});
-		return;
-	case HandshakeResponseKind::ConfigurationRejected:
-	{
-		const OpenUSDConnect::HelloRejected& rejection = *response.ConfigurationRejection();
-		Reject({false, rejection.code(), Text(rejection.reason())});
-		return;
+		AcceptHello(*outcome.Accepted);
 	}
-	case HandshakeResponseKind::Unexpected:
-		return;
+	else if (outcome.Rejection)
+	{
+		Reject(*outcome.Rejection);
 	}
 }
 
@@ -458,16 +424,7 @@ void ReceiverEndpoint::AcceptHello(const OpenUSDConnect::HelloOk& hello)
 				"server did not negotiate requested layered replay"});
 		return;
 	}
-	if (std::string token = Text(hello.token()); !token.empty())
-	{
-		Log(LogLevel::Info, "token issued by server");
-		Notify(TokenIssued{std::move(token)});
-	}
-	if (std::optional<StageMetadata> metadata = detail::DecodeStageMetadata(hello.stage_metadata()))
-	{
-		Metadata = *metadata;
-		Notify(std::move(*metadata));
-	}
+	detail::NotifyHelloFields(hello, Metadata, Notifications, Actions);
 
 	Identity.AcceptHello(ConnectionSyncFrom, hello.replay_identity(), Text(hello.server_instance()),
 						 Value(hello.replay_epoch()));
@@ -491,7 +448,7 @@ void ReceiverEndpoint::Reject(HandshakeRejected rejection)
 	Log(LogLevel::Error, detail::DescribeRejection(rejection));
 	Notify(rejection);
 	Rejection = std::move(rejection);
-	CloseConnection(DisconnectReason::HandshakeRejected);
+	Close(DisconnectReason::HandshakeRejected);
 }
 
 void ReceiverEndpoint::HandleMessage(EnvelopeView envelope, std::vector<std::uint8_t>& frame)
@@ -582,7 +539,7 @@ void ReceiverEndpoint::AcceptFrame(ReceiverMessageKind kind, std::int32_t sequen
 	case AcceptResult::QueueFull:
 		Log(LogLevel::Warning, "queue full (" + std::to_string(Config.MaxQueue) +
 								   "), disconnecting to replay from server");
-		CloseConnection(DisconnectReason::QueueFull);
+		Close(DisconnectReason::QueueFull);
 		return;
 	}
 }

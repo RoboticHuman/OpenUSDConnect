@@ -1,11 +1,13 @@
-#include "openusdconnect/client/driver/tcp_socket.h"
+#include "openusdconnect/client/driver/socket.h"
 
 #include "test_check.h"
 
 #include <chrono>
 #include <cstdint>
 #include <memory>
+#include <optional>
 #include <thread>
+#include <vector>
 
 #ifdef _WIN32
 #include <winsock2.h>
@@ -89,9 +91,9 @@ private:
 	bool Open = true;
 };
 
-[[nodiscard]] TimePoint Deadline()
+[[nodiscard]] TimePoint Deadline(std::chrono::milliseconds wait = kPatience)
 {
-	return std::chrono::steady_clock::now() + kPatience;
+	return std::chrono::steady_clock::now() + wait;
 }
 
 void TestSendReceiveAndTimeout()
@@ -104,15 +106,16 @@ void TestSendReceiveAndTimeout()
 	CHECK(send(server, "abc", 3, 0) == 3);
 	std::uint8_t buffer[16];
 	std::size_t received = 0;
-	CHECK(client->Receive(buffer, sizeof(buffer), kPatience, received) == SocketResult::Success);
+	CHECK(client->Receive(buffer, sizeof(buffer), Deadline(), received) == SocketResult::Success);
 	CHECK(received == 3 && buffer[0] == 'a');
 	const std::uint8_t reply[] = {'h', 'i'};
-	CHECK(client->SendAll(reply, sizeof(reply)) == SocketResult::Success);
+	CHECK(client->SendAll(reply, sizeof(reply), Deadline()) == SocketResult::Success);
 	char echoed[2];
 	CHECK(recv(server, echoed, 2, 0) == 2);
-	CHECK(client->Receive(buffer, sizeof(buffer), 50ms, received) == SocketResult::Timeout);
+	CHECK(client->Receive(buffer, sizeof(buffer), Deadline(50ms), received) ==
+		  SocketResult::Timeout);
 	CloseNative(server);
-	CHECK(client->Receive(buffer, sizeof(buffer), kPatience, received) == SocketResult::Closed);
+	CHECK(client->Receive(buffer, sizeof(buffer), Deadline(), received) == SocketResult::Closed);
 }
 
 // Wake ends one Receive and is consumed; Interrupt ends every later call too.
@@ -132,12 +135,13 @@ void TestWakeAndInterruptEndBlockedCalls()
 			std::this_thread::sleep_for(50ms);
 			client->Wake();
 		});
-	CHECK(client->Receive(buffer, sizeof(buffer), kPatience, received) ==
+	CHECK(client->Receive(buffer, sizeof(buffer), Deadline(), received) ==
 		  SocketResult::Interrupted);
 	waker.join();
-	CHECK(client->Receive(buffer, sizeof(buffer), 50ms, received) == SocketResult::Timeout);
+	CHECK(client->Receive(buffer, sizeof(buffer), Deadline(50ms), received) ==
+		  SocketResult::Timeout);
 	client->Wake();
-	CHECK(client->Receive(buffer, sizeof(buffer), kPatience, received) ==
+	CHECK(client->Receive(buffer, sizeof(buffer), Deadline(), received) ==
 		  SocketResult::Interrupted);
 
 	std::thread interrupter(
@@ -146,13 +150,35 @@ void TestWakeAndInterruptEndBlockedCalls()
 			std::this_thread::sleep_for(50ms);
 			client->Interrupt();
 		});
-	CHECK(client->Receive(buffer, sizeof(buffer), kPatience, received) ==
+	CHECK(client->Receive(buffer, sizeof(buffer), std::nullopt, received) ==
 		  SocketResult::Interrupted);
 	interrupter.join();
-	CHECK(client->Receive(buffer, sizeof(buffer), kPatience, received) ==
+	CHECK(client->Receive(buffer, sizeof(buffer), Deadline(), received) ==
 		  SocketResult::Interrupted);
 	const std::uint8_t byte = 0;
-	CHECK(client->SendAll(&byte, 1) == SocketResult::Interrupted);
+	CHECK(client->SendAll(&byte, 1, Deadline()) == SocketResult::Interrupted);
+	CloseNative(server);
+}
+
+// A peer that stops reading stalls the writer, which gives up at its deadline.
+// Winsock accepts a whole send while its buffer has room, so the writer keeps sending.
+void TestStalledWriteTimesOut()
+{
+	TcpSocketFactory factory;
+	Listener listener;
+	const std::unique_ptr<Socket> client = factory.Create();
+	CHECK(client->Connect("127.0.0.1", listener.Port, Deadline()) == SocketResult::Success);
+	const NativeSocket server = listener.Accept();
+	const std::vector<std::uint8_t> chunk(1024 * 1024);
+	SocketResult result = SocketResult::Success;
+	auto started = std::chrono::steady_clock::now();
+	for (int chunks = 0; chunks < 1024 && result == SocketResult::Success; ++chunks)
+	{
+		started = std::chrono::steady_clock::now();
+		result = client->SendAll(chunk.data(), chunk.size(), Deadline(100ms));
+	}
+	CHECK(result == SocketResult::Timeout);
+	CHECK(std::chrono::steady_clock::now() - started < kPatience);
 	CloseNative(server);
 }
 
@@ -182,6 +208,7 @@ int main()
 {
 	TestSendReceiveAndTimeout();
 	TestWakeAndInterruptEndBlockedCalls();
+	TestStalledWriteTimesOut();
 	TestConnectEndsWhenRefusedOrInterrupted();
 	return 0;
 }

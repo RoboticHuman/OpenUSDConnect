@@ -1,7 +1,6 @@
 #pragma once
 
-#include "openusdconnect/client/engine/clock.h"
-
+#include <chrono>
 #include <cstdint>
 #include <memory>
 #include <string>
@@ -10,6 +9,9 @@
 
 namespace openusdconnect::client
 {
+
+// Hosts pass the current time in; the engine never reads a clock.
+using TimePoint = std::chrono::steady_clock::time_point;
 
 enum class DisconnectReason : std::uint8_t
 {
@@ -54,6 +56,14 @@ struct SendAction final
 	// Shared with the producer outbox, so replaying a transaction copies nothing.
 	std::shared_ptr<const std::vector<std::uint8_t>> Bytes;
 };
+
+// How a connection or attempt ends, in both endpoints and the reference driver:
+//   Stop            the host ends it, and no attempt follows.
+//   Disconnect      the host ends the producer's; later attempts may follow.
+//   Close           the endpoint ends it with a CloseAction; the driver's Close applies one.
+//   Quit            the producer's Close that first says Quit to a published connection.
+//   EndConnection   the endpoint's accounting for any end, whichever side caused it.
+//   OnDisconnected  the host reports that the socket or attempt is gone.
 
 // Close the socket, or abandon the connect attempt, then report OnDisconnected.
 struct CloseAction final

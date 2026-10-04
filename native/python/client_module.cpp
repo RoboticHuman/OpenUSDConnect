@@ -1,7 +1,6 @@
-#include "receiver_bindings.h"
-
 #include "openusdconnect/client/engine/status.h"
 #include "openusdconnect/client/frame_codec.h"
+#include "openusdconnect/client/producer_recovery.h"
 #include "openusdconnect/client/producer_session.h"
 #include "openusdconnect/client/receiver_session.h"
 
@@ -31,6 +30,9 @@ using openusdconnect::client::ProducerPhase;
 using openusdconnect::client::ProducerRecoveryDisposition;
 using openusdconnect::client::ProducerResult;
 using openusdconnect::client::ReceiverMessageKind;
+
+// Defined in receiver_bindings.cpp.
+void BindReceiver(nb::module_& module);
 
 namespace
 {

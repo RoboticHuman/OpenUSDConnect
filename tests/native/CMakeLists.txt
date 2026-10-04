@@ -46,7 +46,9 @@ endif()
 add_test(NAME OpenUSDConnectProducerEndpointTests COMMAND OpenUSDConnectProducerEndpointTests)
 
 add_executable(OpenUSDConnectThreadedReceiverDriverTests test_threaded_receiver_driver.cpp)
-target_link_libraries(OpenUSDConnectThreadedReceiverDriverTests PRIVATE OpenUSDConnect::ClientDriver)
+target_link_libraries(OpenUSDConnectThreadedReceiverDriverTests
+    PRIVATE OpenUSDConnect::ClientDriver OpenUSDConnect::ClientDriverTesting
+)
 if(MSVC)
     target_compile_options(OpenUSDConnectThreadedReceiverDriverTests PRIVATE /W4 /permissive-)
 else()

@@ -1,7 +1,6 @@
 #pragma once
 
 #include "openusdconnect/client/engine/actions.h"
-#include "openusdconnect/client/engine/clock.h"
 #include "openusdconnect/client/engine/notification.h"
 #include "openusdconnect/client/engine/reconnect_policy.h"
 #include "openusdconnect/client/protocol_codec.h"
@@ -32,7 +31,7 @@ struct ReceiverConfig final
 	// Above one, the consumer already holds the prefix, for example from a snapshot.
 	std::int32_t SyncFrom = 1;
 	std::size_t MaxQueue = 50'000;
-	// The connect deadline, and how long a host read waits before OnReadTimeout.
+	// Bounds a connect and a write, and how long a host read waits before OnReadTimeout.
 	std::chrono::milliseconds SocketTimeout{30'000};
 	std::uint32_t MaxConsecutiveTimeouts = 10;
 	bool Reconnect = true;
@@ -121,8 +120,8 @@ private:
 	void BeginAttempt(TimePoint now);
 	void ScheduleNextAttempt(TimePoint now);
 	void PollDrain(TimePoint now);
-	void CloseConnection(DisconnectReason reason);
-	void EndSession(DisconnectReason reason);
+	void Close(DisconnectReason reason);
+	void EndConnection(DisconnectReason reason);
 	void RequestReplay(std::int32_t sequence, DisconnectReason reason);
 
 	void HandleFrame(std::vector<std::uint8_t> frame);

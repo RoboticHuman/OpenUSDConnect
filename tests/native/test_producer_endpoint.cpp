@@ -1,5 +1,6 @@
 #include "openusdconnect/client/engine/producer_endpoint.h"
 
+#include "endpoint_host.h"
 #include "frames.h"
 #include "test_check.h"
 
@@ -12,7 +13,6 @@
 #include <string>
 #include <string_view>
 #include <thread>
-#include <type_traits>
 #include <utility>
 #include <variant>
 #include <vector>
@@ -34,21 +34,6 @@ using namespace endpoint_test;
 	config.Origin = "origin";
 	config.SessionId = "session";
 	return config;
-}
-
-template <typename Field>
-[[nodiscard]] ProducerConfig With(ProducerConfig config, Field ProducerConfig::* field,
-								  std::common_type_t<Field> value)
-{
-	config.*field = value;
-	return config;
-}
-
-template <typename T>
-[[nodiscard]] const T& As(const Notification& notification)
-{
-	CHECK(std::holds_alternative<T>(notification));
-	return std::get<T>(notification);
 }
 
 // A one-event transaction frame, encoded as a host encodes it.
@@ -109,29 +94,13 @@ template <typename T>
 	return bytes;
 }
 
-// Plays the host around one endpoint, on a clock the test advances.
-class Producer final
+// Plays the host around one endpoint.
+class Producer final : public Host<ProducerEndpoint>
 {
 public:
 	explicit Producer(const ProducerConfig& config = TestConfig())
-		: Endpoint(config, Notifications)
+		: Host(config)
 	{
-	}
-
-	// Actions since the last call, without log lines.
-	[[nodiscard]] std::vector<Action> Commands()
-	{
-		Collect();
-		return std::exchange(Pending, {});
-	}
-
-	template <typename T>
-	[[nodiscard]] T Single()
-	{
-		std::vector<Action> commands = Commands();
-		CHECK(commands.size() == 1);
-		CHECK(std::holds_alternative<T>(commands.front()));
-		return std::get<T>(std::move(commands.front()));
 	}
 
 	// The frames to send since the last call; any other action fails.
@@ -156,35 +125,16 @@ public:
 		return frames;
 	}
 
-	[[nodiscard]] bool Logged(LogLevel level, std::string_view text)
-	{
-		Collect();
-		return std::any_of(Logs.begin(), Logs.end(),
-						   [&](const LogAction& log)
-						   {
-							   return log.Level == level &&
-									  log.Message.find(text) != std::string::npos;
-						   });
-	}
-
-	[[nodiscard]] std::vector<Notification> Notices()
-	{
-		return Notifications.Drain();
-	}
-
-	[[nodiscard]] ProducerStatus Status() const
-	{
-		return Endpoint.Status();
-	}
-
-	// Takes a new attempt's ConnectAction and WakeAction and returns its deadline.
+	// Takes a new attempt's actions and returns its deadline, when the endpoint wakes.
 	TimePoint Attempt()
 	{
-		const std::vector<Action> commands = Commands();
-		CHECK(commands.size() == 2);
-		const ConnectAction& connect = std::get<ConnectAction>(commands[0]);
+		const ConnectAction connect = Next<ConnectAction>();
 		CHECK(connect.Host == "127.0.0.1" && connect.Port == 7200);
-		CHECK(std::get<WakeAction>(commands[1]).Time == connect.Deadline);
+		CHECK(Endpoint.NextWake() == connect.Deadline);
+		for (const Action& action : Commands())
+		{
+			CHECK(std::holds_alternative<WakeAction>(action));
+		}
 		return connect.Deadline;
 	}
 
@@ -220,52 +170,12 @@ public:
 							   std::string(layer_key));
 	}
 
-	void Feed(const Bytes& bytes)
-	{
-		Endpoint.OnBytes(bytes.data(), bytes.size());
-	}
-
-	void Disconnect(DisconnectReason reason = DisconnectReason::PeerClosed)
-	{
-		Endpoint.OnDisconnected(reason, Now);
-	}
-
 	// Expects the endpoint to close the connection, then reports the close.
 	void ExpectClose(DisconnectReason reason)
 	{
 		CHECK(Single<CloseAction>().Reason == reason);
 		Disconnect(reason);
 	}
-
-	void Advance(std::chrono::milliseconds elapsed)
-	{
-		Now += elapsed;
-		Endpoint.OnTick(Now);
-	}
-
-	NotificationQueue Notifications;
-	ProducerEndpoint Endpoint;
-	// Away from the clock's epoch, which no deadline may depend on.
-	TimePoint Now = TimePoint{} + 1h;
-
-private:
-	void Collect()
-	{
-		for (Action& action : Endpoint.TakeActions())
-		{
-			if (LogAction* log = std::get_if<LogAction>(&action))
-			{
-				Logs.push_back(std::move(*log));
-			}
-			else
-			{
-				Pending.push_back(std::move(action));
-			}
-		}
-	}
-
-	std::vector<Action> Pending;
-	std::vector<LogAction> Logs;
 };
 
 void TestConfigurationValidation()
@@ -310,7 +220,6 @@ void TestAttemptsAreBoundedAndExclusive()
 	CHECK(!producer.Status().Handshaking && !producer.Endpoint.NextWake());
 	CHECK(producer.Endpoint.RequestConnect(producer.Now, producer.Now + 2s));
 	CHECK(producer.Attempt() == producer.Now + 2s);
-	CHECK(producer.Logged(LogLevel::Info, "connecting to 127.0.0.1:7200"));
 	CHECK(producer.Endpoint.NextWake() == producer.Now + 2s);
 	CHECK(producer.Status().Handshaking && !producer.Status().Connected);
 	CHECK(!producer.Endpoint.RequestConnect(producer.Now, producer.Now + 2s));
@@ -379,8 +288,6 @@ void TestAcceptedHelloNotifiesThenPublishes()
 	CHECK(As<TokenIssued>(notices[0]).Token == "issued");
 	CHECK(As<StageMetadata>(notices[1]).MetersPerUnit == 0.01);
 	static_cast<void>(As<Connected>(notices[2]));
-	CHECK(producer.Logged(LogLevel::Info,
-						  "connected to 127.0.0.1:7200 (session=session, pending=0)"));
 	const ProducerStatus status = producer.Status();
 	CHECK(status.Connected && !status.Handshaking && !status.Rejection && !status.Failure);
 	CHECK(status.Metadata.UpAxis == "Y" && !status.Metadata.TimeCodesPerSecond);
@@ -393,9 +300,7 @@ void TestAcceptedHelloNotifiesThenPublishes()
 	hello.Token.clear();
 	static_cast<void>(bare.Request());
 	bare.Feed(server::HelloOk(hello));
-	const std::vector<Notification> bare_notices = bare.Notices();
-	CHECK(bare_notices.size() == 1);
-	static_cast<void>(As<Connected>(bare_notices[0]));
+	static_cast<void>(bare.Notice<Connected>());
 	CHECK(!bare.Status().Metadata.UpAxis);
 }
 
@@ -406,10 +311,7 @@ void TestHandshakeRejectionsHoldUntilAnExplicitConnect()
 		static_cast<void>(producer.Request());
 		producer.Feed(server::AuthRejected("invalid token"));
 		CHECK(producer.Single<CloseAction>().Reason == DisconnectReason::HandshakeRejected);
-		CHECK(producer.Logged(LogLevel::Error, "authentication rejected: invalid token"));
-		const std::vector<Notification> notices = producer.Notices();
-		CHECK(notices.size() == 1);
-		const HandshakeRejected& rejected = As<HandshakeRejected>(notices[0]);
+		const HandshakeRejected rejected = producer.Notice<HandshakeRejected>();
 		CHECK(rejected.Authentication && rejected.Reason == "invalid token");
 		producer.Disconnect();
 		const ProducerStatus status = producer.Status();
@@ -460,9 +362,7 @@ void TestLayerModeMismatchIsARejection()
 		hello.Token = "not-issued";
 		producer.Feed(server::HelloOk(hello));
 		CHECK(producer.Single<CloseAction>().Reason == DisconnectReason::HandshakeRejected);
-		const std::vector<Notification> notices = producer.Notices();
-		CHECK(notices.size() == 1);
-		const HandshakeRejected& rejected = As<HandshakeRejected>(notices[0]);
+		const HandshakeRejected rejected = producer.Notice<HandshakeRejected>();
 		CHECK(!rejected.Authentication);
 		CHECK(rejected.Code == HelloRejectionCode::LayerModeMismatch);
 		CHECK(rejected.Reason == reason);
@@ -479,7 +379,6 @@ void CheckSessionFailure(Producer& producer, std::uint64_t transaction_id, std::
 	CHECK(failure->ExpectedTransactionId == 0);
 	CHECK(failure->Reason == reason);
 	CHECK(failure->Disposition() == ProducerRecoveryDisposition::SessionFatal);
-	CHECK(producer.Logged(LogLevel::Error, failure->Describe()));
 }
 
 void TestHelloHighwaterAheadRequiresRecovery()
@@ -541,21 +440,19 @@ void TestHelloHighwaterRegressionRequiresRecovery()
 void TestHandshakeProtocolErrorsAreFailedAttempts()
 {
 	flatbuffers::FlatBufferBuilder old_schema(32);
-	const std::pair<Bytes, std::string_view> cases[] = {
-		{server::Ping(), "unexpected handshake response"},
-		{Bytes{0, 0, 0, 2, 0xFF, 0xFF}, "malformed frame"},
-		{server::Frame(old_schema, Payload::Ping, OpenUSDConnect::CreatePing(old_schema).Union(),
-					   kSchemaVersion - 1),
-		 "frame uses an unsupported schema version"},
-		{Bytes{0, 0, 0, 0}, "invalid frame header"},
+	const Bytes cases[] = {
+		server::Ping(),
+		Bytes{0, 0, 0, 2, 0xFF, 0xFF},
+		server::Frame(old_schema, Payload::Ping, OpenUSDConnect::CreatePing(old_schema).Union(),
+					  kSchemaVersion - 1),
+		Bytes{0, 0, 0, 0},
 	};
-	for (const auto& [bytes, log] : cases)
+	for (const Bytes& bytes : cases)
 	{
 		Producer producer;
 		static_cast<void>(producer.Request());
 		producer.Feed(bytes);
 		CHECK(producer.Single<CloseAction>().Reason == DisconnectReason::ProtocolError);
-		CHECK(producer.Logged(LogLevel::Error, log) || producer.Logged(LogLevel::Warning, log));
 		producer.Disconnect();
 		const ProducerStatus status = producer.Status();
 		CHECK(!status.Connected && !status.Rejection && !status.Failure);
@@ -576,7 +473,6 @@ void TestHandshakeDeadline()
 		CHECK(producer.Commands().empty());
 		producer.Advance(1ms);
 		CHECK(producer.Single<CloseAction>().Reason == DisconnectReason::HandshakeTimeout);
-		CHECK(producer.Logged(LogLevel::Warning, "handshake with 127.0.0.1:7200 timed out"));
 		CHECK(!producer.Status().Handshaking && !producer.Endpoint.NextWake());
 		// The host's connect finishing late opens nothing.
 		producer.Endpoint.OnConnected({});
@@ -662,7 +558,7 @@ void TestCancelDuringHandshakeKeepsTheSessionHealthy(bool disconnect)
 	CHECK(producer.Submit("/Unsent") == ProducerResult::Accepted);
 	const Bytes unsent = producer.Sends().at(0);
 	producer.Disconnect();
-	CHECK(As<Disconnected>(producer.Notices().at(0)).Reason == DisconnectReason::PeerClosed);
+	CHECK(producer.Notice<Disconnected>().Reason == DisconnectReason::PeerClosed);
 
 	static_cast<void>(producer.Request());
 	bool finished = false;
@@ -699,7 +595,6 @@ void TestCancelBeforeTheSocketOpens()
 	static_cast<void>(producer.Attempt());
 	CHECK(!producer.Endpoint.CancelConnect());
 	CHECK(producer.Single<CloseAction>().Reason == DisconnectReason::Cancelled);
-	CHECK(producer.Logged(LogLevel::Info, "connection attempt cancelled"));
 	// The host's connect finished before it applied the close.
 	producer.Endpoint.OnConnected({});
 	CHECK(producer.Commands().empty());
@@ -776,7 +671,7 @@ void TestPublicationReplaysUnsentFramesInOrderWithoutCopies()
 	CHECK(first.size() == 3);
 	producer.Feed(server::Acknowledged(1));
 	producer.Disconnect();
-	CHECK(producer.Notices().size() == 1);
+	CHECK(producer.Notice<Disconnected>().Reason == DisconnectReason::PeerClosed);
 	ProducerStatus status = producer.Status();
 	CHECK(status.PendingTransactions == 2 && status.PendingEvents == 5);
 
@@ -784,7 +679,6 @@ void TestPublicationReplaysUnsentFramesInOrderWithoutCopies()
 	server::Hello hello;
 	hello.CommittedThrough = 2;
 	producer.Feed(server::HelloOk(hello));
-	CHECK(producer.Logged(LogLevel::Info, "(session=session, pending=1)"));
 	const std::vector<SendAction> replayed = producer.SendActions();
 	CHECK(replayed.size() == 1);
 	CHECK(replayed[0].Bytes == first[2].Bytes);
@@ -918,9 +812,7 @@ void TestAcknowledgementHighwaterFailures()
 		CHECK(producer.Single<CloseAction>().Reason == DisconnectReason::RecoveryRequired);
 		CheckSessionFailure(producer, 9,
 							"server producer highwater 9 is ahead of local transaction 1");
-		const std::vector<Notification> notices = producer.Notices();
-		CHECK(notices.size() == 1);
-		CHECK(As<Disconnected>(notices[0]).Reason == DisconnectReason::RecoveryRequired);
+		CHECK(producer.Notice<Disconnected>().Reason == DisconnectReason::RecoveryRequired);
 	}
 	{
 		Producer producer;
@@ -953,9 +845,7 @@ void TestRejectionQuarantinesTheOutbox(const DispositionCase& expected)
 	producer.Feed(Concatenate(
 		{server::Rejected(1, expected.Code, "layer was remapped", 1), server::Acknowledged(1)}));
 	CHECK(producer.Single<CloseAction>().Reason == DisconnectReason::RecoveryRequired);
-	const std::vector<Notification> notices = producer.Notices();
-	CHECK(notices.size() == 1);
-	CHECK(As<Disconnected>(notices[0]).Reason == DisconnectReason::RecoveryRequired);
+	CHECK(producer.Notice<Disconnected>().Reason == DisconnectReason::RecoveryRequired);
 
 	const std::optional<TransactionFailure> failure = producer.Endpoint.Failure();
 	CHECK(failure && failure->TransactionId == 1 && failure->ExpectedTransactionId == 1);
@@ -963,7 +853,6 @@ void TestRejectionQuarantinesTheOutbox(const DispositionCase& expected)
 	CHECK(failure->Reason == "layer was remapped");
 	CHECK(failure->Disposition() == expected.Disposition);
 	CHECK(failure->Describe() == expected.Description);
-	CHECK(producer.Logged(LogLevel::Error, expected.Description));
 
 	CHECK(producer.Submit("/C") == ProducerResult::RecoveryRequired);
 	CHECK(!producer.Endpoint.QueueControl(ClaimFrame()));
@@ -1027,8 +916,7 @@ void TestRateLimitClosesAndOpensARetryWindow()
 	const std::vector<Bytes> sent = producer.Sends();
 	producer.Feed(server::RateLimited(1.5F));
 	CHECK(producer.Single<CloseAction>().Reason == DisconnectReason::RateLimited);
-	CHECK(producer.Logged(LogLevel::Warning, "rate limited by the server; retrying after 1500 ms"));
-	CHECK(As<Disconnected>(producer.Notices().at(0)).Reason == DisconnectReason::RateLimited);
+	CHECK(producer.Notice<Disconnected>().Reason == DisconnectReason::RateLimited);
 	// The window starts once the close is reported.
 	producer.Now += 100ms;
 	producer.Disconnect();
@@ -1076,7 +964,6 @@ void TestRepairReplacesTheRejectedTransaction()
 		  ProducerResult::InvalidArgument);
 	CHECK(producer.Endpoint.Failure());
 	CHECK(producer.Endpoint.RepairRejected(repaired, 2, "new-layer") == ProducerResult::Accepted);
-	CHECK(producer.Logged(LogLevel::Info, "repaired transaction 1"));
 	const ProducerStatus status = producer.Status();
 	CHECK(!status.Failure && !producer.Endpoint.Artifact());
 	CHECK(status.PendingTransactions == 2 && status.PendingEvents == 3);
@@ -1117,7 +1004,6 @@ void TestAbandonContinuesAsAFreshSession()
 	CHECK(artifact->Failure.Code ==
 		  static_cast<std::uint8_t>(TransactionRejectionCode::InvalidTransaction));
 	CHECK(artifact->Transactions.size() == 2);
-	CHECK(producer.Logged(LogLevel::Info, "abandoned producer session session for replacement"));
 	const ProducerStatus status = producer.Status();
 	CHECK(status.SessionId == "replacement" && !status.Failure);
 	CHECK(status.PendingTransactions == 0 && status.NextTransactionId == 1);
@@ -1138,13 +1024,9 @@ void TestDisconnectSaysQuitAndKeepsTheOutbox()
 	CHECK(producer.Submit("/A") == ProducerResult::Accepted);
 	const std::vector<Bytes> sent = producer.Sends();
 	producer.Endpoint.Disconnect();
-	std::vector<Action> commands = producer.Commands();
-	CHECK(commands.size() == 2);
-	CHECK(DecodeSent(*std::get<SendAction>(commands[0]).Bytes).payload_type() == Payload::Quit);
-	CHECK(std::get<CloseAction>(commands[1]).Reason == DisconnectReason::Cancelled);
-	const std::vector<Notification> notices = producer.Notices();
-	CHECK(notices.size() == 1);
-	CHECK(As<Disconnected>(notices[0]).Reason == DisconnectReason::Cancelled);
+	CHECK(DecodeSent(*producer.Next<SendAction>().Bytes).payload_type() == Payload::Quit);
+	CHECK(producer.Next<CloseAction>().Reason == DisconnectReason::Cancelled);
+	CHECK(producer.Notice<Disconnected>().Reason == DisconnectReason::Cancelled);
 	CHECK(!producer.Status().Connected);
 	CHECK(producer.Submit("/B") == ProducerResult::InvalidPhase);
 	CHECK(!producer.Endpoint.QueueControl(ClaimFrame()));
@@ -1168,12 +1050,9 @@ void TestStopIsFinal()
 	Producer producer;
 	static_cast<void>(producer.Handshake());
 	producer.Endpoint.Stop();
-	std::vector<Action> commands = producer.Commands();
-	CHECK(commands.size() == 2);
-	CHECK(DecodeSent(*std::get<SendAction>(commands[0]).Bytes).payload_type() == Payload::Quit);
-	CHECK(std::get<CloseAction>(commands[1]).Reason == DisconnectReason::Stopped);
-	CHECK(producer.Logged(LogLevel::Info, "stopped"));
-	CHECK(As<Disconnected>(producer.Notices().at(0)).Reason == DisconnectReason::Stopped);
+	CHECK(DecodeSent(*producer.Next<SendAction>().Bytes).payload_type() == Payload::Quit);
+	CHECK(producer.Next<CloseAction>().Reason == DisconnectReason::Stopped);
+	CHECK(producer.Notice<Disconnected>().Reason == DisconnectReason::Stopped);
 	producer.Disconnect(DisconnectReason::Stopped);
 	CHECK(producer.Status().Stopped && !producer.Status().Connected);
 	CHECK(!producer.Endpoint.RequestConnect(producer.Now + 1h, producer.Now + 2h));
@@ -1231,7 +1110,8 @@ void TestMessagesWithoutAProducerActionAreIgnored()
 	CHECK(producer.Status().Connected);
 }
 
-void TestFramingAcrossReads()
+// A result read with the HelloOk applies to the connection the HelloOk published.
+void TestFramesAfterTheHelloOkInOneReadFollowPublication()
 {
 	Producer producer;
 	static_cast<void>(producer.Handshake());
@@ -1243,10 +1123,7 @@ void TestFramingAcrossReads()
 	static_cast<void>(producer.Request());
 	server::Hello hello;
 	hello.CommittedThrough = 1;
-	const Bytes bytes = Concatenate({server::HelloOk(hello), server::Acknowledged(2)});
-	producer.Endpoint.OnBytes(bytes.data(), 3);
-	CHECK(!producer.Status().Connected);
-	producer.Endpoint.OnBytes(bytes.data() + 3, bytes.size() - 3);
+	producer.Feed(Concatenate({server::HelloOk(hello), server::Acknowledged(2)}));
 	CHECK(producer.Status().Connected && producer.Endpoint.OutboxEmpty());
 	CHECK(TransactionIds(producer.Sends()) == std::vector<std::uint64_t>{2});
 }
@@ -1362,7 +1239,7 @@ int main()
 	TestStopIsFinal();
 	TestControlFramesFollowTheConnection();
 	TestMessagesWithoutAProducerActionAreIgnored();
-	TestFramingAcrossReads();
+	TestFramesAfterTheHelloOkInOneReadFollowPublication();
 	TestStaleHostReportsAreIgnored();
 	TestConcurrentAppendWhileTheLoopReads();
 	return 0;

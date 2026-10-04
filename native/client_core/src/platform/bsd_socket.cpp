@@ -1,4 +1,4 @@
-#include "openusdconnect/client/driver/tcp_socket.h"
+#include "openusdconnect/client/driver/socket.h"
 
 #include <algorithm>
 #include <atomic>
@@ -6,6 +6,7 @@
 #include <initializer_list>
 #include <optional>
 #include <string>
+#include <system_error>
 #include <utility>
 
 #ifdef _WIN32
@@ -307,7 +308,7 @@ public:
 		return result;
 	}
 
-	SocketResult SendAll(const std::uint8_t* data, std::size_t size) override
+	SocketResult SendAll(const std::uint8_t* data, std::size_t size, TimePoint deadline) override
 	{
 		while (size != 0)
 		{
@@ -332,7 +333,7 @@ public:
 			{
 				return Fail(error);
 			}
-			switch (Await(Readiness::Writable, std::nullopt))
+			switch (Await(Readiness::Writable, deadline))
 			{
 			case WaitResult::Ready:
 				continue;
@@ -348,10 +349,9 @@ public:
 	}
 
 	SocketResult Receive(std::uint8_t* buffer, std::size_t capacity,
-						 std::chrono::milliseconds timeout, std::size_t& received) override
+						 std::optional<TimePoint> deadline, std::size_t& received) override
 	{
 		received = 0;
-		const TimePoint deadline = std::chrono::steady_clock::now() + timeout;
 		for (;;)
 		{
 			if (Interrupted.load() || WakePending.exchange(false))
@@ -619,6 +619,17 @@ private:
 };
 
 } // namespace
+
+std::string DescribeSystemError(int system_error)
+{
+	return std::system_category().message(system_error);
+}
+
+std::string Describe(const TransportFailure& failure)
+{
+	return failure.Result == SocketResult::Timeout ? std::string("timed out")
+												   : DescribeSystemError(failure.SystemError);
+}
 
 TcpSocketFactory::TcpSocketFactory()
 {

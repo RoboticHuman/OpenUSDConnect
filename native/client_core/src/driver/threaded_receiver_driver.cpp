@@ -3,6 +3,7 @@
 #include "driver_loop.h"
 #include "openusdconnect/client/engine/receiver_endpoint.h"
 
+#include <chrono>
 #include <utility>
 
 namespace openusdconnect::client
@@ -14,7 +15,11 @@ ThreadedReceiverDriver::ThreadedReceiverDriver(ReceiverEndpoint& endpoint,
 											   DriverCallbacks callbacks)
 	: Endpoint(endpoint)
 	, Loop(std::make_unique<detail::DriverLoop<ReceiverEndpoint>>(
-		  endpoint, notifications, std::move(sockets), std::move(callbacks)))
+		  endpoint,
+		  detail::LoopRole<ReceiverEndpoint>{endpoint.Configuration().SocketTimeout,
+											 &ReceiverEndpoint::OnReadTimeout,
+											 endpoint.Configuration().SocketTimeout},
+		  notifications, std::move(sockets), std::move(callbacks)))
 {
 }
 
@@ -22,6 +27,7 @@ ThreadedReceiverDriver::~ThreadedReceiverDriver() = default;
 
 bool ThreadedReceiverDriver::Start()
 {
+	static_cast<void>(Endpoint.Start(std::chrono::steady_clock::now()));
 	return Loop->Start();
 }
 

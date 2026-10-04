@@ -1,16 +1,32 @@
 #pragma once
 
-#include "openusdconnect/client/driver/driver_callbacks.h"
 #include "openusdconnect/client/driver/socket.h"
+#include "openusdconnect/client/engine/actions.h"
 #include "openusdconnect/client/engine/notification.h"
 
 #include <chrono>
+#include <functional>
 #include <memory>
 #include <optional>
+#include <string>
 #include <thread>
 
 namespace openusdconnect::client
 {
+
+// Every callback is optional, must return normally, and runs on the driver
+// thread, which holds no driver or endpoint lock while calling it.
+struct DriverCallbacks final
+{
+	// Read just before each handshake; nullopt abandons that connection attempt.
+	std::function<std::optional<std::string>()> Token;
+	// When set, the driver drains the notification queue into it after every
+	// endpoint call, so a notification is handled before the next attempt.
+	std::function<void(Notification)> Notifications;
+	std::function<void(LogLevel, const std::string&)> Log;
+	// The driver thread's last action; it may destroy the driver.
+	std::function<void()> Exited;
+};
 
 class ReceiverEndpoint;
 
@@ -33,7 +49,7 @@ public:
 	ThreadedReceiverDriver(const ThreadedReceiverDriver&) = delete;
 	ThreadedReceiverDriver& operator=(const ThreadedReceiverDriver&) = delete;
 
-	// False when already started.
+	// Starts the endpoint, then the loop; false when already started.
 	[[nodiscard]] bool Start();
 	// Stops the endpoint and wakes the loop, which then exits. Never blocks.
 	void Stop();

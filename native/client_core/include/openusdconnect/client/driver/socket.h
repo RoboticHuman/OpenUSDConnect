@@ -1,11 +1,11 @@
 #pragma once
 
-#include "openusdconnect/client/engine/clock.h"
+#include "openusdconnect/client/engine/actions.h"
 
-#include <chrono>
 #include <cstddef>
 #include <cstdint>
 #include <memory>
+#include <optional>
 #include <string>
 
 namespace openusdconnect::client
@@ -14,7 +14,7 @@ namespace openusdconnect::client
 enum class SocketResult : std::uint8_t
 {
 	Success,
-	// A receive waited its timeout, or a connect passed its deadline.
+	// The call passed its deadline.
 	Timeout,
 	Interrupted,
 	// The peer closed the connection.
@@ -31,10 +31,12 @@ public:
 
 	[[nodiscard]] virtual SocketResult Connect(const std::string& host, std::uint16_t port,
 											   TimePoint deadline) = 0;
-	[[nodiscard]] virtual SocketResult SendAll(const std::uint8_t* data, std::size_t size) = 0;
-	// Waits up to timeout for at least one byte.
+	// Timeout once it has to wait for the peer past deadline.
+	[[nodiscard]] virtual SocketResult SendAll(const std::uint8_t* data, std::size_t size,
+											   TimePoint deadline) = 0;
+	// Waits for at least one byte until deadline, or without one until it arrives.
 	[[nodiscard]] virtual SocketResult Receive(std::uint8_t* buffer, std::size_t capacity,
-											   std::chrono::milliseconds timeout,
+											   std::optional<TimePoint> deadline,
 											   std::size_t& received) = 0;
 	// The operating system error of the last Timeout or Failed result.
 	[[nodiscard]] virtual int SystemError() const noexcept = 0;
@@ -62,6 +64,15 @@ protected:
 	SocketFactory() = default;
 	SocketFactory(const SocketFactory&) = delete;
 	SocketFactory& operator=(const SocketFactory&) = delete;
+};
+
+// Winsock or BSD sockets with TCP_NODELAY, so small control frames go out at once.
+class TcpSocketFactory final : public SocketFactory
+{
+public:
+	TcpSocketFactory();
+
+	[[nodiscard]] std::unique_ptr<Socket> Create() override;
 };
 
 enum class SocketOperation : std::uint8_t

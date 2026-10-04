@@ -1,23 +1,25 @@
+function(openusdconnect_configure_client_library target)
+    set_target_properties(${target} PROPERTIES
+        POSITION_INDEPENDENT_CODE ON
+        CXX_VISIBILITY_PRESET hidden
+        VISIBILITY_INLINES_HIDDEN YES
+    )
+    if(MSVC)
+        target_compile_options(${target} PRIVATE /W4 /permissive-)
+    else()
+        target_compile_options(${target} PRIVATE -Wall -Wextra -Wpedantic)
+    endif()
+endfunction()
+
 add_library(OpenUSDConnectClientCore STATIC
     src/frame_codec.cpp
 )
 add_library(OpenUSDConnect::ClientCore ALIAS OpenUSDConnectClientCore)
-
 target_compile_features(OpenUSDConnectClientCore PUBLIC cxx_std_17)
 target_include_directories(OpenUSDConnectClientCore
     PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include
 )
-set_target_properties(OpenUSDConnectClientCore PROPERTIES
-    POSITION_INDEPENDENT_CODE ON
-    CXX_VISIBILITY_PRESET hidden
-    VISIBILITY_INLINES_HIDDEN YES
-)
-
-if(MSVC)
-    target_compile_options(OpenUSDConnectClientCore PRIVATE /W4 /permissive-)
-else()
-    target_compile_options(OpenUSDConnectClientCore PRIVATE -Wall -Wextra -Wpedantic)
-endif()
+openusdconnect_configure_client_library(OpenUSDConnectClientCore)
 
 # Header-only FlatBuffers protocol views/builders. Consumers retain control of
 # their FlatBuffers allocator.
@@ -52,23 +54,11 @@ add_library(OpenUSDConnectClientEngine STATIC
 )
 add_library(OpenUSDConnect::ClientEngine ALIAS OpenUSDConnectClientEngine)
 target_link_libraries(OpenUSDConnectClientEngine PUBLIC OpenUSDConnectClientProtocol)
-set_target_properties(OpenUSDConnectClientEngine PROPERTIES
-    POSITION_INDEPENDENT_CODE ON
-    CXX_VISIBILITY_PRESET hidden
-    VISIBILITY_INLINES_HIDDEN YES
-)
-
-if(MSVC)
-    target_compile_options(OpenUSDConnectClientEngine PRIVATE /W4 /permissive-)
-else()
-    target_compile_options(OpenUSDConnectClientEngine PRIVATE -Wall -Wextra -Wpedantic)
-endif()
+openusdconnect_configure_client_library(OpenUSDConnectClientEngine)
 
 # Optional reference driver: one thread and blocking sockets drive the engine.
 # Hosts with their own I/O and scheduler drive the engine directly instead.
 add_library(OpenUSDConnectClientDriver STATIC
-    src/driver/scripted_socket.cpp
-    src/driver/socket.cpp
     src/driver/threaded_receiver_driver.cpp
     src/platform/bsd_socket.cpp
 )
@@ -78,14 +68,12 @@ target_link_libraries(OpenUSDConnectClientDriver
     PUBLIC OpenUSDConnectClientEngine Threads::Threads
     PRIVATE $<$<PLATFORM_ID:Windows>:ws2_32>
 )
-set_target_properties(OpenUSDConnectClientDriver PROPERTIES
-    POSITION_INDEPENDENT_CODE ON
-    CXX_VISIBILITY_PRESET hidden
-    VISIBILITY_INLINES_HIDDEN YES
-)
+openusdconnect_configure_client_library(OpenUSDConnectClientDriver)
 
-if(MSVC)
-    target_compile_options(OpenUSDConnectClientDriver PRIVATE /W4 /permissive-)
-else()
-    target_compile_options(OpenUSDConnectClientDriver PRIVATE -Wall -Wextra -Wpedantic)
-endif()
+# Scripted sockets that let tests drive the reference driver without a network.
+add_library(OpenUSDConnectClientDriverTesting STATIC
+    src/driver/testing/scripted_socket.cpp
+)
+add_library(OpenUSDConnect::ClientDriverTesting ALIAS OpenUSDConnectClientDriverTesting)
+target_link_libraries(OpenUSDConnectClientDriverTesting PUBLIC OpenUSDConnectClientDriver)
+openusdconnect_configure_client_library(OpenUSDConnectClientDriverTesting)

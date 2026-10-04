@@ -1,15 +1,16 @@
 #pragma once
 
-#include "openusdconnect/client/driver/driver_callbacks.h"
 #include "openusdconnect/client/driver/socket.h"
+#include "openusdconnect/client/driver/threaded_receiver_driver.h"
 #include "openusdconnect/client/engine/actions.h"
-#include "openusdconnect/client/engine/clock.h"
 #include "openusdconnect/client/engine/notification.h"
 
+#include <algorithm>
 #include <chrono>
 #include <condition_variable>
 #include <cstddef>
 #include <cstdint>
+#include <functional>
 #include <memory>
 #include <mutex>
 #include <optional>
@@ -22,15 +23,31 @@
 namespace openusdconnect::client::detail
 {
 
-// One thread applying an endpoint's actions with blocking sockets. Endpoint
-// is any sans-IO endpoint with the host I/O members of ReceiverEndpoint.
+// What a DriverLoop needs from an endpoint beyond the host I/O they share.
+template <typename Endpoint>
+struct LoopRole final
+{
+	// A write that still waits for the peer this long after it began is a TransportError.
+	std::chrono::milliseconds SendTimeout{};
+	// Optional: called when a read waits ReadTimeout without receiving a byte.
+	void (Endpoint::*OnReadTimeout)() = nullptr;
+	std::chrono::milliseconds ReadTimeout{};
+};
+
+// One thread applying a started endpoint's actions with blocking sockets. Of
+// the endpoint it calls only the host I/O both endpoints share (OnConnected,
+// OnBytes, OnDisconnected, OnTick, Stop, TakeActions, NextWake,
+// Status().Stopped) and LoopRole. It ticks at NextWake, during reads too, and
+// exits once the endpoint stops. A host thread that queues actions through the
+// endpoint, such as Append, QueueControl, or RequestConnect, must then Wake it.
 template <typename Endpoint>
 class DriverLoop final
 {
 public:
-	DriverLoop(Endpoint& endpoint, NotificationQueue& notifications,
+	DriverLoop(Endpoint& endpoint, LoopRole<Endpoint> role, NotificationQueue& notifications,
 			   std::shared_ptr<SocketFactory> sockets, DriverCallbacks callbacks)
 		: Target(endpoint)
+		, Role(role)
 		, Notifications(notifications)
 		, Sockets(std::move(sockets))
 		, Callbacks(std::move(callbacks))
@@ -82,13 +99,14 @@ public:
 
 	void Stop()
 	{
+		// First, so a loop that StopRequested wakes finds the endpoint stopped.
+		Target.Stop();
 		std::shared_ptr<Socket> socket;
 		{
 			std::lock_guard lock(Mutex);
 			StopRequested = true;
 			socket = Connection;
 		}
-		Target.Stop();
 		if (socket)
 		{
 			socket->Interrupt();
@@ -207,7 +225,6 @@ private:
 			std::lock_guard lock(Mutex);
 			ThreadIdentity = std::this_thread::get_id();
 		}
-		static_cast<void>(Target.Start(Now()));
 		for (;;)
 		{
 			Dispatch();
@@ -216,12 +233,11 @@ private:
 				Read();
 				continue;
 			}
-			const std::optional<TimePoint> wake = Target.NextWake();
-			if (!wake)
+			if (Target.Status().Stopped)
 			{
 				break;
 			}
-			Sleep(*wake);
+			Sleep(Target.NextWake());
 			Target.OnTick(Now());
 		}
 		Finish();
@@ -289,14 +305,14 @@ private:
 		{
 			Fail(SocketOperation::Connect, result, *socket,
 				 "could not connect to " + action.Host + ":" + std::to_string(action.Port));
-			Disconnect(DisconnectReason::ConnectFailed);
+			Close(DisconnectReason::ConnectFailed);
 			return;
 		}
 		const std::optional<std::string> token =
 			Callbacks.Token ? Callbacks.Token() : std::optional<std::string>(std::in_place);
 		if (!token)
 		{
-			Disconnect(DisconnectReason::ConnectFailed);
+			Close(DisconnectReason::ConnectFailed);
 			return;
 		}
 		Target.OnConnected(*token);
@@ -308,22 +324,23 @@ private:
 		{
 			return;
 		}
-		const SocketResult result = Connection->SendAll(action.Bytes->data(), action.Bytes->size());
+		const SocketResult result = Connection->SendAll(action.Bytes->data(), action.Bytes->size(),
+														Now() + Role.SendTimeout);
 		if (result != SocketResult::Success)
 		{
 			Fail(SocketOperation::Send, result, *Connection, "send failed");
-			Disconnect(DisconnectReason::TransportError);
+			Close(DisconnectReason::TransportError);
 		}
 	}
 
 	void Apply(const CloseAction& action)
 	{
-		Disconnect(action.Reason);
+		Close(action.Reason);
 	}
 
 	void Apply(const WakeAction&)
 	{
-		// Run schedules OnTick from NextWake, which covers every WakeAction.
+		// Run and Read tick at NextWake, which covers every WakeAction.
 	}
 
 	void Apply(const LogAction& action)
@@ -333,40 +350,61 @@ private:
 
 	void Read()
 	{
+		const std::optional<TimePoint> wake = Target.NextWake();
+		std::optional<TimePoint> deadline = wake;
+		if (Role.OnReadTimeout)
+		{
+			const TimePoint timeout = Now() + Role.ReadTimeout;
+			deadline = wake ? std::min(*wake, timeout) : timeout;
+		}
 		std::size_t received = 0;
-		const SocketResult result = Connection->Receive(
-			Buffer.data(), Buffer.size(), Target.Configuration().SocketTimeout, received);
+		const SocketResult result =
+			Connection->Receive(Buffer.data(), Buffer.size(), deadline, received);
 		switch (result)
 		{
 		case SocketResult::Success:
 			Target.OnBytes(Buffer.data(), received);
 			return;
 		case SocketResult::Timeout:
-			Target.OnReadTimeout();
+			if (const TimePoint now = Now(); wake && now >= *wake)
+			{
+				Target.OnTick(now);
+			}
+			else if (Role.OnReadTimeout)
+			{
+				(Target.*Role.OnReadTimeout)();
+			}
 			return;
 		case SocketResult::Interrupted:
 			return;
 		case SocketResult::Closed:
-			Disconnect(DisconnectReason::PeerClosed);
+			Close(DisconnectReason::PeerClosed);
 			return;
 		case SocketResult::Failed:
 			Fail(SocketOperation::Receive, result, *Connection, "receive failed");
-			Disconnect(DisconnectReason::TransportError);
+			Close(DisconnectReason::TransportError);
 			return;
 		}
 	}
 
-	void Sleep(TimePoint until)
+	void Sleep(std::optional<TimePoint> until)
 	{
+		const auto woken = [this]
+		{
+			return StopRequested || WakeRequested;
+		};
 		std::unique_lock lock(Mutex);
-		Changed.wait_until(lock, until,
-						   [this]
-						   {
-							   return StopRequested || WakeRequested;
-						   });
+		if (until)
+		{
+			Changed.wait_until(lock, *until, woken);
+		}
+		else
+		{
+			Changed.wait(lock, woken);
+		}
 	}
 
-	void Disconnect(DisconnectReason reason)
+	void Close(DisconnectReason reason)
 	{
 		std::shared_ptr<Socket> closed;
 		{
@@ -420,6 +458,7 @@ private:
 	}
 
 	Endpoint& Target;
+	const LoopRole<Endpoint> Role;
 	NotificationQueue& Notifications;
 	const std::shared_ptr<SocketFactory> Sockets;
 	DriverCallbacks Callbacks;

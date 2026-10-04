@@ -1,10 +1,9 @@
 #include "openusdconnect/client/engine/producer_endpoint.h"
 
-#include "message_fields.h"
+#include "endpoint_common.h"
 
 #include <algorithm>
 #include <cassert>
-#include <memory>
 #include <utility>
 
 namespace openusdconnect::client
@@ -12,6 +11,8 @@ namespace openusdconnect::client
 namespace
 {
 
+using detail::Address;
+using detail::Share;
 using detail::Text;
 
 // Bounds a hostile retry-after so the deadline arithmetic cannot overflow.
@@ -25,17 +26,6 @@ constexpr auto kUnexpectedId = static_cast<std::uint8_t>(RejectionCode::Unexpect
 	return frame.size() > kFrameHeaderSize &&
 		   TryReadFrameHeader(frame.data(), kDefaultMaxFrameSize, payload_size) &&
 		   payload_size == frame.size() - kFrameHeaderSize;
-}
-
-[[nodiscard]] SharedByteBuffer Share(std::vector<std::uint8_t> bytes)
-{
-	return std::make_shared<const std::vector<std::uint8_t>>(std::move(bytes));
-}
-
-[[nodiscard]] SharedByteBuffer Share(const flatbuffers::FlatBufferBuilder& builder)
-{
-	const std::uint8_t* bytes = builder.GetBufferPointer();
-	return Share(std::vector<std::uint8_t>(bytes, bytes + builder.GetSize()));
 }
 
 [[nodiscard]] SharedByteBuffer BuildQuitFrame()
@@ -168,7 +158,7 @@ void ProducerEndpoint::Disconnect()
 {
 	std::lock_guard lock(Mutex);
 	ResetBackoff();
-	Shutdown(DisconnectReason::Cancelled);
+	Quit(DisconnectReason::Cancelled);
 }
 
 void ProducerEndpoint::OnConnected(std::string_view token)
@@ -190,22 +180,12 @@ void ProducerEndpoint::OnConnected(std::string_view token)
 	Decoder.Reset();
 	State = ConnectionState::Handshaking;
 
-	HelloParameters hello;
-	hello.Role = "emitter";
-	hello.ClientId = Config.ClientId;
-	hello.Origin = Config.Origin;
-	hello.Department = Config.Department;
-	hello.Token = token;
-	hello.LayerMode = Config.LayerMode;
+	HelloParameters hello = detail::CommonHello("emitter", Config, token);
 	hello.ProducerSessionId = SessionId;
-	flatbuffers::FlatBufferBuilder builder(256);
-	if (BuildHelloFrame(builder, hello) != ProtocolResult::Success)
+	if (!detail::QueueHello(hello, Actions))
 	{
-		Log(LogLevel::Error, "could not build the Hello frame");
 		Close(DisconnectReason::ProtocolError);
-		return;
 	}
-	Actions.push_back(SendAction{Share(builder)});
 }
 
 void ProducerEndpoint::OnBytes(const std::uint8_t* data, std::size_t size)
@@ -215,20 +195,16 @@ void ProducerEndpoint::OnBytes(const std::uint8_t* data, std::size_t size)
 	{
 		return;
 	}
-	std::vector<std::vector<std::uint8_t>> frames;
-	if (Decoder.Feed(data, size, frames) != FrameResult::Success)
+	const bool framed = detail::HandleFrames(Decoder, data, size,
+											 [this](const std::vector<std::uint8_t>& frame)
+											 {
+												 HandleFrame(frame);
+												 return IsOpen();
+											 });
+	if (!framed)
 	{
 		Log(LogLevel::Warning, "invalid frame header");
 		Close(DisconnectReason::ProtocolError);
-		return;
-	}
-	for (const std::vector<std::uint8_t>& frame : frames)
-	{
-		if (!IsOpen())
-		{
-			break;
-		}
-		HandleFrame(frame);
 	}
 }
 
@@ -237,8 +213,7 @@ void ProducerEndpoint::OnDisconnected(DisconnectReason reason, TimePoint now)
 	std::lock_guard lock(Mutex);
 	if (IsOpen())
 	{
-		Log(LogLevel::Warning,
-			"connection to " + detail::Address(Config.Host, Config.Port) + " lost");
+		Log(LogLevel::Warning, "connection to " + Address(Config) + " lost");
 		EndConnection(reason);
 	}
 	else if (State != ConnectionState::Connecting && State != ConnectionState::Closing)
@@ -265,8 +240,7 @@ void ProducerEndpoint::OnTick(TimePoint now)
 	std::lock_guard lock(Mutex);
 	if (IsAttempting() && now >= AttemptDeadline)
 	{
-		Log(LogLevel::Warning,
-			"handshake with " + detail::Address(Config.Host, Config.Port) + " timed out");
+		Log(LogLevel::Warning, "handshake with " + Address(Config) + " timed out");
 		Close(DisconnectReason::HandshakeTimeout);
 	}
 }
@@ -278,7 +252,7 @@ void ProducerEndpoint::Stop()
 	{
 		return;
 	}
-	Shutdown(DisconnectReason::Stopped);
+	Quit(DisconnectReason::Stopped);
 	State = ConnectionState::Stopped;
 	Log(LogLevel::Info, "stopped");
 }
@@ -452,7 +426,7 @@ void ProducerEndpoint::BeginAttempt(TimePoint now, TimePoint deadline, bool back
 	State = ConnectionState::Connecting;
 	AttemptDeadline = std::min(deadline, now + Config.HandshakeTimeout);
 	BackoffOnFailure = backoff_on_failure;
-	Log(LogLevel::Info, "connecting to " + detail::Address(Config.Host, Config.Port));
+	Log(LogLevel::Info, "connecting to " + Address(Config));
 	Actions.push_back(ConnectAction{Config.Host, Config.Port, AttemptDeadline});
 	Actions.push_back(WakeAction{AttemptDeadline});
 }
@@ -464,7 +438,7 @@ void ProducerEndpoint::ResetBackoff() noexcept
 	BackoffOnFailure = false;
 }
 
-void ProducerEndpoint::Shutdown(DisconnectReason reason)
+void ProducerEndpoint::Quit(DisconnectReason reason)
 {
 	if (State == ConnectionState::Connected)
 	{
@@ -509,9 +483,7 @@ void ProducerEndpoint::HandleFrame(const std::vector<std::uint8_t>& frame)
 	const ProtocolResult decoded = DecodeEnvelope(frame.data(), frame.size(), envelope);
 	if (decoded != ProtocolResult::Success)
 	{
-		Log(LogLevel::Error, decoded == ProtocolResult::SchemaVersionMismatch
-								 ? "frame uses an unsupported schema version"
-								 : "malformed frame");
+		Log(LogLevel::Error, detail::DescribeDecodeFailure(decoded));
 		Close(DisconnectReason::ProtocolError);
 		return;
 	}
@@ -527,28 +499,23 @@ void ProducerEndpoint::HandleFrame(const std::vector<std::uint8_t>& frame)
 
 void ProducerEndpoint::HandleHandshake(EnvelopeView envelope)
 {
-	const HandshakeResponseView response(envelope);
-	switch (response.Kind())
+	detail::HandshakeOutcome outcome = detail::ClassifyHandshake(envelope);
+	if (outcome.Accepted)
 	{
-	case HandshakeResponseKind::Accepted:
-		AcceptHello(*response.Accepted());
-		return;
-	case HandshakeResponseKind::AuthenticationRejected:
-		Reject({true, OpenUSDConnect::HelloRejectionCode::Unspecified,
-				Text(response.AuthenticationRejection()->reason())});
-		return;
-	case HandshakeResponseKind::ConfigurationRejected:
-	{
-		const OpenUSDConnect::HelloRejected& rejection = *response.ConfigurationRejection();
-		std::string reason = Text(rejection.reason());
-		Reject(
-			{false, rejection.code(), reason.empty() ? "connection rejected" : std::move(reason)});
-		return;
+		AcceptHello(*outcome.Accepted);
 	}
-	case HandshakeResponseKind::Unexpected:
+	else if (outcome.Rejection)
+	{
+		if (!outcome.Rejection->Authentication && outcome.Rejection->Reason.empty())
+		{
+			outcome.Rejection->Reason = "connection rejected";
+		}
+		Reject(std::move(*outcome.Rejection));
+	}
+	else
+	{
 		Log(LogLevel::Error, "unexpected handshake response");
 		Close(DisconnectReason::ProtocolError);
-		return;
 	}
 }
 
@@ -574,16 +541,7 @@ void ProducerEndpoint::AcceptHello(const OpenUSDConnect::HelloOk& hello)
 			  HighwaterFailureReason(accepted, committed_through)});
 		return;
 	}
-	if (std::string token = Text(hello.token()); !token.empty())
-	{
-		Log(LogLevel::Info, "token issued by server");
-		Notify(TokenIssued{std::move(token)});
-	}
-	if (std::optional<StageMetadata> metadata = detail::DecodeStageMetadata(hello.stage_metadata()))
-	{
-		Metadata = *metadata;
-		Notify(std::move(*metadata));
-	}
+	detail::NotifyHelloFields(hello, Metadata, Notifications, Actions);
 	Publish();
 }
 
@@ -601,8 +559,8 @@ void ProducerEndpoint::Publish()
 	ResetBackoff();
 	Notify(Connected{});
 	const std::size_t replayed = SendUnsent();
-	Log(LogLevel::Info, "connected to " + detail::Address(Config.Host, Config.Port) + " (session=" +
-							SessionId + ", pending=" + std::to_string(replayed) + ")");
+	Log(LogLevel::Info, "connected to " + Address(Config) + " (session=" + SessionId +
+							", pending=" + std::to_string(replayed) + ")");
 }
 
 std::size_t ProducerEndpoint::SendUnsent()

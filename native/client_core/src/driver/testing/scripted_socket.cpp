@@ -1,10 +1,11 @@
-#include "openusdconnect/client/driver/scripted_socket.h"
+#include "openusdconnect/client/driver/testing/scripted_socket.h"
 
 #include <algorithm>
 #include <condition_variable>
 #include <cstring>
 #include <deque>
 #include <mutex>
+#include <optional>
 #include <utility>
 
 namespace openusdconnect::client
@@ -116,7 +117,7 @@ public:
 		return SocketResult::Success;
 	}
 
-	SocketResult SendAll(const std::uint8_t* data, std::size_t size) override
+	SocketResult SendAll(const std::uint8_t* data, std::size_t size, TimePoint) override
 	{
 		std::lock_guard lock(State->Mutex);
 		if (Interrupted)
@@ -133,10 +134,9 @@ public:
 	}
 
 	SocketResult Receive(std::uint8_t* buffer, std::size_t capacity,
-						 std::chrono::milliseconds timeout, std::size_t& received) override
+						 std::optional<TimePoint> deadline, std::size_t& received) override
 	{
 		received = 0;
-		const TimePoint deadline = std::chrono::steady_clock::now() + timeout;
 		std::unique_lock lock(State->Mutex);
 		for (;;)
 		{
@@ -154,10 +154,17 @@ public:
 			}
 			Channel->Receiving = true;
 			State->Changed.notify_all();
-			const std::cv_status waited = State->Changed.wait_until(lock, deadline);
+			bool expired = false;
+			if (deadline)
+			{
+				expired = State->Changed.wait_until(lock, *deadline) == std::cv_status::timeout;
+			}
+			else
+			{
+				State->Changed.wait(lock);
+			}
 			Channel->Receiving = false;
-			if (waited == std::cv_status::timeout && Channel->Inbound.empty() && !Interrupted &&
-				!WakePending)
+			if (expired && Channel->Inbound.empty() && !Interrupted && !WakePending)
 			{
 				return SocketResult::Timeout;
 			}

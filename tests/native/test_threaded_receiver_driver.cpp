@@ -1,4 +1,4 @@
-#include "openusdconnect/client/driver/scripted_socket.h"
+#include "openusdconnect/client/driver/testing/scripted_socket.h"
 #include "openusdconnect/client/driver/threaded_receiver_driver.h"
 
 #include "receiver_frames.h"

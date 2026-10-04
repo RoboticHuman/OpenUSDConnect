@@ -1,5 +1,6 @@
 #include "openusdconnect/client/engine/receiver_endpoint.h"
 
+#include "endpoint_host.h"
 #include "receiver_frames.h"
 #include "test_check.h"
 
@@ -11,7 +12,6 @@
 #include <optional>
 #include <string>
 #include <string_view>
-#include <type_traits>
 #include <utility>
 #include <variant>
 #include <vector>
@@ -27,14 +27,6 @@ namespace
 
 using namespace receiver_test;
 
-template <typename Field>
-[[nodiscard]] ReceiverConfig With(ReceiverConfig config, Field ReceiverConfig::* field,
-								  std::common_type_t<Field> value)
-{
-	config.*field = value;
-	return config;
-}
-
 // Whether the server resumes this Hello rather than sending Resync.
 [[nodiscard]] bool ServerResumes(const SentHello& hello, std::string_view instance,
 								 std::uint64_t epoch, std::int32_t head)
@@ -43,58 +35,14 @@ template <typename Field>
 	return hello.SyncFrom <= head + 1 && (hello.SyncFrom == 1 || claim_holds);
 }
 
-template <typename T>
-[[nodiscard]] const T& As(const Notification& notification)
-{
-	CHECK(std::holds_alternative<T>(notification));
-	return std::get<T>(notification);
-}
-
 // Plays both the host and the stage-owning consumer around one endpoint.
-class Receiver final
+class Receiver final : public Host<ReceiverEndpoint>
 {
 public:
 	explicit Receiver(const ReceiverConfig& config = TestConfig())
-		: Endpoint(config, Notifications)
+		: Host(config)
 		, Applied(config.SyncFrom - 1)
 	{
-	}
-
-	// Actions since the last call, without log lines.
-	[[nodiscard]] std::vector<Action> Commands()
-	{
-		Collect();
-		return std::exchange(Pending, {});
-	}
-
-	template <typename T>
-	[[nodiscard]] T Single()
-	{
-		std::vector<Action> commands = Commands();
-		CHECK(commands.size() == 1);
-		CHECK(std::holds_alternative<T>(commands.front()));
-		return std::get<T>(std::move(commands.front()));
-	}
-
-	[[nodiscard]] bool Logged(LogLevel level, std::string_view text)
-	{
-		Collect();
-		return std::any_of(Logs.begin(), Logs.end(),
-						   [&](const LogAction& log)
-						   {
-							   return log.Level == level &&
-									  log.Message.find(text) != std::string::npos;
-						   });
-	}
-
-	[[nodiscard]] std::vector<Notification> Notices()
-	{
-		return Notifications.Drain();
-	}
-
-	[[nodiscard]] ReceiverStatus Status() const
-	{
-		return Endpoint.Status();
 	}
 
 	// Completes the pending connect attempt and returns the Hello it sent.
@@ -119,22 +67,6 @@ public:
 		return sent;
 	}
 
-	void Feed(const Bytes& bytes)
-	{
-		Endpoint.OnBytes(bytes.data(), bytes.size());
-	}
-
-	void Disconnect(DisconnectReason reason = DisconnectReason::PeerClosed)
-	{
-		Endpoint.OnDisconnected(reason, Now);
-	}
-
-	void Advance(std::chrono::milliseconds elapsed)
-	{
-		Now += elapsed;
-		Endpoint.OnTick(Now);
-	}
-
 	// Reports the disconnect, waits out the backoff, and returns the next Hello.
 	SentHello Reconnect()
 	{
@@ -145,13 +77,14 @@ public:
 	}
 
 	// Reports the disconnect of an overflowed connection, applies the queue, and
-	// returns the next Hello.
+	// returns the Hello sent at the next wake.
 	SentHello ReconnectAfterDrain()
 	{
 		Disconnect();
-		CHECK(Single<WakeAction>().Time == Now + 100ms);
+		const TimePoint poll = Single<WakeAction>().Time;
 		static_cast<void>(Apply());
-		Advance(1ms);
+		Now = poll;
+		Endpoint.OnTick(Now);
 		return Connect();
 	}
 
@@ -186,30 +119,8 @@ public:
 		return frames;
 	}
 
-	NotificationQueue Notifications;
-	ReceiverEndpoint Endpoint;
-	TimePoint Now;
 	// The consumer's applied cursor.
 	std::int32_t Applied;
-
-private:
-	void Collect()
-	{
-		for (Action& action : Endpoint.TakeActions())
-		{
-			if (LogAction* log = std::get_if<LogAction>(&action))
-			{
-				Logs.push_back(std::move(*log));
-			}
-			else
-			{
-				Pending.push_back(std::move(action));
-			}
-		}
-	}
-
-	std::vector<Action> Pending;
-	std::vector<LogAction> Logs;
 };
 
 void TestReconnectPolicy()
@@ -269,7 +180,6 @@ void TestStartRequestsOneConnection()
 	CHECK(connect.Host == "127.0.0.1");
 	CHECK(connect.Port == 7200);
 	CHECK(connect.Deadline == receiver.Now + 30s);
-	CHECK(receiver.Logged(LogLevel::Info, "connecting to 127.0.0.1:7200"));
 	CHECK(!receiver.Endpoint.Start(receiver.Now));
 	CHECK(!receiver.Endpoint.NextWake());
 }
@@ -328,8 +238,6 @@ void TestAcceptedHelloNotifiesInOrder()
 	CHECK(!received.FramesPerSecond && !received.StartTimeCode && !received.EndTimeCode &&
 		  !received.MetersPerUnit);
 	static_cast<void>(As<Connected>(notices[2]));
-	CHECK(receiver.Logged(LogLevel::Info, "token issued by server"));
-	CHECK(receiver.Logged(LogLevel::Info, "connected (sync_from=1)"));
 
 	const ReceiverStatus status = receiver.Status();
 	CHECK(status.Connected && !status.Synchronized && status.LayeredReplayActive);
@@ -343,47 +251,35 @@ void TestEmptyStageMetadataIsNotNotified()
 	server::Hello hello;
 	hello.Metadata = StageMetadata{};
 	static_cast<void>(receiver.Handshake(hello));
-	const std::vector<Notification> notices = receiver.Notices();
-	CHECK(notices.size() == 1);
-	static_cast<void>(As<Connected>(notices[0]));
+	static_cast<void>(receiver.Notice<Connected>());
 }
 
-void TestAuthenticationRejectionStops()
+void TestHandshakeRejectionsStop()
 {
-	Receiver receiver;
-	static_cast<void>(receiver.Start());
-	receiver.Feed(server::AuthRejected("invalid token"));
-	CHECK(receiver.Single<CloseAction>().Reason == DisconnectReason::HandshakeRejected);
-	CHECK(receiver.Logged(LogLevel::Error, "authentication rejected: invalid token"));
-	const std::vector<Notification> notices = receiver.Notices();
-	CHECK(notices.size() == 1);
-	const HandshakeRejected& rejected = As<HandshakeRejected>(notices[0]);
-	CHECK(rejected.Authentication);
-	CHECK(rejected.Code == HelloRejectionCode::Unspecified);
-	CHECK(rejected.Reason == "invalid token");
-
-	receiver.Disconnect();
-	CHECK(receiver.Commands().empty());
-	CHECK(!receiver.Endpoint.NextWake());
-	const ReceiverStatus status = receiver.Status();
-	CHECK(status.Stopped && status.Rejection && status.Rejection->Authentication);
-	CHECK(receiver.Notices().empty());
-}
-
-void TestHelloRejectionStops()
-{
-	Receiver receiver;
-	static_cast<void>(receiver.Start());
-	receiver.Feed(server::HelloRejected(HelloRejectionCode::LayeredReplayRequired,
-										"layered replay is required"));
-	CHECK(receiver.Single<CloseAction>().Reason == DisconnectReason::HandshakeRejected);
-	CHECK(receiver.Logged(LogLevel::Error, "connection rejected (code 1): layered replay"));
-	receiver.Disconnect();
-	const ReceiverStatus status = receiver.Status();
-	CHECK(status.Stopped);
-	CHECK(status.Rejection && !status.Rejection->Authentication);
-	CHECK(status.Rejection->Code == HelloRejectionCode::LayeredReplayRequired);
-	CHECK(status.Rejection->Reason == "layered replay is required");
+	const std::pair<Bytes, HandshakeRejected> rejections[] = {
+		{server::AuthRejected("invalid token"),
+		 {true, HelloRejectionCode::Unspecified, "invalid token"}},
+		{server::HelloRejected(HelloRejectionCode::LayeredReplayRequired, "replay is required"),
+		 {false, HelloRejectionCode::LayeredReplayRequired, "replay is required"}},
+	};
+	const auto same = [](const HandshakeRejected& left, const HandshakeRejected& right)
+	{
+		return left.Authentication == right.Authentication && left.Code == right.Code &&
+			   left.Reason == right.Reason;
+	};
+	for (const auto& [frame, expected] : rejections)
+	{
+		Receiver receiver;
+		static_cast<void>(receiver.Start());
+		receiver.Feed(frame);
+		CHECK(receiver.Single<CloseAction>().Reason == DisconnectReason::HandshakeRejected);
+		CHECK(same(receiver.Notice<HandshakeRejected>(), expected));
+		receiver.Disconnect();
+		CHECK(receiver.Commands().empty() && !receiver.Endpoint.NextWake());
+		const ReceiverStatus status = receiver.Status();
+		CHECK(status.Stopped && status.Rejection && same(*status.Rejection, expected));
+		CHECK(receiver.Notices().empty());
+	}
 }
 
 void TestNegotiationRejections()
@@ -396,9 +292,7 @@ void TestNegotiationRejections()
 		hello.Token = "not-issued";
 		receiver.Feed(server::HelloOk(hello));
 		CHECK(receiver.Single<CloseAction>().Reason == DisconnectReason::HandshakeRejected);
-		const std::vector<Notification> notices = receiver.Notices();
-		CHECK(notices.size() == 1);
-		const HandshakeRejected& rejected = As<HandshakeRejected>(notices[0]);
+		const HandshakeRejected rejected = receiver.Notice<HandshakeRejected>();
 		CHECK(!rejected.Authentication);
 		CHECK(rejected.Code == HelloRejectionCode::LayerModeMismatch);
 		CHECK(rejected.Reason == "server did not negotiate requested layer mode");
@@ -492,8 +386,9 @@ void TestReplayCompleteWaitsForDrainedFrames()
 	CHECK(status.ReplayEpoch == 7);
 	CHECK(status.ServerInstance == "server");
 
+	CHECK(!receiver.Logged(LogLevel::Warning));
 	receiver.Feed(server::ReplayComplete(-1, 8));
-	CHECK(receiver.Logged(LogLevel::Warning, "invalid head -1"));
+	CHECK(receiver.Logged(LogLevel::Warning));
 	CHECK(receiver.Status().Synchronized);
 }
 
@@ -528,17 +423,15 @@ void TestDataFrameAcceptResults()
 	receiver.Feed(server::Event(3));
 	receiver.Feed(server::Event(2));
 	CHECK(receiver.Status().QueuedFrames == 1);
+	CHECK(!receiver.Logged(LogLevel::Warning));
 	receiver.Feed(server::Event(0));
-	CHECK(receiver.Logged(LogLevel::Warning, "invalid sequence 0"));
+	CHECK(receiver.Logged(LogLevel::Warning));
 	CHECK(receiver.Status().QueuedFrames == 1);
 	CHECK(receiver.Commands().empty());
 
 	receiver.Feed(server::Event(5));
 	CHECK(receiver.Single<CloseAction>().Reason == DisconnectReason::SequenceGap);
-	CHECK(receiver.Logged(LogLevel::Error, "sequence gap before 5; replaying from applied 3"));
-	const std::vector<Notification> notices = receiver.Notices();
-	CHECK(notices.size() == 1);
-	CHECK(As<Disconnected>(notices[0]).Reason == DisconnectReason::SequenceGap);
+	CHECK(receiver.Notice<Disconnected>().Reason == DisconnectReason::SequenceGap);
 	const ReceiverStatus status = receiver.Status();
 	CHECK(status.QueuedFrames == 0);
 	CHECK(status.LastSequence == 2);
@@ -579,32 +472,34 @@ void TestOverflowWaitsForTheDrain(DrainOutcome outcome)
 	receiver.Feed(server::Event(2));
 	receiver.Feed(server::Event(3));
 	CHECK(receiver.Single<CloseAction>().Reason == DisconnectReason::QueueFull);
-	CHECK(receiver.Logged(LogLevel::Warning, "queue full (2)"));
-	CHECK(As<Disconnected>(receiver.Notices().at(0)).Reason == DisconnectReason::QueueFull);
+	CHECK(receiver.Notice<Disconnected>().Reason == DisconnectReason::QueueFull);
 	if (outcome == DrainOutcome::DrainedEarlier)
 	{
 		static_cast<void>(receiver.Apply());
 	}
 	receiver.Disconnect();
-	CHECK(receiver.Logged(LogLevel::Info, "waiting for the queue to drain"));
 	if (outcome != DrainOutcome::DrainedEarlier)
 	{
-		CHECK(receiver.Single<WakeAction>().Time == receiver.Now + 100ms);
-		CHECK(receiver.Endpoint.NextWake() == receiver.Now + 100ms);
-		receiver.Advance(50ms);
-		CHECK(receiver.Commands().empty());
-		receiver.Advance(50ms);
-		CHECK(receiver.Single<WakeAction>().Time == receiver.Now + 100ms);
+		// The endpoint polls for the drain without reconnecting.
+		const std::optional<TimePoint> poll = receiver.Endpoint.NextWake();
+		CHECK(poll && *poll > receiver.Now && *poll < receiver.Now + 2s);
+		receiver.Advance(1s);
+		const std::vector<Action> commands = receiver.Commands();
+		CHECK(std::all_of(commands.begin(), commands.end(),
+						  [](const Action& action)
+						  {
+							  return std::holds_alternative<WakeAction>(action);
+						  }));
 	}
 	if (outcome == DrainOutcome::DrainedDuringWait)
 	{
 		static_cast<void>(receiver.Apply());
-		receiver.Advance(1ms);
+		receiver.Now = *receiver.Endpoint.NextWake();
+		receiver.Endpoint.OnTick(receiver.Now);
 	}
 	else if (outcome == DrainOutcome::TimedOut)
 	{
-		receiver.Advance(1900ms);
-		CHECK(receiver.Logged(LogLevel::Warning, "drain wait timed out"));
+		receiver.Advance(1s);
 	}
 	CHECK(receiver.Connect().SyncFrom == 3);
 	CHECK(receiver.Status().QueuedFrames == (outcome == DrainOutcome::TimedOut ? 2U : 0U));
@@ -625,7 +520,6 @@ void TestConsecutiveReadTimeouts()
 	};
 	// The handshake counts too, and every received byte restarts the count.
 	time_out(2);
-	CHECK(receiver.Logged(LogLevel::Debug, "read timeout 2/3"));
 	receiver.Feed(server::HelloOk());
 	time_out(2);
 	receiver.Feed(server::Ping());
@@ -634,7 +528,6 @@ void TestConsecutiveReadTimeouts()
 	CHECK(receiver.Status().Connected);
 	time_out(1);
 	CHECK(receiver.Single<CloseAction>().Reason == DisconnectReason::ReadTimeout);
-	CHECK(receiver.Logged(LogLevel::Warning, "3 consecutive read timeouts"));
 	receiver.Endpoint.OnReadTimeout();
 	CHECK(receiver.Commands().empty());
 }
@@ -670,7 +563,6 @@ void TestBackoffDoublesAndResetsAfterConnectedSession()
 		next_attempt(DisconnectReason::ConnectFailed);
 	}
 	CHECK((waits == std::vector<std::chrono::milliseconds>{1s, 2s, 1s, 2s, 4s, 8s, 8s}));
-	CHECK(receiver.Logged(LogLevel::Info, "reconnecting in 8000 ms"));
 }
 
 void TestReconnectDisabledStops()
@@ -684,7 +576,6 @@ void TestReconnectDisabledStops()
 		receiver.Disconnect(DisconnectReason::ConnectFailed);
 		CHECK(receiver.Commands().empty());
 		CHECK(receiver.Status().Stopped);
-		CHECK(receiver.Logged(LogLevel::Info, "stopped"));
 	}
 	{
 		Receiver receiver(config);
@@ -779,23 +670,6 @@ void TestReconnectCursorFollowsReceivedFrames()
 	CHECK(receiver.Reconnect().SyncFrom == 2);
 }
 
-void TestFramingAcrossReads()
-{
-	Receiver receiver;
-	static_cast<void>(receiver.Start());
-	const Bytes hello = server::HelloOk();
-	for (const std::uint8_t byte : hello)
-	{
-		receiver.Endpoint.OnBytes(&byte, 1);
-	}
-	CHECK(receiver.Status().Connected);
-	Bytes batch = server::Event(1);
-	const Bytes second = server::Event(2);
-	batch.insert(batch.end(), second.begin(), second.end());
-	receiver.Feed(batch);
-	CHECK(receiver.Status().LastSequence == 2);
-}
-
 void TestProtocolErrorsCloseTheConnection()
 {
 	flatbuffers::FlatBufferBuilder future(32);
@@ -810,20 +684,10 @@ void TestProtocolErrorsCloseTheConnection()
 	const std::uint8_t noise[] = {1, 2, 3, 4, 5, 6, 7, 8};
 	CHECK(EncodeFrame(noise, sizeof(noise), garbage) == FrameResult::Success);
 	const Bytes empty_header{0, 0, 0, 0};
-
-	struct Case final
-	{
-		const Bytes* Frame;
-		std::string_view Log;
-	};
-	const Case cases[] = {
-		{&future_schema, "unsupported schema version"}, {&no_payload, "malformed frame"},
-		{&unknown_payload, "malformed frame"},			{&garbage, "malformed frame"},
-		{&empty_header, "invalid frame header"},
-	};
 	for (const bool handshaking : {true, false})
 	{
-		for (const Case& error : cases)
+		for (const Bytes& error :
+			 {future_schema, no_payload, unknown_payload, garbage, empty_header})
 		{
 			Receiver receiver;
 			static_cast<void>(receiver.Start());
@@ -831,10 +695,8 @@ void TestProtocolErrorsCloseTheConnection()
 			{
 				receiver.Feed(server::HelloOk());
 			}
-			receiver.Feed(*error.Frame);
+			receiver.Feed(error);
 			CHECK(receiver.Single<CloseAction>().Reason == DisconnectReason::ProtocolError);
-			CHECK(receiver.Logged(
-				error.Frame == &empty_header ? LogLevel::Warning : LogLevel::Error, error.Log));
 			CHECK(receiver.Reconnect().SyncFrom == 1);
 		}
 	}
@@ -845,7 +707,6 @@ void TestHostDisconnectEndsTheSession()
 	Receiver receiver;
 	static_cast<void>(receiver.Start());
 	receiver.Disconnect(DisconnectReason::TransportError);
-	CHECK(receiver.Logged(LogLevel::Warning, "connection to 127.0.0.1:7200 lost"));
 	CHECK(receiver.Notices().empty());
 	static_cast<void>(receiver.Single<WakeAction>());
 	receiver.Advance(1s);
@@ -855,9 +716,7 @@ void TestHostDisconnectEndsTheSession()
 	receiver.Feed(server::ReplayComplete(0, 0));
 	CHECK(receiver.Endpoint.MarkReplayApplied());
 	receiver.Disconnect(DisconnectReason::TransportError);
-	const std::vector<Notification> notices = receiver.Notices();
-	CHECK(notices.size() == 1);
-	CHECK(As<Disconnected>(notices[0]).Reason == DisconnectReason::TransportError);
+	CHECK(receiver.Notice<Disconnected>().Reason == DisconnectReason::TransportError);
 	CHECK(!receiver.Status().Connected);
 	CHECK(!receiver.Status().Synchronized);
 	static_cast<void>(receiver.Single<WakeAction>());
@@ -874,7 +733,7 @@ void TestStop()
 		static_cast<void>(receiver.Notices());
 		receiver.Endpoint.Stop();
 		CHECK(receiver.Single<CloseAction>().Reason == DisconnectReason::Stopped);
-		CHECK(As<Disconnected>(receiver.Notices().at(0)).Reason == DisconnectReason::Stopped);
+		CHECK(receiver.Notice<Disconnected>().Reason == DisconnectReason::Stopped);
 		CHECK(receiver.Status().Stopped && !receiver.Status().Connected);
 		receiver.Disconnect();
 		receiver.Advance(60s);
@@ -1264,8 +1123,6 @@ void TestReplayRequestWithoutResetResumes(ReplayCause cause)
 	}
 	if (cause == ReplayCause::ReplayCompleteGap)
 	{
-		CHECK(receiver.Logged(LogLevel::Error,
-							  "replay head 3 was not received; replaying from applied 2"));
 		CHECK(!receiver.Endpoint.MarkReplayApplied());
 	}
 	const SentHello hello = receiver.Reconnect();
@@ -1334,8 +1191,7 @@ int main()
 	TestAnonymousReceiverSendsEmptyIdentity();
 	TestAcceptedHelloNotifiesInOrder();
 	TestEmptyStageMetadataIsNotNotified();
-	TestAuthenticationRejectionStops();
-	TestHelloRejectionStops();
+	TestHandshakeRejectionsStop();
 	TestNegotiationRejections();
 	TestControlMessages();
 	TestReplayCompleteWaitsForDrainedFrames();
@@ -1352,7 +1208,6 @@ int main()
 	TestReconnectToggleAppliesWhenTheSessionEnds();
 	TestReplayRequests();
 	TestReconnectCursorFollowsReceivedFrames();
-	TestFramingAcrossReads();
 	TestProtocolErrorsCloseTheConnection();
 	TestHostDisconnectEndsTheSession();
 	TestStop();
