@@ -23,3 +23,12 @@ add_test(NAME OpenUSDConnectReplayIdentityTests COMMAND OpenUSDConnectReplayIden
 add_executable(OpenUSDConnectClientEngineTests test_client_engine.cpp)
 target_link_libraries(OpenUSDConnectClientEngineTests PRIVATE OpenUSDConnect::ClientProtocol)
 add_test(NAME OpenUSDConnectClientEngineTests COMMAND OpenUSDConnectClientEngineTests)
+
+add_executable(OpenUSDConnectReceiverEndpointTests test_receiver_endpoint.cpp)
+target_link_libraries(OpenUSDConnectReceiverEndpointTests PRIVATE OpenUSDConnect::ClientEngine)
+if(MSVC)
+    target_compile_options(OpenUSDConnectReceiverEndpointTests PRIVATE /W4 /permissive-)
+else()
+    target_compile_options(OpenUSDConnectReceiverEndpointTests PRIVATE -Wall -Wextra -Wpedantic)
+endif()
+add_test(NAME OpenUSDConnectReceiverEndpointTests COMMAND OpenUSDConnectReceiverEndpointTests)

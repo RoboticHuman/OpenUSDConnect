@@ -42,7 +42,14 @@ static void TestQueuedResync(bool empty_replay)
 	CHECK((identity.Applied() == ReplayIdentity{"server", 1}));
 }
 
-static void TestInterruptedReplay(bool apply_failure)
+enum class Interruption
+{
+	Disconnect,
+	FailureAfterReset,
+	FailureOnReset,
+};
+
+static void TestInterruptedReplay(Interruption interruption)
 {
 	OrderedReceiverSession<int> session(1, 8, true);
 	ReceiverReplayIdentity identity;
@@ -56,30 +63,54 @@ static void TestInterruptedReplay(bool apply_failure)
 		  AcceptResult::Accepted);
 	CHECK(session.AcceptReplayComplete(connection.Generation, 1, 1) == AcceptResult::Accepted);
 	identity.AcceptReplayComplete(1);
+	const bool apply_failure = interruption != Interruption::Disconnect;
 	if (apply_failure)
 	{
 		int frame;
 		CHECK(session.TryPop(frame) && frame == 0);
-		session.ResetAppliedProgress();
-		CHECK(session.TryPop(frame) && frame == 1);
-		// Applying the event failed; never advance the applied cursor.
+		if (interruption == Interruption::FailureAfterReset)
+		{
+			session.ResetAppliedProgress();
+			CHECK(session.TryPop(frame) && frame == 1);
+		}
+		// Applying the drained frame failed; never advance the applied cursor.
 		CHECK(!session.TryMarkReplayApplied());
-		CHECK(session.RequestReplayFrom(session.LastAppliedSequence() + 1));
+		CHECK(session.ResetPending() == (interruption == Interruption::FailureOnReset));
+		const std::int32_t replay_from = session.LastAppliedSequence() + 1;
+		identity.RequestReplayFrom(replay_from, session.ResetPending());
+		CHECK(session.RequestReplayFrom(replay_from));
+		CHECK(!session.ResetPending());
 	}
 	session.Disconnect(connection.Generation);
 	CHECK(!session.TryMarkReplayApplied());
 	CHECK(!identity.Applied());
 	connection = session.BeginConnection();
 	const auto claim = identity.BeginConnection();
-	CHECK(claim && !claim->IsKnown());
+	// The applied reset keeps the received identity; an unapplied one leaves
+	// only the applied prefix, which has no identity yet.
+	CHECK(claim);
+	if (interruption == Interruption::FailureOnReset)
+	{
+		CHECK(!claim->IsKnown());
+	}
+	else
+	{
+		CHECK(claim->ServerInstance() == "server" && claim->Epoch() == 1);
+	}
+	CHECK(identity.ResetRequired() == apply_failure);
 	CHECK(!identity.Pending());
 	identity.AcceptHello(connection.SyncFrom, true, "server", 1);
-	// The server resets the unknown prefix before replaying the complete scene.
-	CHECK(session.Accept(connection.Generation, ReceiverMessageKind::Resync, 0, 0) ==
-		  AcceptResult::Accepted);
-	identity.AcceptResync();
-	CHECK(session.Accept(connection.Generation, ReceiverMessageKind::Event, 1, 1) ==
-		  AcceptResult::Accepted);
+	CHECK(identity.IsConnectionPrefixProven());
+	if (apply_failure)
+	{
+		// The receiver queues the reset for a full replay itself.
+		CHECK(session.Accept(connection.Generation, ReceiverMessageKind::Resync, 0, 0) ==
+			  AcceptResult::Accepted);
+		identity.AcceptResync();
+		CHECK(!identity.ResetRequired());
+		CHECK(session.Accept(connection.Generation, ReceiverMessageKind::Event, 1, 1) ==
+			  AcceptResult::Accepted);
+	}
 	CHECK(session.AcceptReplayComplete(connection.Generation, 1, 1) == AcceptResult::Accepted);
 	identity.AcceptReplayComplete(1);
 	int frame;
@@ -99,8 +130,9 @@ int main()
 {
 	TestQueuedResync(false);
 	TestQueuedResync(true);
-	TestInterruptedReplay(false);
-	TestInterruptedReplay(true);
+	TestInterruptedReplay(Interruption::Disconnect);
+	TestInterruptedReplay(Interruption::FailureAfterReset);
+	TestInterruptedReplay(Interruption::FailureOnReset);
 	ReceiverReplayIdentity initial_replay;
 	CHECK(!initial_replay.BeginConnection());
 	initial_replay.AcceptHello(1, true, "server-a", 0);

@@ -44,3 +44,21 @@ else()
         INTERFACE "${flatbuffers_SOURCE_DIR}/include"
     )
 endif()
+
+# Sans-IO endpoints: socket bytes and host time in, actions and notifications out.
+add_library(OpenUSDConnectClientEngine STATIC
+    src/engine/receiver_endpoint.cpp
+)
+add_library(OpenUSDConnect::ClientEngine ALIAS OpenUSDConnectClientEngine)
+target_link_libraries(OpenUSDConnectClientEngine PUBLIC OpenUSDConnectClientProtocol)
+set_target_properties(OpenUSDConnectClientEngine PROPERTIES
+    POSITION_INDEPENDENT_CODE ON
+    CXX_VISIBILITY_PRESET hidden
+    VISIBILITY_INLINES_HIDDEN YES
+)
+
+if(MSVC)
+    target_compile_options(OpenUSDConnectClientEngine PRIVATE /W4 /permissive-)
+else()
+    target_compile_options(OpenUSDConnectClientEngine PRIVATE -Wall -Wextra -Wpedantic)
+endif()

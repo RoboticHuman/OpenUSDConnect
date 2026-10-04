@@ -63,27 +63,29 @@ private:
 
 using ReplayPrefixClaim = std::optional<ReplayPrefixIdentity>;
 
-// Tracks which replay sequence domain has actually been applied by a receiver.
+// Tracks the replay sequence domain of the prefix a receiver holds. The received
+// identity covers the applied frames plus the retained queue and is the next
+// Hello's claim; the applied identity is published once a replay has applied.
 // Callers provide synchronization when connection and consumer threads overlap.
 class ReceiverReplayIdentity final
 {
 public:
+	// The first Hello never claims, so an externally supplied cursor keeps its
+	// contract without being taken as proof of its prefix.
 	[[nodiscard]] ReplayPrefixClaim BeginConnection()
 	{
 		PendingIdentity.reset();
-		ClaimedIdentity = AppliedIdentity;
-		const bool IncludeClaim = HelloSent;
+		ClaimedIdentity = ReceivedIdentity;
+		ClaimIncluded = HelloSent;
 		HelloSent = true;
-		ClaimIncluded = IncludeClaim;
-		if (!IncludeClaim)
+		if (!ClaimIncluded)
 		{
 			return std::nullopt;
 		}
-
-		if (AppliedIdentity)
+		if (ClaimedIdentity)
 		{
-			return ReplayPrefixIdentity::Known(AppliedIdentity->ServerInstance,
-											   AppliedIdentity->Epoch);
+			return ReplayPrefixIdentity::Known(ClaimedIdentity->ServerInstance,
+											   ClaimedIdentity->Epoch);
 		}
 		return ReplayPrefixIdentity::Unknown();
 	}
@@ -91,48 +93,83 @@ public:
 	void AcceptHello(std::int32_t sync_from, bool replay_identity_supported,
 					 std::string_view server_instance, std::optional<std::uint64_t> epoch)
 	{
-		ConnectionIdentity.reset();
-		if (replay_identity_supported && !server_instance.empty() && epoch)
+		ConnectionInstance =
+			replay_identity_supported ? std::string(server_instance) : std::string();
+		HandshakeIdentity.reset();
+		if (!ConnectionInstance.empty() && epoch)
 		{
-			ConnectionIdentity = ReplayIdentity{std::string(server_instance), *epoch};
+			HandshakeIdentity = ReplayIdentity{ConnectionInstance, *epoch};
 		}
-		ConnectionPrefixProven =
-			sync_from == 1 || (ClaimIncluded && ClaimedIdentity && ConnectionIdentity &&
-							   *ClaimedIdentity == *ConnectionIdentity);
+		ConnectionPrefixProven = sync_from == 1 || (ClaimIncluded && HandshakeIdentity &&
+													ClaimedIdentity == HandshakeIdentity);
+		// A changed or unknown prefix keeps its identity until the server's Resync.
+		if (!HandshakeIdentity)
+		{
+			ReceivedIdentity.reset();
+		}
+		else if (ConnectionPrefixProven)
+		{
+			ReceivedIdentity = HandshakeIdentity;
+		}
 	}
 
-	void AcceptResync() noexcept
+	void AcceptResync()
 	{
+		ReceivedIdentity = std::exchange(HandshakeIdentity, std::nullopt);
 		ConnectionPrefixProven = true;
 		PendingIdentity.reset();
+		ResetRequiredValue = false;
 	}
 
 	void AcceptReplayComplete(std::uint64_t epoch)
 	{
-		if (ConnectionPrefixProven && ConnectionIdentity)
+		HandshakeIdentity.reset();
+		ReceivedIdentity.reset();
+		if (ConnectionPrefixProven && !ConnectionInstance.empty())
 		{
-			PendingIdentity = ReplayIdentity{ConnectionIdentity->ServerInstance, epoch};
+			ReceivedIdentity = ReplayIdentity{ConnectionInstance, epoch};
 		}
-		else
-		{
-			PendingIdentity.reset();
-		}
+		PendingIdentity = ReceivedIdentity;
 	}
 
 	void MarkReplayApplied()
 	{
-		AppliedIdentity = PendingIdentity;
-		PendingIdentity.reset();
+		AppliedIdentity = std::exchange(PendingIdentity, std::nullopt);
 	}
 
-	[[nodiscard]] const std::optional<ReplayIdentity>& Applied() const noexcept
+	// A reset that is discarded or not yet applied separates the consumer's
+	// prefix from the received frames, so only the applied replay names it.
+	void RequestReplayFrom(std::int32_t sequence, bool reset_pending)
 	{
-		return AppliedIdentity;
+		if (reset_pending)
+		{
+			ReceivedIdentity = AppliedIdentity;
+		}
+		HandshakeIdentity.reset();
+		PendingIdentity.reset();
+		ResetRequiredValue = sequence == 1;
+	}
+
+	// The server never resets a replay from sequence one, so the receiver must
+	// queue the reset itself once the next Hello is accepted.
+	[[nodiscard]] bool ResetRequired() const noexcept
+	{
+		return ResetRequiredValue;
+	}
+
+	[[nodiscard]] const std::optional<ReplayIdentity>& Received() const noexcept
+	{
+		return ReceivedIdentity;
 	}
 
 	[[nodiscard]] const std::optional<ReplayIdentity>& Pending() const noexcept
 	{
 		return PendingIdentity;
+	}
+
+	[[nodiscard]] const std::optional<ReplayIdentity>& Applied() const noexcept
+	{
+		return AppliedIdentity;
 	}
 
 	[[nodiscard]] bool IsConnectionPrefixProven() const noexcept
@@ -144,8 +181,11 @@ private:
 	bool HelloSent = false;
 	bool ClaimIncluded = false;
 	bool ConnectionPrefixProven = false;
+	bool ResetRequiredValue = false;
+	std::string ConnectionInstance;
 	std::optional<ReplayIdentity> ClaimedIdentity;
-	std::optional<ReplayIdentity> ConnectionIdentity;
+	std::optional<ReplayIdentity> HandshakeIdentity;
+	std::optional<ReplayIdentity> ReceivedIdentity;
 	std::optional<ReplayIdentity> PendingIdentity;
 	std::optional<ReplayIdentity> AppliedIdentity;
 };

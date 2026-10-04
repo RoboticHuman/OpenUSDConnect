@@ -162,6 +162,8 @@ uint32 FSyncClient::Run()
 		openusdconnect::client::ReplayPrefixClaim ReplayPrefix;
 		{
 			FScopeLock Lock(&ReplayIdentityCS);
+			// Frames were discarded before this connection; whether a reset was among them is unknown.
+			ReplayIdentityState.RequestReplayFrom(SyncFrom, true);
 			ReplayPrefix = ReplayIdentityState.BeginConnection();
 		}
 		const openusdconnect::client::FrameResult HelloResult = OUC::BuildHelloFrame(

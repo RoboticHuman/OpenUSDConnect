@@ -54,6 +54,50 @@ application failure followed by replay.
 The primary and tight-queue configurations verify that synchronization is
 published only after the advertised replay head has applied successfully.
 
+### `ReceiverReplayIdentity.tla`
+
+The receiver's Hello and replay-identity flow across sequence domains:
+compaction, purge, or snapshot replacement on a live connection, server
+restarts, server-side sequence gaps, queue overflow, a consumer apply failure,
+and a reconnect between draining a frame and reporting it applied. The server
+resumes a Hello whose prefix claim matches its domain and otherwise resets.
+
+The model checks that the stage only ever holds a contiguous prefix of one
+domain, that a replay marked applied is reflected in the stage, that the
+receiver queues its own reset only ahead of a replay from one, and that the
+receiver converges once the network stabilizes. It covers the live-reset
+hazard: the applied cursor may still count the old domain, so a replay it
+positions claims the applied identity and the server resets instead of
+resuming. Injected gaps are always followed by a frame that reveals them.
+
+A replay request keeps the received identity unless a reset is pending,
+queued or drained but not yet reported applied; only then does the claim
+fall back to the applied identity. `ResetPendingTracksResets` checks the
+inbox's flag against the frames it stands for.
+
+Two invariants tie the identities to the prefix they describe.
+`ReceivedNamesHeldPrefix`: the received identity names the domain of the
+newest held prefix (the frames after the last pending reset, or the stage
+and pending frames), except after a replay request with a reset pending
+whose consumer started a newer domain from an empty stage since its last
+mark; the claim then names that older applied replay and the server resets.
+`AppliedNamesStage`: the applied identity names the stage until the stage is
+next empty.
+
+`NoSpuriousResetWhenKnown`: once the network is stable and the server's
+domain has not changed since the receiver last connected, a receiver that
+knew the domain of everything it kept when its connection ended is resumed.
+
+`NoSpuriousReset` asks the same of any receiver holding a prefix of the
+current domain and is not checked. Two causes still reset it: a host-loaded
+snapshot prefix is never claimed, and a live reset whose ReplayComplete never
+arrived leaves its frames unproven because Resync carries no epoch. The
+Python receiver shares both.
+
+`ReceiverReplayIdentity.cfg` starts a fresh receiver and allows two domain
+changes; `ReceiverReplayIdentitySnapshot.cfg` starts from a host-loaded
+snapshot cursor with a one-frame queue.
+
 ### `TransactionCoordinator.tla`
 
 Two producer sessions in one managed transaction group. It explores direct
@@ -110,7 +154,7 @@ The following results describe the model and configuration files in the commit
 that contains this snapshot. Regenerate the table after changing a `.tla` or
 `.cfg` file, or when adopting a different TLC version.
 
-TLC2 2026.08.11.125311 results from 2026-08-16:
+TLC2 2026.08.11.125311 results from 2026-10-04:
 
 | Model and scenario | Generated | Distinct | Depth | Result |
 |---|---:|---:|---:|---|
@@ -119,6 +163,8 @@ TLC2 2026.08.11.125311 results from 2026-08-16:
 | Recovery session rollover: reject transaction 2 | 28 | 24 | 14 | No error |
 | Receiver: three-frame queue, live apply failure | 15,041 | 3,792 | 27 | No error |
 | Receiver: one-frame queue, replay apply failure | 3,723 | 1,024 | 25 | No error |
+| Replay identity: fresh receiver, two domain changes | 5,857,627 | 1,170,182 | 53 | No error |
+| Replay identity: snapshot cursor, one-frame queue | 282,901 | 79,024 | 47 | No error |
 | Coordinator: valid group or infrastructure fallback | 237 | 153 | 11 | No error |
 | Coordinator: invalid middle transaction fallback | 106 | 64 | 11 | No error |
 | Shared-layer parent revision, stable identity, and recovery | 3,262 | 2,288 | 13 | No error |

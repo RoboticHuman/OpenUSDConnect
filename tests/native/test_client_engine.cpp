@@ -137,6 +137,60 @@ static void TestReplayRequestReleasesTheHold()
 	CHECK(inbox.DrainedThrough(marker));
 }
 
+static void TestReplayMarkerRequiresItsRecords()
+{
+	TestInbox contiguous(1, 8, true);
+	const std::uint64_t generation = contiguous.BeginConnection().Generation;
+	CHECK(contiguous.Accept(generation, ReceiverMessageKind::Event, 1, 1) ==
+		  AcceptResult::Accepted);
+	CHECK(contiguous.AcceptReplayComplete(generation, 2, 0) == AcceptResult::SequenceGap);
+	CHECK(contiguous.AcceptReplayComplete(generation, 1, 0) == AcceptResult::Accepted);
+
+	TestInbox unordered(1, 8);
+	CHECK(unordered.AcceptReplayComplete(unordered.BeginConnection().Generation, 2, 0) ==
+		  AcceptResult::Accepted);
+}
+
+static void TestResetPendingUntilAppliedOrDiscarded()
+{
+	TestInbox inbox(1, 8, true);
+	std::uint64_t generation = inbox.BeginConnection().Generation;
+	const auto accept_reset = [&]
+	{
+		CHECK(inbox.Accept(generation, ReceiverMessageKind::Resync, 0, 0) ==
+			  AcceptResult::Accepted);
+	};
+	CHECK(!inbox.ResetPending());
+	accept_reset();
+	CHECK(inbox.ResetPending());
+	int frame = -1;
+	CHECK(inbox.TryPop(frame));
+	CHECK(inbox.ResetPending());
+	inbox.ResetAppliedProgress();
+	CHECK(!inbox.ResetPending());
+
+	// One report covers every reset drained before it.
+	accept_reset();
+	CHECK(inbox.Accept(generation, ReceiverMessageKind::Event, 1, 1) == AcceptResult::Accepted);
+	accept_reset();
+	CHECK(inbox.Drain().size() == 3);
+	inbox.ResetAppliedProgress();
+	CHECK(!inbox.ResetPending());
+
+	// A replay request settles queued and drained resets alike.
+	accept_reset();
+	CHECK(inbox.TryPop(frame));
+	accept_reset();
+	CHECK(inbox.RequestReplayFrom(1));
+	CHECK(!inbox.ResetPending());
+
+	// A late report for the drained reset cannot settle a newer one.
+	generation = inbox.BeginConnection().Generation;
+	accept_reset();
+	inbox.ResetAppliedProgress();
+	CHECK(inbox.ResetPending());
+}
+
 int main()
 {
 	TestEachPhaseOutranksThePhasesAfterIt();
@@ -144,5 +198,7 @@ int main()
 	TestHoldCoversOnlyFramesQueuedBeforeTheMarker();
 	TestRejectedFramesDoNotExtendTheHold();
 	TestReplayRequestReleasesTheHold();
+	TestReplayMarkerRequiresItsRecords();
+	TestResetPendingUntilAppliedOrDiscarded();
 	return 0;
 }

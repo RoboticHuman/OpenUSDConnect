@@ -35,6 +35,12 @@ SCENARIOS = (
         "ReceiverSynchronization.tla",
         "receiver: queue 1",
     ),
+    ("ReceiverReplayIdentity.cfg", "ReceiverReplayIdentity.tla", "replay identity: fresh"),
+    (
+        "ReceiverReplayIdentitySnapshot.cfg",
+        "ReceiverReplayIdentity.tla",
+        "replay identity: snapshot",
+    ),
     ("TransactionCoordinator.cfg", "TransactionCoordinator.tla", "coordinator: valid"),
     (
         "TransactionCoordinatorInvalid.cfg",
@@ -63,6 +69,13 @@ REQUIRED_ACTIONS = {
         "ApplyCompleteSuccess",
         "InjectStaleComplete",
         "DiscardStaleFrame",
+    },
+    "ReceiverReplayIdentity.tla": {
+        "ReceiveResync",
+        "DropEvent",
+        "LiveReset",
+        "Restart",
+        "ConsumerFail",
     },
     "TransactionCoordinator.tla": {
         "GroupApply",

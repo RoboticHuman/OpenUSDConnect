@@ -122,6 +122,7 @@ public:
 		{
 			LastReceivedSequence = 0;
 			ResetSynchronization();
+			NewestResetSerial = IncomingSerial + 1;
 		}
 		else if (kind == ReceiverMessageKind::Event || kind == ReceiverMessageKind::LayerGraphState)
 		{
@@ -143,6 +144,11 @@ public:
 		if (generation != GenerationValue)
 		{
 			return AcceptResult::StaleGeneration;
+		}
+		// The server sends every replay record through the head before the marker.
+		if (RequireContiguous && head_seq > LastReceivedSequence)
+		{
+			return AcceptResult::SequenceGap;
 		}
 		PendingReplay = ReplayState{generation, head_seq, epoch, IncomingSerial};
 		return AcceptResult::Accepted;
@@ -242,15 +248,18 @@ public:
 		LastAppliedSequenceValue = sequence - 1;
 		Frames.clear();
 		DrainedSerial = IncomingSerial;
+		ResetsSettledSerial = DrainedSerial;
 		OverflowedValue = false;
 		ResetSynchronization();
 		return true;
 	}
 
+	// The consumer applied every Resync it has drained.
 	void ResetAppliedProgress() noexcept
 	{
 		std::lock_guard lock(Mutex);
 		LastAppliedSequenceValue = 0;
+		ResetsSettledSerial = DrainedSerial;
 		// The consumer is applying a queued Resync. Its ReplayComplete may
 		// already have arrived, so retain that marker until its frames apply.
 		SynchronizedValue = false;
@@ -292,6 +301,13 @@ public:
 		std::lock_guard lock(Mutex);
 		return OverflowedValue;
 	}
+	// A Resync is queued, or drained but not yet reported applied, since the
+	// last replay request.
+	[[nodiscard]] bool ResetPending() const noexcept
+	{
+		std::lock_guard lock(Mutex);
+		return NewestResetSerial > ResetsSettledSerial;
+	}
 	[[nodiscard]] std::int32_t ReplayHeadSequence() const noexcept
 	{
 		std::lock_guard lock(Mutex);
@@ -330,6 +346,8 @@ private:
 	std::uint64_t GenerationValue = 0;
 	std::uint64_t IncomingSerial = 0;
 	std::uint64_t DrainedSerial = 0;
+	std::uint64_t NewestResetSerial = 0;
+	std::uint64_t ResetsSettledSerial = 0;
 	std::int32_t LastReceivedSequence = 0;
 	std::int32_t LastAppliedSequenceValue = 0;
 	std::int32_t ReplayHeadSequenceValue = 0;
