@@ -7,7 +7,7 @@ import pytest
 from pxr import Usd
 
 from openusdconnect.checkpoints import MirrorCheckpoint
-from openusdconnect.codec import PayloadType, encode_message, message_to_dict
+from openusdconnect.codec import encode_message, message_to_dict
 from openusdconnect.framing import recv_framed, send_framed
 from openusdconnect.protocol import make_hello
 from openusdconnect.sender import EventSender
@@ -26,8 +26,6 @@ def test_snapshot_replacement_after_capture_cannot_confirm_unapplied_write(monke
         session = mcp_session_with_receiver(port)
         session.config.read_after_write_timeout_s = 0.1
         session.sender = EventSender("127.0.0.1", port, client_id="own")
-        replay_complete = threading.Event()
-        resume_receiver = threading.Event()
         replacement_done = threading.Event()
         replacement_errors = []
         replacement_worker = None
@@ -48,7 +46,6 @@ def test_snapshot_replacement_after_capture_cannot_confirm_unapplied_write(monke
                 },
             }
             send = connection_mod.send_msg
-            control = session.receiver.receiver._handle_control_message
 
             def replace_snapshot():
                 try:
@@ -70,31 +67,23 @@ def test_snapshot_replacement_after_capture_cannot_confirm_unapplied_write(monke
                     assert state.get_replay_token()[0] == 1
                 send(sock, message)
 
-            def pause_after_initial_complete(payload_type, buf, generation):
-                result = control(payload_type, buf, generation)
-                if payload_type == PayloadType.ReplayComplete and not replay_complete.is_set():
-                    replay_complete.set()
-                    assert resume_receiver.wait(5)
-                return result
+            def initial_replay_complete(message):
+                return message["type"] == "replay_complete"
 
             monkeypatch.setattr(connection_mod, "send_msg", replace_before_hello)
-            monkeypatch.setattr(
-                session.receiver.receiver,
-                "_handle_control_message",
-                pause_after_initial_complete,
-            )
-            with receiver_connection(session.receiver.receiver):
+            with receiver_connection(
+                session.receiver.receiver, hold_after=initial_replay_complete,
+            ) as relay:
                 try:
-                    assert replay_complete.wait(5)
+                    assert relay.held.wait(5)
                     assert session._drain_after_write()
                     assert session.mirror_stage.GetPrimAtPath("/Own")
                     assert not session.mirror_stage.GetPrimAtPath("/Replacement")
                     assert session.receiver.last_seq == 1
                     assert session.receiver.replay_epoch == 0
                 finally:
-                    resume_receiver.set()
+                    relay.release()
         finally:
-            resume_receiver.set()
             session.disconnect()
             if replacement_worker is not None:
                 replacement_worker.join(5)

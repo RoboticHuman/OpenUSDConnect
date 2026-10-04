@@ -1,3 +1,5 @@
+#include "receiver_bindings.h"
+
 #include "openusdconnect/client/engine/status.h"
 #include "openusdconnect/client/frame_codec.h"
 #include "openusdconnect/client/producer_session.h"
@@ -400,4 +402,6 @@ NB_MODULE(_native_client, module)
 					 &PythonProducerSession::SubmittedTransactionCount)
 		.def_prop_ro("last_acknowledged_transaction_id",
 					 &PythonProducerSession::LastAcknowledgedTransactionId);
+
+	BindReceiver(module);
 }

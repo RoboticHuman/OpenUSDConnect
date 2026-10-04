@@ -210,10 +210,12 @@ struct HelloParameters final
 	ReplayPrefixClaim ReplayPrefix;
 };
 
+// Receivers may omit their identity; the server decodes empty strings as absent.
 [[nodiscard]] inline bool IsValidHelloParameters(const HelloParameters& parameters) noexcept
 {
-	return (parameters.Role == "receiver" || parameters.Role == "emitter") &&
-		   parameters.SyncFrom >= 0 && !parameters.ClientId.empty() && !parameters.Origin.empty();
+	const bool identified_emitter =
+		parameters.Role == "emitter" && !parameters.ClientId.empty() && !parameters.Origin.empty();
+	return (parameters.Role == "receiver" || identified_emitter) && parameters.SyncFrom >= 0;
 }
 
 [[nodiscard]] inline flatbuffers::Offset<flatbuffers::String>

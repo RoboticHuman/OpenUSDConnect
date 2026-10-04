@@ -43,6 +43,12 @@ int main()
 	CHECK(decoded_replay_hello->replay_epoch().has_value());
 	CHECK(*decoded_replay_hello->replay_epoch() == 3);
 
+	flatbuffers::FlatBufferBuilder anonymous_builder(128);
+	CHECK(BuildHelloFrame(anonymous_builder, HelloParameters{"receiver", 1}) ==
+		  ProtocolResult::Success);
+	CHECK(BuildHelloFrame(anonymous_builder, HelloParameters{"emitter", 0, "", "origin"}) ==
+		  ProtocolResult::InvalidArgument);
+
 	flatbuffers::FlatBufferBuilder transaction_builder(256);
 	const VisibilityEventView visibility{"/World/Sphere", true};
 	flatbuffers::Offset<OpenUSDConnect::EventWrapper> event;

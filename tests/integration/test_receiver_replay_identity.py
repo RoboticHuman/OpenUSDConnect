@@ -47,7 +47,6 @@ def test_colliding_reconnect_cannot_confirm_missing_own_write(reset):
                 state.purge()
             else:
                 state, port = replacement, replacement_port
-                session.receiver.receiver.port = port
             session.sender = EventSender("127.0.0.1", port, client_id="own")
             assert session.sender.connect()
             assert session.sender.send_events([ensure_prim_event("/Own")])
@@ -56,7 +55,7 @@ def test_colliding_reconnect_cannot_confirm_missing_own_write(reset):
                 state._commit_events([ensure_prim_event("/Foreign")])
             assert not session.mirror_stage.GetPrimAtPath("/Own")
 
-            with receiver_connection(session.receiver.receiver):
+            with receiver_connection(session.receiver.receiver, port):
                 assert session._drain_after_write()
                 assert session.mirror_stage.GetPrimAtPath("/Own")
                 assert session.receiver.last_seq == 3
@@ -128,7 +127,6 @@ def test_old_server_retains_cursor_without_publishing_confirmation_identity(inst
                 wait_until(receiver.mark_replay_applied)
                 assert receiver.synchronized
                 assert receiver.server_instance == ""
-                assert receiver._received_replay_identity is None
             receiver.join(5)
             assert not receiver.is_alive()
         finally:
@@ -146,22 +144,26 @@ def test_initial_snapshot_cursor_is_preserved_without_claiming_prefix_proof():
             received.extend(message_to_dict(raw) for raw in receiver.drain_queue())
             return receiver.mark_replay_applied()
 
-        with receiver_connection(receiver):
-            wait_until(drain_ready)
-            assert not any(msg["type"] == "resync" for msg in received)
-            assert [msg["seq"] for msg in received if msg["type"] == "event"] == [2]
-            assert receiver.synchronized
-            assert receiver.server_instance == ""
-            assert receiver._received_replay_identity is None
+        try:
+            with receiver_connection(receiver):
+                wait_until(drain_ready)
+                assert not any(msg["type"] == "resync" for msg in received)
+                assert [msg["seq"] for msg in received if msg["type"] == "event"] == [2]
+                assert receiver.synchronized
+                assert receiver.server_instance == ""
 
-        # The next connection must validate that externally supplied prefix.
-        # With no identity for it, a complete reset/replay establishes proof.
-        received.clear()
-        with receiver_connection(receiver):
-            wait_until(drain_ready)
-            assert any(msg["type"] == "resync" for msg in received)
-            assert [msg["seq"] for msg in received if msg["type"] == "event"] == [1, 2]
-            assert receiver.server_instance == state.server_instance
+            # The next connection must validate that externally supplied prefix.
+            # With no identity for it, a complete reset/replay establishes proof.
+            received.clear()
+            with receiver_connection(receiver) as relay:
+                assert relay.hello["replay_server_instance"] == ""
+                assert "replay_epoch" not in relay.hello
+                wait_until(drain_ready)
+                assert any(msg["type"] == "resync" for msg in received)
+                assert [msg["seq"] for msg in received if msg["type"] == "event"] == [1, 2]
+                assert receiver.server_instance == state.server_instance
+        finally:
+            receiver.stop()
 
 
 def test_apply_failure_discards_unapplied_replay_identity(monkeypatch):
@@ -169,7 +171,7 @@ def test_apply_failure_discards_unapplied_replay_identity(monkeypatch):
         state._commit_events([ensure_prim_event("/Before")] * 3)
         session = mcp_session_with_receiver(port)
         try:
-            with receiver_connection(session.receiver.receiver):
+            with receiver_connection(session.receiver.receiver) as relay:
                 _drain_ready(session)
                 session.sender = EventSender("127.0.0.1", port, client_id="own")
                 assert session.sender.connect()
@@ -190,8 +192,10 @@ def test_apply_failure_discards_unapplied_replay_identity(monkeypatch):
                         client_id="foreign",
                     )
                     wait_until(lambda: (
-                        session.receiver.receiver._received_replay_identity
-                        == (state.server_instance, 1)
+                        any(
+                            message["type"] == "replay_complete" and message["epoch"] == 1
+                            for message in relay.received
+                        )
                         and session.receiver.receiver.last_seq == 3
                     ))
                     assert session.receiver.receiver.replay_epoch == 0

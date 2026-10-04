@@ -34,6 +34,11 @@ public:
 		return EnabledValue;
 	}
 
+	void SetEnabled(bool enabled) noexcept
+	{
+		EnabledValue = enabled;
+	}
+
 	// A session reached its connected state; the next wait starts from the base.
 	void Reset() noexcept
 	{
@@ -56,7 +61,7 @@ public:
 	}
 
 private:
-	const bool EnabledValue;
+	bool EnabledValue;
 	const std::chrono::milliseconds BaseDelay;
 	const std::chrono::milliseconds MaxDelay;
 	std::chrono::milliseconds Delay;

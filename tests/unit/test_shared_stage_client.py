@@ -15,7 +15,7 @@ from openusdconnect.recovery import (
 )
 from openusdconnect.sdf_spec_delta import serialize_spec_fields
 from openusdconnect.shared_stage_client import SharedStageClient
-from tests.helpers import PeerTraffic
+from tests.helpers import PeerTraffic, handshake, scripted_start
 
 
 def _create_root(path) -> Usd.Stage:
@@ -191,9 +191,7 @@ def test_status_exposes_shared_stage_partial_connection(tmp_path):
 
     sender = _StatusSender()
     client._sender = sender
-    client._started = True
-    client._receiver.connected = True
-    client._receiver._synchronized_event.set()
+    handshake(client, synchronized=True)
     try:
         assert client.status.phase is ClientPhase.CONNECTING
         assert client.status.receiver_connected is True
@@ -311,8 +309,7 @@ def test_unresolved_layer_events_apply_after_dependency_refresh(tmp_path):
         }
         assert not client._apply_record(ReceivedEvent(seq=2, event=event, layer_key=child_key))
         assert client.status.deferred_events == 1
-        client._receiver.connected = True
-        client._receiver._synchronized_event.set()
+        handshake(client, synchronized=True)
         assert client.status.synchronized
         assert client.status.deferred_events == 1
         assert client.status.deferred_layer_keys == (child_key,)
@@ -529,7 +526,7 @@ def test_shared_use_server_abandons_only_after_rejected_layer_detaches(
     Sdf.CreatePrimInLayer(child, "/Local/Rejected")
     sender = _RecoverySender(_stale_artifact("layer:child"))
     client._sender = sender
-    client._started = True
+    server = scripted_start(client)
 
     def _detach(_timeout):
         client._graph.apply_sublayers(
@@ -544,8 +541,7 @@ def test_shared_use_server_abandons_only_after_rejected_layer_detaches(
         )
         client._tracker.sync_graph(force=True)
         client._last_seq = 2
-        client._receiver.connected = True
-        client._receiver._synchronized_event.set()
+        server.ready(client._receiver)
 
     monkeypatch.setattr(client, "_replay_to_fresh_checkpoint", _detach)
     try:
@@ -841,9 +837,7 @@ def test_shared_external_recovery_completes_a_structured_reachable_assessment(
     _bind_child_graph(client)
     sender = _RecoverySender(_stale_artifact("layer:child"))
     client._sender = sender
-    client._started = True
-    client._receiver.connected = True
-    client._receiver._synchronized_event.set()
+    handshake(client, synchronized=True)
     monkeypatch.setattr(client, "_replay_to_fresh_checkpoint", lambda _timeout: None)
     try:
         assessment = client.refresh_recovery_assessment()
@@ -877,9 +871,7 @@ def test_shared_external_recovery_rejects_an_assessment_from_another_incident(
     _bind_child_graph(client)
     sender = _RecoverySender(_stale_artifact("layer:child"))
     client._sender = sender
-    client._started = True
-    client._receiver.connected = True
-    client._receiver._synchronized_event.set()
+    handshake(client, synchronized=True)
     monkeypatch.setattr(client, "_replay_to_fresh_checkpoint", lambda _timeout: None)
     try:
         assessment = client.refresh_recovery_assessment()
@@ -908,9 +900,7 @@ def test_shared_external_recovery_rejects_a_stale_graph_assessment(
     _bind_child_graph(client)
     sender = _RecoverySender(_stale_artifact("layer:child"))
     client._sender = sender
-    client._started = True
-    client._receiver.connected = True
-    client._receiver._synchronized_event.set()
+    handshake(client, synchronized=True)
     monkeypatch.setattr(client, "_replay_to_fresh_checkpoint", lambda _timeout: None)
     try:
         assessment = client.refresh_recovery_assessment()
@@ -941,7 +931,7 @@ def test_shared_rebind_recovery_preserves_work_and_replays_clean_stage(
         _bind_child_graph(client)
     sender = _RecoverySender(_stale_artifact("layer:child"))
     client._sender = sender
-    client._started = True
+    server = scripted_start(client)
 
     fresh_child = Sdf.Layer.CreateNew(str(tmp_path / "fresh-child.usda"))
     fresh_child.Save()
@@ -955,8 +945,7 @@ def test_shared_rebind_recovery_preserves_work_and_replays_clean_stage(
             with client._tracker.suppressed():
                 _bind_child_graph(client)
             client._last_seq = 4
-        client._receiver.connected = True
-        client._receiver._synchronized_event.set()
+        server.ready(client._receiver)
 
     monkeypatch.setattr(client, "_replay_to_fresh_checkpoint", _refresh)
     try:
@@ -1007,7 +996,7 @@ def test_shared_rebind_recovery_resumes_after_replacement_replay_timeout(
     original_sender = client._sender
     sender = _RecoverySender(_stale_artifact("layer:child"))
     client._sender = sender
-    client._started = True
+    server = scripted_start(client)
 
     fresh_stage = _create_root(tmp_path / "fresh-root.usda")
     fresh_child = Sdf.Layer.CreateNew(str(tmp_path / "fresh-child.usda"))
@@ -1017,8 +1006,7 @@ def test_shared_rebind_recovery_resumes_after_replacement_replay_timeout(
 
     def refresh(_timeout):
         checkpoints.append(client.stage)
-        client._receiver.connected = True
-        client._receiver._synchronized_event.set()
+        server.ready(client._receiver)
         if len(checkpoints) == 2:
             with client._tracker.suppressed():
                 _bind_child_graph(client)
@@ -1116,9 +1104,7 @@ def test_shared_rebind_recovery_preflights_the_clean_stage(tmp_path, monkeypatch
     )
     sender = _RecoverySender(_stale_artifact("layer:root"))
     client._sender = sender
-    client._started = True
-    client._receiver.connected = True
-    client._receiver._synchronized_event.set()
+    handshake(client, synchronized=True)
     monkeypatch.setattr(client, "_replay_to_fresh_checkpoint", lambda _timeout: None)
 
     clean_stage = _create_root(tmp_path / "clean-root.usda")
@@ -1168,9 +1154,7 @@ def test_shared_rebind_recovery_rejects_a_detached_source_reused_by_clean_stage(
 
     sender = _RecoverySender(_stale_artifact("layer:child"))
     client._sender = sender
-    client._started = True
-    client._receiver.connected = True
-    client._receiver._synchronized_event.set()
+    handshake(client, synchronized=True)
     monkeypatch.setattr(client, "_replay_to_fresh_checkpoint", lambda _timeout: None)
 
     clean_stage = _create_root(tmp_path / "clean-root.usda")
@@ -1193,19 +1177,16 @@ def test_shared_rebind_recovery_rejects_a_detached_source_reused_by_clean_stage(
 def test_shared_budget_releases_local_edits_under_sustained_traffic(tmp_path, monkeypatch):
     stage = _create_root(tmp_path / "root.usda")
     client = SharedStageClient(stage, app_name="shared-budget", persist_token=False)
-    traffic = PeerTraffic(client._receiver, queued=3)
     sent = []
 
     try:
-        client._started = True
         client._graph.apply_state({
             "type": "layer_graph_state", "seq": 1, "generation": "graph-1",
             "revision": 1, "root_layer_key": "layer:root",
             "layers": [{"layer_key": "layer:root", "revision": 1, "sublayers": []}],
         })
         client._tracker.sync_graph(force=True)
-        client._receiver.connected = True
-        client._receiver._synchronized_event.set()
+        traffic = PeerTraffic(handshake(client, synchronized=True), queued=3)
         monkeypatch.setattr(client._sender, "sock", object())
         monkeypatch.setattr(
             client._sender, "send_events",

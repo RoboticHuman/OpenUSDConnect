@@ -62,3 +62,29 @@ if(MSVC)
 else()
     target_compile_options(OpenUSDConnectClientEngine PRIVATE -Wall -Wextra -Wpedantic)
 endif()
+
+# Optional reference driver: one thread and blocking sockets drive the engine.
+# Hosts with their own I/O and scheduler drive the engine directly instead.
+add_library(OpenUSDConnectClientDriver STATIC
+    src/driver/scripted_socket.cpp
+    src/driver/socket.cpp
+    src/driver/threaded_receiver_driver.cpp
+    src/platform/bsd_socket.cpp
+)
+add_library(OpenUSDConnect::ClientDriver ALIAS OpenUSDConnectClientDriver)
+find_package(Threads REQUIRED)
+target_link_libraries(OpenUSDConnectClientDriver
+    PUBLIC OpenUSDConnectClientEngine Threads::Threads
+    PRIVATE $<$<PLATFORM_ID:Windows>:ws2_32>
+)
+set_target_properties(OpenUSDConnectClientDriver PROPERTIES
+    POSITION_INDEPENDENT_CODE ON
+    CXX_VISIBILITY_PRESET hidden
+    VISIBILITY_INLINES_HIDDEN YES
+)
+
+if(MSVC)
+    target_compile_options(OpenUSDConnectClientDriver PRIVATE /W4 /permissive-)
+else()
+    target_compile_options(OpenUSDConnectClientDriver PRIVATE -Wall -Wextra -Wpedantic)
+endif()

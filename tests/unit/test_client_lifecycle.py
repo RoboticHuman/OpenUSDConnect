@@ -19,7 +19,7 @@ from openusdconnect import (
 )
 from openusdconnect import sender as sender_module
 from openusdconnect.client_observer import StageMetadata
-from tests.helpers import RecordingObserver, force_handshake
+from tests.helpers import RecordingObserver, force_handshake, handshake
 
 
 def test_wait_until_ready_returns_false_only_when_startup_expires():
@@ -343,8 +343,7 @@ def test_flush_shares_timeout_between_reconnect_and_acknowledgement(kind, monkey
     monkeypatch.setattr(client._sender, "flush", flush)
     client._transform_coalescing = SimpleNamespace(buffering=True, force=lambda emitter: [])
     if isinstance(client, ManagedClient):
-        client._receiver.connected = True
-        client._receiver._synchronized_event.set()
+        handshake(client, synchronized=True)
     else:
         monkeypatch.setattr(client, "_is_synchronized", lambda: True)
     try:

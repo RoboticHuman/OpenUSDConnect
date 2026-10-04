@@ -78,6 +78,9 @@ Behavior:
   like `UsdPublisher.flush()`, instead of returning `False`.
 - `UsdReceiver.status` reports `CONNECTING` instead of `READY` while it
   reconnects, like the other clients.
+- `ReceiverThread` is no longer a `threading.Thread`. Its settings and state
+  are read-only properties (`token` and `reconnect` stay assignable), and the
+  `sock` attribute is gone.
 
 The low-level `EventSender`, `ReceiverThread`, and `EventDispatcher` keep their
 callable arguments and properties.
@@ -111,6 +114,13 @@ callable arguments and properties.
 
 - `EventDispatcher` starts its cursor at `receiver.sync_from - 1`, so
   integrations no longer seed `last_seq` for continuation.
+- `ReceiverThread` runs its connection on a native thread in the client core
+  and keeps its constructor, callbacks, properties, and methods. `start()`,
+  `stop()`, `join()`, `is_alive()`, and `ident` keep their meaning; `stop()`
+  interrupts a pending connect or read at once, and `join()` before `start()`
+  returns at once. Building the extension fetches the pinned FlatBuffers
+  headers on first configure, which needs network access unless
+  `FETCHCONTENT_SOURCE_DIR_FLATBUFFERS` names a local copy.
 
 ### Fixed
 

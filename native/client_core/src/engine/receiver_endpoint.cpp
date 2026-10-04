@@ -82,12 +82,22 @@ bool ReceiverEndpoint::IsValidConfiguration(const ReceiverConfig& config) noexce
 	const bool valid_mode = config.LayerMode == OpenUSDConnect::LayerMode::Managed ||
 							(config.LayerMode == OpenUSDConnect::LayerMode::SharedStage &&
 							 !config.LayeredReplay && config.Department.empty());
-	return valid_mode && !config.Host.empty() && config.Port != 0 && !config.ClientId.empty() &&
-		   !config.Origin.empty() &&
+	return valid_mode && !config.Host.empty() && config.Port != 0 &&
 		   ReceiverInbox::IsValidConfiguration(config.SyncFrom, config.MaxQueue) &&
 		   config.SocketTimeout.count() > 0 && config.MaxConsecutiveTimeouts != 0 &&
 		   ReconnectPolicy::IsValidConfiguration(config.ReconnectBaseDelay,
 												 config.ReconnectMaxDelay);
+}
+
+const ReceiverConfig& ReceiverEndpoint::Configuration() const noexcept
+{
+	return Config;
+}
+
+void ReceiverEndpoint::SetReconnect(bool enabled)
+{
+	std::lock_guard lock(Mutex);
+	Reconnect.SetEnabled(enabled);
 }
 
 bool ReceiverEndpoint::Start(TimePoint now)

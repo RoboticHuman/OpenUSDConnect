@@ -1,18 +1,14 @@
 """A partial replay must retain enough identity to resume after queue overflow."""
 
-import threading
+from typing import NamedTuple
 
 import pytest
 from pxr import Usd
 
 from openusdconnect.adapters import UsdStageAdapter
-from openusdconnect.codec import (
-    PayloadType,
-    payload_type_and_sequence,
-)
 from openusdconnect.dispatcher import EventDispatcher
 from openusdconnect.receiver import ReceiverThread
-from tests.helpers import ensure_prim_event, in_process_server
+from tests.helpers import ensure_prim_event, in_process_server, relay_connection
 
 
 @pytest.fixture
@@ -21,66 +17,40 @@ def replay_server():
         yield server
 
 
-def _receive_until_boundary(receiver, dispatcher, monkeypatch, *, after_replay=None):
+class Boundary(NamedTuple):
+    completed: bool
+    # The hello that opened the connection.
+    hello: dict
+
+
+def _is_replay_complete(message):
+    return message["type"] == "replay_complete"
+
+
+def _receive_until_boundary(receiver, dispatcher, port, *, after_replay=None):
     """Do not drain until overflow or ReplayComplete, independent of scheduling."""
-    boundary = threading.Event()
-    replay_complete = threading.Event()
-    errors = []
-    handle_data = receiver._handle_data_message
-
-    def observe_data(buf, generation):
-        accepted = handle_data(buf, generation)
-        payload_type, _sequence = payload_type_and_sequence(buf)
-        if accepted and payload_type == PayloadType.ReplayComplete:
-            replay_complete.set()
-            boundary.set()
-        elif not accepted:
-            boundary.set()
-        return accepted
-
-    def receive():
-        try:
-            receiver._connect_and_recv()
-        except Exception as exc:
-            errors.append(exc)
-        finally:
-            boundary.set()
-
-    with monkeypatch.context() as patch:
-        patch.setattr(receiver, "_handle_data_message", observe_data)
-        worker = threading.Thread(target=receive, daemon=True)
-        worker.start()
-        try:
-            assert boundary.wait(5), "receiver reached neither overflow nor ReplayComplete"
-            assert not errors, errors
-            if after_replay is not None:
-                assert replay_complete.is_set()
-                dispatcher.drain_and_apply()
-                assert receiver.synchronized
-                boundary.clear()
-                replay_complete.clear()
-                after_replay()
-                assert boundary.wait(5), "live reset reached neither overflow nor ReplayComplete"
-                assert not errors, errors
-            completed = replay_complete.is_set()
-            assert completed or receiver._inbox.overflowed, "receiver stopped before replay"
-            if not completed:
-                assert receiver.queued_message_count == receiver.max_queue
+    relay = relay_connection(receiver, port)
+    try:
+        completed = relay.pump(_is_replay_complete) is not None
+        if after_replay is not None:
+            assert completed
             dispatcher.drain_and_apply()
-            if completed:
-                assert receiver.synchronized
-            return completed
-        finally:
-            receiver._close_socket()
-            worker.join(5)
-            receiver.connected = False
-            receiver._inbox.clear_overflow()
-            assert not worker.is_alive()
-            assert not errors, errors
+            assert receiver.synchronized
+            after_replay()
+            completed = relay.pump(_is_replay_complete) is not None
+        if not completed:
+            assert not receiver.connected, "receiver stopped before replay"
+            assert receiver.queued_message_count == receiver.max_queue
+        dispatcher.drain_and_apply()
+        if completed:
+            assert receiver.synchronized
+        return Boundary(completed, relay.hello)
+    finally:
+        relay.close()
 
 
 @pytest.mark.parametrize("after_purge", [False, True], ids=["initial", "after-purge"])
-def test_partial_replay_advances_across_queue_overflow(replay_server, monkeypatch, after_purge):
+def test_partial_replay_advances_across_queue_overflow(replay_server, after_purge):
     state, port = replay_server
     receiver = ReceiverThread(host="127.0.0.1", port=port, max_queue=3)
     stage = Usd.Stage.CreateInMemory()
@@ -88,7 +58,7 @@ def test_partial_replay_advances_across_queue_overflow(replay_server, monkeypatc
     try:
         if after_purge:
             state._commit_events([ensure_prim_event("/Before")])
-            assert _receive_until_boundary(receiver, dispatcher, monkeypatch)
+            assert _receive_until_boundary(receiver, dispatcher, port).completed
             assert stage.GetPrimAtPath("/Before")
             state.purge()
 
@@ -100,7 +70,7 @@ def test_partial_replay_advances_across_queue_overflow(replay_server, monkeypatc
         progress = []
         completed = False
         for _ in range(len(paths)):
-            completed = _receive_until_boundary(receiver, dispatcher, monkeypatch)
+            completed = _receive_until_boundary(receiver, dispatcher, port).completed
             progress.append(dispatcher.last_seq)
             if completed:
                 break
@@ -123,7 +93,7 @@ def test_partial_replay_advances_across_queue_overflow(replay_server, monkeypatc
 @pytest.mark.parametrize("layered_replay", [False, True], ids=["flat", "layered"])
 @pytest.mark.parametrize("explicit_replay", [False, True], ids=["initial-overflow", "full-replay"])
 def test_snapshot_cursor_overflow_before_first_reset_event_recovers(
-    replay_server, monkeypatch, layered_replay, explicit_replay,
+    replay_server, layered_replay, explicit_replay,
 ):
     state, port = replay_server
     snapshot_paths = [f"/P{index}" for index in range(1, 4)]
@@ -140,7 +110,7 @@ def test_snapshot_cursor_overflow_before_first_reset_event_recovers(
     dispatcher.last_seq = 3
     try:
         if explicit_replay:
-            assert _receive_until_boundary(receiver, dispatcher, monkeypatch)
+            assert _receive_until_boundary(receiver, dispatcher, port).completed
             assert receiver.server_instance == ""
             receiver.request_replay_from(1)
         state._commit_events([ensure_prim_event(path) for path in remaining_paths])
@@ -150,7 +120,7 @@ def test_snapshot_cursor_overflow_before_first_reset_event_recovers(
         progress = []
         completed = False
         for _ in range(10):
-            completed = _receive_until_boundary(receiver, dispatcher, monkeypatch)
+            completed = _receive_until_boundary(receiver, dispatcher, port).completed
             progress.append(dispatcher.last_seq)
             if completed:
                 break
@@ -167,7 +137,7 @@ def test_snapshot_cursor_overflow_before_first_reset_event_recovers(
         dispatcher.close()
 
 
-def test_live_compaction_overflow_resumes_in_new_epoch(replay_server, monkeypatch):
+def test_live_compaction_overflow_resumes_in_new_epoch(replay_server):
     state, port = replay_server
     paths = [f"/P{index}" for index in range(8)]
     state._commit_events([ensure_prim_event(paths[0])])
@@ -182,10 +152,9 @@ def test_live_compaction_overflow_resumes_in_new_epoch(replay_server, monkeypatc
 
     try:
         assert not _receive_until_boundary(
-            receiver, dispatcher, monkeypatch, after_replay=compact_live,
-        )
+            receiver, dispatcher, port, after_replay=compact_live,
+        ).completed
         assert state.get_replay_token()[0] == 1
-        assert receiver._received_replay_identity is None
         assert receiver.replay_epoch == 0
 
         # The epoch-less live Resync needs one fresh handshake/reset. Subsequent
@@ -193,8 +162,13 @@ def test_live_compaction_overflow_resumes_in_new_epoch(replay_server, monkeypatc
         progress = []
         completed = False
         for _ in range(len(paths)):
-            completed = _receive_until_boundary(receiver, dispatcher, monkeypatch)
+            boundary = _receive_until_boundary(receiver, dispatcher, port)
+            if not progress:
+                # The live reset left no proven identity, so the hello claims none.
+                assert boundary.hello["replay_server_instance"] == ""
+                assert "replay_epoch" not in boundary.hello
             progress.append(dispatcher.last_seq)
+            completed = boundary.completed
             if completed:
                 break
         assert all(after > before for before, after in zip(progress, progress[1:], strict=False)), (

@@ -32,3 +32,25 @@ else()
     target_compile_options(OpenUSDConnectReceiverEndpointTests PRIVATE -Wall -Wextra -Wpedantic)
 endif()
 add_test(NAME OpenUSDConnectReceiverEndpointTests COMMAND OpenUSDConnectReceiverEndpointTests)
+
+add_executable(OpenUSDConnectThreadedReceiverDriverTests test_threaded_receiver_driver.cpp)
+target_link_libraries(OpenUSDConnectThreadedReceiverDriverTests PRIVATE OpenUSDConnect::ClientDriver)
+if(MSVC)
+    target_compile_options(OpenUSDConnectThreadedReceiverDriverTests PRIVATE /W4 /permissive-)
+else()
+    target_compile_options(OpenUSDConnectThreadedReceiverDriverTests PRIVATE -Wall -Wextra -Wpedantic)
+endif()
+add_test(NAME OpenUSDConnectThreadedReceiverDriverTests
+    COMMAND OpenUSDConnectThreadedReceiverDriverTests
+)
+
+add_executable(OpenUSDConnectTcpSocketTests test_tcp_socket.cpp)
+target_link_libraries(OpenUSDConnectTcpSocketTests
+    PRIVATE OpenUSDConnect::ClientDriver $<$<PLATFORM_ID:Windows>:ws2_32>
+)
+if(MSVC)
+    target_compile_options(OpenUSDConnectTcpSocketTests PRIVATE /W4 /permissive-)
+else()
+    target_compile_options(OpenUSDConnectTcpSocketTests PRIVATE -Wall -Wextra -Wpedantic)
+endif()
+add_test(NAME OpenUSDConnectTcpSocketTests COMMAND OpenUSDConnectTcpSocketTests)

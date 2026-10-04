@@ -23,6 +23,7 @@ struct ReceiverConfig final
 {
 	std::string Host;
 	std::uint16_t Port = 0;
+	// Optional: a server that requires tokens rejects a receiver without one.
 	std::string ClientId;
 	std::string Origin;
 	std::string Department;
@@ -69,6 +70,10 @@ public:
 	ReceiverEndpoint& operator=(const ReceiverEndpoint&) = delete;
 
 	[[nodiscard]] static bool IsValidConfiguration(const ReceiverConfig& config) noexcept;
+
+	[[nodiscard]] const ReceiverConfig& Configuration() const noexcept;
+	// Applies when the current session ends; a stopped endpoint stays stopped.
+	void SetReconnect(bool enabled);
 
 	// Host I/O. Reports that do not match the current connection are ignored.
 	[[nodiscard]] bool Start(TimePoint now);
