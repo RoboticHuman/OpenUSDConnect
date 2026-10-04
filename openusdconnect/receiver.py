@@ -106,7 +106,7 @@ class ReceiverThread(threading.Thread):
         self._stop_event = threading.Event()
         self.sock: socket.socket | None = None
         self._socket_lock = threading.Lock()
-        self._inbox = _client_backend.ReceiverInbox(sync_from, max_queue)
+        self._inbox = _client_backend.ReceiverInbox(sync_from, max_queue, require_contiguous=True)
         self._connected_event = threading.Event()
         self._synchronized_event = threading.Event()
         self._handshake_event = threading.Event()
@@ -162,6 +162,31 @@ class ReceiverThread(threading.Thread):
         """Number of received messages waiting for the owning thread to drain."""
 
         return self._inbox.size
+
+    @property
+    def generation(self) -> int:
+        """Connection generation; read it before draining for :meth:`mark_applied_through`."""
+        return self._inbox.generation
+
+    def mark_applied_through(self, generation: int, sequence: int) -> bool:
+        """Advance the applied cursor for frames drained after reading ``generation``.
+
+        A live sequence gap replays from this cursor, so report a batch only
+        after its whole apply pipeline succeeded.
+        """
+        return self._inbox.mark_applied_through(generation, sequence)
+
+    def reset_applied_progress(self) -> None:
+        """Restart the applied cursor once the consumer has applied a queued resync."""
+        self._inbox.reset_applied_progress()
+
+    def freeze_marker(self) -> int:
+        """Return a marker covering every message queued now; see :meth:`drained_through`."""
+        return self._inbox.freeze_marker()
+
+    def drained_through(self, marker: int) -> bool:
+        """Whether every message queued when ``marker`` was taken has been drained."""
+        return self._inbox.drained_through(marker)
 
     def wait_connected(self, timeout: float | None = None) -> bool:
         """Wait for the current handshake result, not for replay completion."""

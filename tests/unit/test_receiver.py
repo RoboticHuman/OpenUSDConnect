@@ -546,6 +546,7 @@ class TestReconnection:
         rt = ReceiverThread(
             host="127.0.0.1",
             port=port,
+            sync_from=10,
             reconnect=True,
             reconnect_base_delay=0.05,
             reconnect_max_delay=0.2,
@@ -573,6 +574,7 @@ class TestReconnection:
         rt = ReceiverThread(
             host="127.0.0.1",
             port=port,
+            sync_from=10,
             reconnect=True,
             reconnect_base_delay=0.05,
             reconnect_max_delay=0.2,
@@ -997,6 +999,35 @@ def test_explicit_full_replay_queues_reset_before_colliding_events():
     assert not stage.GetPrimAtPath("/Old")
     assert dispatcher.last_seq == 1
     assert receiver.synchronized
+    dispatcher.close()
+
+
+def _receive_event(receiver, generation, seq):
+    event = {"k": "ensure_prim", "prim": f"/P{seq}", "typeName": "Xform"}
+    return _receive_identity_message(receiver, generation, type="event", seq=seq, event=event)
+
+
+def test_live_gap_replays_from_the_consumer_applied_cursor():
+    receiver = ReceiverThread()
+    stage = Usd.Stage.CreateInMemory()
+    dispatcher = EventDispatcher(receiver=receiver, adapter=UsdStageAdapter(stage))
+    generation = receiver._inbox.begin_connection().generation
+    assert _receive_event(receiver, generation, 1)
+    assert _receive_event(receiver, generation, 2)
+    dispatcher.drain_and_apply()
+    assert _receive_event(receiver, generation, 3)
+    assert _receive_event(receiver, generation, 2)
+    assert receiver.queued_message_count == 1, "duplicates are dropped"
+    assert not _receive_event(receiver, generation, 5)
+    assert receiver.queued_message_count == 0
+    resumed = receiver._inbox.begin_connection()
+    assert resumed.sync_from == 3, "queued but unapplied frames are replayed"
+
+    assert _receive_identity_message(receiver, resumed.generation, type="resync")
+    assert _receive_event(receiver, resumed.generation, 1)
+    dispatcher.drain_and_apply()
+    assert not _receive_event(receiver, resumed.generation, 3)
+    assert receiver._inbox.begin_connection().sync_from == 2
     dispatcher.close()
 
 

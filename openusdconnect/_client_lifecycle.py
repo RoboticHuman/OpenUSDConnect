@@ -123,32 +123,6 @@ def submit_and_wait(client, timeout: float | None) -> bool:
             return False
 
 
-class BacklogHold:
-    """Hold a local batch until the messages queued before it have been drained.
-
-    Counting those messages, rather than checking whether a drain used its
-    whole budget, keeps sustained inbound traffic from holding edits forever.
-    """
-
-    __slots__ = ("_ahead",)
-
-    def __init__(self):
-        self._ahead = 0
-
-    @property
-    def holding(self) -> bool:
-        return self._ahead > 0
-
-    def freeze(self, queued: int) -> None:
-        """Record the queue depth when a new local batch is frozen."""
-        self._ahead = queued
-
-    def drained(self, count: int, queued: int) -> None:
-        # The messages ahead of the batch are at the front of the queue, so a
-        # replay request that discards the queue also bounds them.
-        self._ahead = min(max(0, self._ahead - count), queued)
-
-
 class ClientCallbackQueue:
     """Deliver notifications raised on network threads during update() or close()."""
 

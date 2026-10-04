@@ -6,9 +6,9 @@ import subprocess
 import sys
 import threading
 import time
-from collections import deque
 from contextlib import contextmanager
 
+from openusdconnect._client_backend import AcceptResult, ReceiverMessageKind
 from openusdconnect.client_observer import ClientObserver
 from openusdconnect.codec import encode_message
 from openusdconnect.protocol_constants import (
@@ -217,24 +217,18 @@ def mcp_session_with_receiver(port):
 
 
 class PeerTraffic:
-    """Replaces a receiver's queue with ping messages that peers keep sending."""
+    """Queues ping messages that peers keep sending into a receiver's inbox."""
 
-    def __init__(self, receiver, monkeypatch, *, queued=0):
+    def __init__(self, receiver, *, queued=0):
+        self._inbox = receiver._inbox
+        self._generation = self._inbox.begin_connection().generation
         self._ping = encode_message({"type": "ping"})
-        self._frames = deque()
         self.arrive(queued)
-        monkeypatch.setattr(receiver, "drain_queue", self._drain)
-        monkeypatch.setattr(
-            type(receiver), "queued_message_count",
-            property(lambda _receiver: len(self._frames)),
-        )
 
     def arrive(self, count):
-        self._frames.extend([self._ping] * count)
-
-    def _drain(self, max_messages=None):
-        count = len(self._frames) if max_messages is None else min(max_messages, len(self._frames))
-        return deque(self._frames.popleft() for _ in range(count))
+        for _ in range(count):
+            result = self._inbox.accept(self._generation, ReceiverMessageKind.OTHER, 0, self._ping)
+            assert result == AcceptResult.ACCEPTED
 
 
 def force_handshake(client, *, synchronized=False):

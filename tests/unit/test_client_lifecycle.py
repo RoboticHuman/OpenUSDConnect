@@ -105,18 +105,6 @@ def test_waits_raise_when_nothing_will_reconnect():
         receiver.close()
 
 
-def test_backlog_hold_counts_only_messages_queued_before_the_batch():
-    hold = _client_lifecycle.BacklogHold()
-    hold.freeze(3)
-    hold.drained(2, queued=5)
-    assert hold.holding
-    hold.drained(2, queued=5)
-    assert not hold.holding
-    hold.freeze(4)
-    hold.drained(0, queued=0)
-    assert not hold.holding, "a discarded queue has nothing left ahead of the batch"
-
-
 def test_queued_notifications_run_on_update_thread_and_bound_each_drain():
     notifications = _client_lifecycle.ClientCallbackQueue()
     received = []

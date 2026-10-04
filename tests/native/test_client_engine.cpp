@@ -1,4 +1,5 @@
 #include "openusdconnect/client/engine/status.h"
+#include "openusdconnect/client/receiver_session.h"
 #include "openusdconnect/client/schema/messages_generated.h"
 
 #include "test_check.h"
@@ -86,9 +87,62 @@ static void TestRejectionNamesAndDispositions()
 	}
 }
 
+using TestInbox = OrderedReceiverSession<int>;
+
+static void AcceptFrames(TestInbox& inbox, std::uint64_t generation, int count)
+{
+	for (int frame = 0; frame < count; ++frame)
+	{
+		CHECK(inbox.Accept(generation, ReceiverMessageKind::Other, 0, frame) ==
+			  AcceptResult::Accepted);
+	}
+}
+
+static void TestHoldCoversOnlyFramesQueuedBeforeTheMarker()
+{
+	TestInbox inbox(1, 8);
+	const std::uint64_t generation = inbox.BeginConnection().Generation;
+	CHECK(inbox.DrainedThrough(inbox.FreezeMarker()));
+	AcceptFrames(inbox, generation, 3);
+	const std::uint64_t marker = inbox.FreezeMarker();
+	AcceptFrames(inbox, generation, 2);
+	CHECK(inbox.Drain(2).size() == 2);
+	CHECK(!inbox.DrainedThrough(marker));
+	AcceptFrames(inbox, generation, 2);
+	int frame = -1;
+	CHECK(inbox.TryPop(frame));
+	CHECK(inbox.DrainedThrough(marker));
+	CHECK(inbox.Size() == 4);
+}
+
+static void TestRejectedFramesDoNotExtendTheHold()
+{
+	TestInbox inbox(1, 2);
+	const std::uint64_t generation = inbox.BeginConnection().Generation;
+	AcceptFrames(inbox, generation, 2);
+	CHECK(inbox.Accept(generation, ReceiverMessageKind::Other, 0, 2) == AcceptResult::QueueFull);
+	const std::uint64_t marker = inbox.FreezeMarker();
+	CHECK(inbox.Drain().size() == 2);
+	CHECK(inbox.DrainedThrough(marker));
+}
+
+static void TestReplayRequestReleasesTheHold()
+{
+	TestInbox inbox(1, 8);
+	const std::uint64_t generation = inbox.BeginConnection().Generation;
+	AcceptFrames(inbox, generation, 3);
+	const std::uint64_t marker = inbox.FreezeMarker();
+	CHECK(!inbox.DrainedThrough(marker));
+	CHECK(inbox.RequestReplayFrom(1));
+	CHECK(inbox.DrainedThrough(marker));
+}
+
 int main()
 {
 	TestEachPhaseOutranksThePhasesAfterIt();
 	TestRejectionNamesAndDispositions();
+	TestHoldCoversOnlyFramesQueuedBeforeTheMarker();
+	TestRejectedFramesDoNotExtendTheHold();
+	TestReplayRequestReleasesTheHold();
 	return 0;
 }

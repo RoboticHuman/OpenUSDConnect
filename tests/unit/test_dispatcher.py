@@ -34,6 +34,7 @@ class _QueuedReceiver:
     layered_replay_active = False
     sync_from = 1
     origin = None
+    generation = 0
 
     def __init__(self, messages):
         self.messages = list(messages)
@@ -46,6 +47,12 @@ class _QueuedReceiver:
 
     def request_replay_from(self, seq_start):
         self.replay_requests.append(seq_start)
+
+    def reset_applied_progress(self):
+        pass
+
+    def mark_applied_through(self, _generation, _sequence):
+        return True
 
     def mark_replay_applied(self):
         return False

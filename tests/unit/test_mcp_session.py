@@ -46,6 +46,7 @@ def _patch_net(monkeypatch, started, stopped):
         server_instance = "test-server"
         replay_epoch = 0
         stopped = False
+        generation = 0
 
         def __init__(self, **kwargs):
             self.options = kwargs

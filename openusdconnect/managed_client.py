@@ -12,12 +12,7 @@ from dataclasses import dataclass
 from pxr import Sdf, Usd
 
 from ._client_base import EmitterClientBase
-from ._client_lifecycle import (
-    DEFAULT_WAIT_TIMEOUT_S,
-    BacklogHold,
-    deadline_after,
-    remaining_time,
-)
+from ._client_lifecycle import DEFAULT_WAIT_TIMEOUT_S, deadline_after, remaining_time
 from ._client_utils import client_origin, require_app_name, validate_layered_source
 from .adapters import UsdStageAdapter
 from .client_id import make_stable_client_id
@@ -78,7 +73,7 @@ class ManagedClient(EmitterClientBase):
         self._app_name = app_name
         self._authoring_layer: Sdf.Layer | None = None
         self._last_recovery_result: ManagedRecoveryResult | None = None
-        self._backlog = BacklogHold()
+        self._backlog_marker = 0
         self._init_emitter(
             stage,
             attr_filter=attr_filter,
@@ -165,18 +160,19 @@ class ManagedClient(EmitterClientBase):
         had_batch = bool(self._emitter.prepared_event_count)
         outgoing = self._prepare_outgoing_events()
         if not had_batch and self._emitter.prepared_event_count:
-            self._backlog.freeze(self._receiver.queued_message_count)
+            self._backlog_marker = self._receiver.freeze_marker()
         received = self._apply_queued(max_messages)
         if self._closed:
             return self._progress(received)
-        self._backlog.drained(
-            self._dispatcher.drained_message_count, self._receiver.queued_message_count,
-        )
 
         sent = 0
         if self._receiver.connected and not self._sender.connected:
             self._sender.request_connect()
-        if self._sender.connected and self._is_synchronized() and not self._backlog.holding:
+        if (
+            self._sender.connected
+            and self._is_synchronized()
+            and self._receiver.drained_through(self._backlog_marker)
+        ):
             sent = self._send(outgoing)
         return self._progress(received, sent)
 

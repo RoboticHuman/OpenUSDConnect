@@ -302,6 +302,16 @@ public:
 		std::lock_guard lock(Mutex);
 		return ReplayEpochValue;
 	}
+	[[nodiscard]] std::uint64_t FreezeMarker() const noexcept
+	{
+		std::lock_guard lock(Mutex);
+		return IncomingSerial;
+	}
+	[[nodiscard]] bool DrainedThrough(std::uint64_t marker) const noexcept
+	{
+		std::lock_guard lock(Mutex);
+		return DrainedSerial >= marker;
+	}
 
 private:
 	void ResetSynchronization() noexcept

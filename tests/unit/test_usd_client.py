@@ -1081,13 +1081,13 @@ def test_app_name_is_required():
         UsdReceiver(stage, app_name=" ", persist_token=False)
 
 
-def test_managed_budget_releases_local_edits_under_sustained_traffic(monkeypatch):
+def test_managed_budget_releases_local_edits_under_sustained_traffic():
     client = ManagedClient(
         Usd.Stage.CreateInMemory(), app_name="managed-budget", persist_token=False,
     )
     client._sender = _SenderStub([True] * 10)
     force_handshake(client, synchronized=True)
-    traffic = PeerTraffic(client.receiver, monkeypatch, queued=3)
+    traffic = PeerTraffic(client.receiver, queued=3)
     try:
         client.stage.DefinePrim("/Local", "Xform")
         submitted = []

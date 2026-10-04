@@ -1193,7 +1193,7 @@ def test_shared_rebind_recovery_rejects_a_detached_source_reused_by_clean_stage(
 def test_shared_budget_releases_local_edits_under_sustained_traffic(tmp_path, monkeypatch):
     stage = _create_root(tmp_path / "root.usda")
     client = SharedStageClient(stage, app_name="shared-budget", persist_token=False)
-    traffic = PeerTraffic(client._receiver, monkeypatch, queued=3)
+    traffic = PeerTraffic(client._receiver, queued=3)
     sent = []
 
     try:
