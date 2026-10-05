@@ -1,9 +1,9 @@
 # Python client and host-integration API
 
 These APIs attach OpenUSDConnect to an application-owned `pxr.Usd.Stage`.
-Call `update()` from the stage-owning thread. Socket reads and reconnects run
-on background threads; encoding, USD work, and (by default) transaction writes
-run on the calling thread.
+Call `update()` from the stage-owning thread. Socket reads, transaction
+writes, and reconnects run on native threads that do not need the GIL;
+encoding and USD work run on the calling thread.
 
 ## Choose an API
 
@@ -131,11 +131,6 @@ Receiving pauses while a `ManagedClient` edit target is foreign, because its
 `update()` refuses to publish another layer's opinions. `SharedStageClient`
 accepts any edit target (session-layer edits stay local), so its loop calls
 `update()` unconditionally.
-
-`background_send=True` moves transaction writes to a worker so a full socket
-buffer cannot block the UI thread. The worker needs the GIL: while the host's
-main thread runs Python, each write waits for Python's thread switch interval
-(about 5 ms), so keep the default for latency-sensitive editing on fast links.
 
 Before closing, stop authoring and call `submit_and_wait()`. Success means the
 edits are durable, not that their echo has been applied locally.
@@ -463,6 +458,9 @@ was scheduled, not whether the connection succeeded; inspect `connected` and
 rejection/recovery status on subsequent ticks. `cancel_connect()` invalidates
 pending attempts and reports whether they have finished; `disconnect()` also
 closes an established connection. Neither discards the transaction outbox.
+An `EventSender` starts its native connection thread on the first connection
+request, runs its callbacks there, and stops it when the sender is garbage
+collected or the interpreter exits.
 
 ## Embed a server
 

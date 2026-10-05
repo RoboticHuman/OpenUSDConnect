@@ -123,7 +123,6 @@ class SharedStageClient(PublishingClientBase):
         token: str | None = None,
         persist_token: bool = True,
         reconnect: bool = True,
-        background_send: bool = False,
         observer: ClientObserver | None = None,
         delegate_bridge_path: str | Path | None = None,
     ):
@@ -154,7 +153,7 @@ class SharedStageClient(PublishingClientBase):
             **identity, **credential, **self._hooks.receiver_callbacks(),
         )
         self._sender = EventSender(
-            host, port, layer_mode=LayerMode.SHARED_STAGE, background_send=background_send,
+            host, port, layer_mode=LayerMode.SHARED_STAGE,
             **identity, **credential,
         )
         self._last_seq = 0

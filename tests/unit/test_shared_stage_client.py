@@ -1266,7 +1266,7 @@ def test_shared_budget_releases_local_edits_under_sustained_traffic(tmp_path, mo
         try:
             connect_client(client)
             traffic.arrive(3)
-            monkeypatch.setattr(client._sender, "sock", object())
+            assert client._sender.connect(timeout=5)
             monkeypatch.setattr(
                 client._sender, "send_events",
                 lambda events, layer_key="": sent.append(events) or True,
@@ -1280,5 +1280,4 @@ def test_shared_budget_releases_local_edits_under_sustained_traffic(tmp_path, mo
             assert submitted[0] == 0 and submitted[1] > 0
             assert sent
         finally:
-            client._sender.sock = None
             client.close()

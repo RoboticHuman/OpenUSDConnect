@@ -60,7 +60,6 @@ class ManagedClient(EmitterClientBase):
         replicated_api_schemas: set[str] | None = None,
         extra_channels: Sequence[PrimChannel] | None = None,
         transform_coalesce_seconds: float = 0.0,
-        background_send: bool = False,
     ):
         app_name = require_app_name(app_name)
         if not isinstance(stage, Usd.Stage):
@@ -87,7 +86,7 @@ class ManagedClient(EmitterClientBase):
         }
         credential = self._credential.endpoint_kwargs()
         self._sender = EventSender(
-            host, port, department=department, background_send=background_send,
+            host, port, department=department,
             **identity, **credential,
         )
         self._receiver = ReceiverThread(

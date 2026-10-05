@@ -1129,7 +1129,7 @@ def test_blender_emitter_releases_batch_only_after_send_succeeds(monkeypatch):
     emitter = MagicMock()
     emitter.prepare_events_for_send.return_value = events
     sender = MagicMock()
-    sender.sock = object()
+    sender.connected = True
     sender.send_events.side_effect = [False, True]
     monkeypatch.setattr(capture._state, "notice_emitter", emitter)
     monkeypatch.setattr(capture._state, "sender", sender)
@@ -1137,7 +1137,7 @@ def test_blender_emitter_releases_batch_only_after_send_succeeds(monkeypatch):
     capture._try_send_dirty_events()
     emitter.mark_prepared_events_sent.assert_not_called()
 
-    sender.sock = object()
+    sender.connected = True
     capture._try_send_dirty_events()
 
     assert sender.send_events.call_count == 2
@@ -1317,7 +1317,7 @@ def test_blender_connect_reuses_sender_with_unacknowledged_outbox(monkeypatch):
     from integrations.blender import capture
 
     sender = MagicMock()
-    sender.sock = None
+    sender.connected = False
     sender.host = "127.0.0.1"
     sender.port = 7200
     sender.department = "animation"

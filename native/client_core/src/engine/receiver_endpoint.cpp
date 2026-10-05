@@ -406,6 +406,11 @@ void ReceiverEndpoint::HandleHandshake(EnvelopeView envelope)
 	{
 		Reject(*outcome.Rejection);
 	}
+	else
+	{
+		Log(LogLevel::Error, "unexpected handshake response");
+		Close(DisconnectReason::ProtocolError);
+	}
 }
 
 void ReceiverEndpoint::AcceptHello(const OpenUSDConnect::HelloOk& hello)

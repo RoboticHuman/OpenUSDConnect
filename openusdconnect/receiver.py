@@ -23,34 +23,9 @@ _RECONNECT_MAX_DELAY = 30.0
 _SOCKET_TIMEOUT = 30.0
 _MAX_QUEUE_DEPTH = 50_000
 
-_NATIVE_LAYER_MODES = {
-    LayerMode.MANAGED: _client_backend.LayerMode.MANAGED,
-    LayerMode.SHARED_STAGE: _client_backend.LayerMode.SHARED_STAGE,
-}
-_LAYER_MODES = {native: mode for mode, native in _NATIVE_LAYER_MODES.items()}
-_LOG_LEVELS = {
-    _client_backend.LogLevel.DEBUG: logging.DEBUG,
-    _client_backend.LogLevel.INFO: logging.INFO,
-    _client_backend.LogLevel.WARNING: logging.WARNING,
-    _client_backend.LogLevel.ERROR: logging.ERROR,
-}
-
 
 def _log(level, message: str) -> None:
-    LOG.log(_LOG_LEVELS[level], "%s", message)
-
-
-def _stage_metadata(metadata) -> dict:
-    """The authored fields, keyed as in a ``set_stage_metadata`` event."""
-    fields = {
-        "timeCodesPerSecond": metadata.time_codes_per_second,
-        "framesPerSecond": metadata.frames_per_second,
-        "startTimeCode": metadata.start_time_code,
-        "endTimeCode": metadata.end_time_code,
-        "metersPerUnit": metadata.meters_per_unit,
-        "upAxis": metadata.up_axis,
-    }
-    return {key: value for key, value in fields.items() if value is not None}
+    LOG.log(_client_backend.LOG_LEVELS[level], "%s", message)
 
 
 def _transport_error(failure) -> OSError:
@@ -119,7 +94,7 @@ class ReceiverThread:
         config.origin = origin or ""
         config.department = department or ""
         config.layered_replay = self._layered_replay
-        config.layer_mode = _NATIVE_LAYER_MODES[self._layer_mode]
+        config.layer_mode = _client_backend.NATIVE_LAYER_MODES[self._layer_mode]
         config.sync_from = sync_from
         config.max_queue = max_queue
         config.socket_timeout = socket_timeout
@@ -215,7 +190,7 @@ class ReceiverThread:
 
     @property
     def layer_mode_active(self) -> LayerMode:
-        return _LAYER_MODES[self._endpoint.status().layer_mode_active]
+        return _client_backend.LAYER_MODES[self._endpoint.status().layer_mode_active]
 
     @property
     def auth_rejected(self) -> bool:
@@ -253,7 +228,7 @@ class ReceiverThread:
     @property
     def stage_metadata(self) -> dict:
         """The latest stage metadata the server authored, keyed as on the wire."""
-        return _stage_metadata(self._endpoint.status().metadata)
+        return _client_backend.stage_metadata_fields(self._endpoint.status().metadata)
 
     @property
     def connection_error(self) -> Exception | None:
@@ -377,7 +352,9 @@ class ReceiverThread:
             self._notify(self._on_token_issued, notification.token, "on_token_issued")
         elif isinstance(notification, _client_backend.StageMetadata):
             self._notify(
-                self._on_stage_metadata, _stage_metadata(notification), "on_stage_metadata"
+                self._on_stage_metadata,
+                _client_backend.stage_metadata_fields(notification),
+                "on_stage_metadata",
             )
         elif isinstance(notification, _client_backend.PlaybackState):
             message = {

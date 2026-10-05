@@ -1,33 +1,17 @@
-"""TCP producer with durable transaction acknowledgement and reconnect replay."""
+"""Durable transaction producer whose connection runs on a native thread."""
 
 from __future__ import annotations
 
 import logging
-import socket
 import threading
-import time
 import uuid
+import weakref
 from collections.abc import Callable
 
 from . import _client_backend
 from .checkpoints import MirrorCheckpoint
-from .codec import (
-    PayloadType,
-    TransactionRejectionCode,
-    TransactionStatus,
-    _decode_stage_metadata_table,
-    decode_envelope,
-    encode_message,
-    resolve_payload,
-)
-from .framing import IncompleteRead, MessageTooLarge, recv_framed
-from .protocol import (
-    make_claim_playback,
-    make_hello,
-    make_playback_control,
-    make_quit,
-    make_txn,
-)
+from .codec import encode_message
+from .protocol import make_claim_playback, make_playback_control, make_txn
 from .protocol_constants import LayerMode
 from .protocol_validation import validate_events
 from .recovery import (
@@ -38,7 +22,6 @@ from .recovery import (
     TransactionFailure,
     make_recovery_incident,
 )
-from .transport import send_msg, send_raw
 
 LOG = logging.getLogger(__name__)
 
@@ -54,16 +37,67 @@ class TransactionRejectedError(RuntimeError):
         self.failure = failure
 
 
+def _log(level, message: str) -> None:
+    LOG.log(_client_backend.LOG_LEVELS[level], "%s", message)
+
+
+def _session_id(session_id: str | None) -> str:
+    session_id = session_id or uuid.uuid4().hex
+    if len(session_id) > 128:
+        raise ValueError("session_id must contain 1-128 characters")
+    return session_id
+
+
+def _failure(native) -> TransactionFailure:
+    return TransactionFailure(
+        txn_id=native.transaction_id,
+        code=native.code,
+        reason=native.reason,
+        expected_txn_id=native.expected_transaction_id,
+    )
+
+
+def _artifact(native) -> RecoveryArtifact:
+    return RecoveryArtifact(
+        producer_session_id=native.session_id,
+        failure=_failure(native.failure),
+        transactions=tuple(
+            QuarantinedTransaction(
+                txn_id=entry.transaction_id,
+                payload=entry.payload,
+                event_count=entry.event_count,
+                layer_key=entry.layer_key,
+            )
+            for entry in native.transactions
+        ),
+    )
+
+
+def _driver_callbacks(sender: EventSender) -> dict:
+    """Callbacks that do not keep *sender* alive, so collecting it stops its thread."""
+    owner = weakref.ref(sender)
+
+    def token() -> str | None:
+        alive = owner()
+        return None if alive is None else alive._connection_token()
+
+    def deliver(notification) -> None:
+        alive = owner()
+        if alive is not None:
+            alive._deliver(notification)
+
+    return {"token_provider": token, "notification_sink": deliver, "log": _log}
+
+
 class EventSender:
-    """Pipelined producer whose outbox survives socket reconnects.
+    """Pipelined producer whose outbox survives reconnects.
 
-    ``send_events`` returns once this object owns the encoded transaction. A
-    background reader removes it only after the server's cumulative durable
-    acknowledgement covers it. The same encoded bytes and Hello-bound producer
-    identity are replayed after reconnect, so an ACK lost after commit cannot
-    apply the USD edits twice.
-
-    ``background_send=True`` moves transaction writes and replay to a worker.
+    ``send_events`` returns once this object owns the encoded transaction. The
+    native outbox removes it only after the server's cumulative durable
+    acknowledgement covers it, and replays the same bytes under the same
+    Hello-bound producer identity after a reconnect, so an acknowledgement lost
+    after commit cannot apply the USD edits twice. A native thread, started by
+    the first connection request, writes, reads, and runs the callbacks.
     """
 
     def __init__(
@@ -83,57 +117,144 @@ class EventSender:
         layer_mode: LayerMode | str = LayerMode.MANAGED,
         session_id: str | None = None,
         max_pending_transactions: int = _MAX_PENDING_TRANSACTIONS,
-        background_send: bool = False,
     ):
         if role != "emitter":
             raise ValueError("EventSender role must be 'emitter'")
         if max_pending_transactions < 1:
             raise ValueError("max_pending_transactions must be positive")
-        self.host = host
-        self.port = port
-        self.client_id = client_id
-        self.role = role
-        self.origin = origin
-        self.department = department
+        self._host = host
+        self._port = port
+        self._client_id = client_id
+        self._origin = origin
+        self._department = department
+        self._layer_mode = LayerMode(layer_mode)
+        self._handshake_timeout = handshake_timeout
+        self._max_pending_transactions = max_pending_transactions
         self.token = token
-        self.layer_mode = LayerMode(layer_mode)
-        self.layer_mode_active = LayerMode.MANAGED
-        self.handshake_timeout = handshake_timeout
-        self.session_id = session_id or uuid.uuid4().hex
-        if not self.session_id or len(self.session_id) > 128:
-            raise ValueError("session_id must contain 1-128 characters")
-        self.max_pending_transactions = max_pending_transactions
-        self._background_send = background_send
+        self._token_provider = token_provider
         self._on_token_issued = on_token_issued
         self._on_stage_metadata = on_stage_metadata
-        self._token_provider = token_provider
 
-        self.sock: socket.socket | None = None
-        self.auth_rejected = False
-        self.hello_rejected = False
-        self.rejection_reason = ""
-        self.stage_metadata: dict = {}
+        config = _client_backend.ProducerConfig()
+        config.host = host
+        config.port = port
+        config.client_id = client_id
+        config.origin = origin or ""
+        config.department = department or ""
+        config.layer_mode = _client_backend.NATIVE_LAYER_MODES[self._layer_mode]
+        config.session_id = _session_id(session_id)
+        config.handshake_timeout = handshake_timeout
+        config.max_pending_transactions = max_pending_transactions
+        notifications = _client_backend.NotificationQueue()
+        self._endpoint = _client_backend.ProducerEndpoint(config, notifications)
+        self._driver = _client_backend.ProducerDriver(
+            self._endpoint,
+            notifications,
+            _client_backend.TcpSocketFactory(),
+            **_driver_callbacks(self),
+        )
+        weakref.finalize(self, self._driver.stop)
+        self._started = False
+        # Pairs each transaction ID with the frame that encodes it.
+        self._submit_lock = threading.Lock()
+        # Builds the recovery objects once per failure, so their identity holds.
+        self._recovery_lock = threading.Lock()
+        self._recovery: tuple[RecoveryArtifact, RecoveryIncident] | None = None
 
-        # Reentrant: background submission holds it while appending to the outbox.
-        self._condition = threading.Condition(threading.RLock())
-        self._connect_lock = threading.Lock()
-        self._connect_epoch = 0
-        self._connect_thread: threading.Thread | None = None
-        self._connecting_socket: socket.socket | None = None
-        self._connect_active = 0
-        self._connect_retry_at = 0.0
-        self._connect_retry_delay = 1.0
-        self._send_lock = threading.Lock()
-        self._reader_thread: threading.Thread | None = None
-        self._writer_thread: threading.Thread | None = None
-        self._socket_generation = 0
-        self._session = _client_backend.ProducerSession(max_pending_transactions)
-        self._failure: TransactionFailure | None = None
-        self._recovery_artifact: RecoveryArtifact | None = None
-        self._recovery_incident: RecoveryIncident | None = None
-        self._retry_after_until = 0.0
-        self._server_instance = ""
-        self._acknowledged_checkpoint: MirrorCheckpoint | None = None
+    @property
+    def host(self) -> str:
+        return self._host
+
+    @property
+    def port(self) -> int:
+        return self._port
+
+    @property
+    def client_id(self) -> str:
+        return self._client_id
+
+    @property
+    def role(self) -> str:
+        return "emitter"
+
+    @property
+    def origin(self) -> str | None:
+        return self._origin
+
+    @property
+    def department(self) -> str | None:
+        return self._department
+
+    @property
+    def layer_mode(self) -> LayerMode:
+        return self._layer_mode
+
+    @property
+    def handshake_timeout(self) -> float:
+        return self._handshake_timeout
+
+    @property
+    def max_pending_transactions(self) -> int:
+        return self._max_pending_transactions
+
+    @property
+    def session_id(self) -> str:
+        """The producer session; :meth:`abandon_rejected_session` starts a new one."""
+        return self._endpoint.status().session_id
+
+    @property
+    def is_connected(self) -> bool:
+        return self._endpoint.status().connected
+
+    @property
+    def connected(self) -> bool:
+        return self.is_connected
+
+    @property
+    def layer_mode_active(self) -> LayerMode:
+        return _client_backend.LAYER_MODES[self._endpoint.status().layer_mode_active]
+
+    @property
+    def stage_metadata(self) -> dict:
+        """The latest stage metadata the server authored, keyed as on the wire."""
+        return _client_backend.stage_metadata_fields(self._endpoint.status().metadata)
+
+    @property
+    def auth_rejected(self) -> bool:
+        rejection = self._endpoint.status().rejection
+        return rejection is not None and rejection.authentication
+
+    @property
+    def hello_rejected(self) -> bool:
+        rejection = self._endpoint.status().rejection
+        return rejection is not None and not rejection.authentication
+
+    @property
+    def rejection_reason(self) -> str:
+        """Why the latest handshake was refused, or the failure that refuses new ones."""
+        rejection = self._endpoint.status().rejection
+        if rejection is not None:
+            if rejection.authentication:
+                return rejection.reason
+            return rejection.reason or "connection rejected"
+        failure = self.transaction_failure
+        return "" if failure is None else failure.reason
+
+    @property
+    def pending_transaction_count(self) -> int:
+        return self._endpoint.status().pending_transactions
+
+    @property
+    def pending_event_count(self) -> int:
+        return self._endpoint.status().pending_events
+
+    @property
+    def acknowledged_transaction_count(self) -> int:
+        return self._endpoint.status().acknowledged_transactions
+
+    @property
+    def acknowledged_event_count(self) -> int:
+        return self._endpoint.status().acknowledged_events
 
     @property
     def acknowledged_checkpoint(self) -> MirrorCheckpoint | None:
@@ -142,489 +263,104 @@ class EventSender:
         None means pending/rejected work or a peer without checkpoint support.
         A Hello highwater alone does not establish a mirror checkpoint.
         """
-        with self._condition:
-            if self._failure is not None or not self._session.empty:
-                return None
-            return self._acknowledged_checkpoint
-
-    @property
-    def is_connected(self) -> bool:
-        with self._condition:
-            return self.sock is not None
-
-    @property
-    def connected(self) -> bool:
-        return self.is_connected
-
-    @property
-    def pending_transaction_count(self) -> int:
-        return self._session.pending_transaction_count
-
-    @property
-    def pending_event_count(self) -> int:
-        return self._session.pending_event_count
-
-    @property
-    def acknowledged_transaction_count(self) -> int:
-        return self._session.acknowledged_transaction_count
-
-    @property
-    def acknowledged_event_count(self) -> int:
-        return self._session.acknowledged_event_count
-
-    @property
-    def _next_txn_id(self) -> int:
-        """Compatibility view of the native outbox sequence cursor."""
-        return self._session.next_transaction_id
-
-    @property
-    def transaction_error(self) -> str:
-        with self._condition:
-            return str(self._failure) if self._failure is not None else ""
+        checkpoint = self._endpoint.acknowledged_checkpoint()
+        if checkpoint is None:
+            return None
+        return MirrorCheckpoint(
+            server_instance=checkpoint.server_instance,
+            epoch=checkpoint.epoch,
+            head_seq=checkpoint.head_sequence,
+        )
 
     @property
     def transaction_failure(self) -> TransactionFailure | None:
         """Structured terminal result for UI and recovery policy."""
-        with self._condition:
-            return self._failure
+        recovery = self._current_recovery()
+        return None if recovery is None else recovery[0].failure
+
+    @property
+    def transaction_error(self) -> str:
+        failure = self.transaction_failure
+        return "" if failure is None else str(failure)
 
     @property
     def recovery_incident(self) -> RecoveryIncident | None:
         """Immutable summary suitable for status polling and host UI."""
-        with self._condition:
-            return self._recovery_incident
+        recovery = self._current_recovery()
+        return None if recovery is None else recovery[1]
 
     @property
     def recovery_artifact(self) -> RecoveryArtifact | None:
         """Exact quarantined bytes for inspection or application-owned export."""
-        with self._condition:
-            return self._recovery_artifact
+        recovery = self._current_recovery()
+        return None if recovery is None else recovery[0]
 
     @property
     def recovery_disposition(self) -> RejectionDisposition | None:
         """Recommended response category for the current rejection."""
-        with self._condition:
-            return self._failure.disposition if self._failure is not None else None
+        failure = self.transaction_failure
+        return None if failure is None else failure.disposition
 
     @property
     def recovery_required(self) -> bool:
         """Whether a deterministic rejection quarantined this producer session."""
-        with self._condition:
-            return self._session.recovery_required
+        return self._current_recovery() is not None
 
     def request_connect(self, timeout: float | None = 2.0) -> bool:
         """Start one background attempt, returning whether it was scheduled.
 
         Call again from an update loop to retry transient failures. Attempts
         back off from one to eight seconds; rejection requires explicit connect.
-        Callbacks run on the handshake thread, just as for synchronous connect.
+        Callbacks run on the connection thread, just as for synchronous connect.
         """
-        with self._condition:
-            if (
-                self.sock is not None
-                or self._connect_active
-                or self._connect_thread is not None
-                or self.auth_rejected
-                or self.hello_rejected
-                or self._session.recovery_required
-                or time.monotonic() < max(self._connect_retry_at, self._retry_after_until)
-            ):
-                return False
-            epoch = self._connect_epoch
-            thread = threading.Thread(
-                target=self._connect_worker,
-                args=(timeout, epoch),
-                name=f"openusdconnect-reconnect-{self.client_id}",
-                daemon=True,
-            )
-            self._connect_thread = thread
-            try:
-                thread.start()
-            except Exception:
-                self._connect_thread = None
-                raise
-            return True
-
-    def _connect_worker(self, timeout: float | None, epoch: int) -> None:
-        connected = False
-        try:
-            connected = self._connect_attempt(timeout, epoch)
-        except Exception:
-            LOG.exception("EventSender: background connect failed")
-        finally:
-            with self._condition:
-                if epoch == self._connect_epoch:
-                    if connected:
-                        self._connect_retry_at = 0.0
-                        self._connect_retry_delay = 1.0
-                    else:
-                        self._connect_retry_at = time.monotonic() + self._connect_retry_delay
-                        self._connect_retry_delay = min(8.0, self._connect_retry_delay * 2)
-                self._connect_thread = None
-                self._condition.notify_all()
+        if not self._endpoint.request_connect(timeout):
+            return False
+        self._start()
+        self._driver.wake()
+        return True
 
     def cancel_connect(self) -> bool:
         """Invalidate pending handshakes without waiting; report completion.
 
         An already published connection is left intact. Use disconnect to close
-        it as well. A blocked connection creation may finish later, but cannot
-        publish its socket after cancellation.
+        it as well. A cancelled attempt can no longer publish its connection.
         """
-        with self._condition:
-            self._connect_epoch += 1
-            self._connect_retry_at = 0.0
-            self._connect_retry_delay = 1.0
-            sock = self._connecting_socket
-            finished = not self._connect_active and self._connect_thread is None
-        self._close_socket_object(sock)
+        finished = self._endpoint.cancel_connect()
+        self._driver.wake()
         return finished
 
     def connect(self, timeout: float | None = None) -> bool:
-        """Handshake, start the result reader, and replay the exact outbox.
+        """Handshake and replay the exact outbox; return whether connected.
 
-        ``timeout`` bounds this attempt and never extends the configured
-        handshake timeout.
+        An attempt already in flight is waited for first. ``timeout`` bounds the
+        whole call and never extends the configured handshake timeout.
         """
-        with self._condition:
-            epoch = self._connect_epoch
-        return self._connect_attempt(timeout, epoch)
-
-    def _connect_attempt(self, timeout: float | None, epoch: int) -> bool:
-        budget = self.handshake_timeout
-        if timeout is not None:
-            budget = min(budget, max(timeout, 0.0))
-        deadline = time.monotonic() + budget
-        with self._condition:
-            if epoch != self._connect_epoch:
-                return False
-            self._connect_active += 1
-        acquired = False
-        try:
-            acquired = self._connect_lock.acquire(timeout=max(0.0, budget))
-            if not acquired:
-                return False
-            return self._connect_locked(deadline, epoch)
-        finally:
-            with self._condition:
-                self._connect_active -= 1
-                if acquired:
-                    self._connecting_socket = None
-                self._condition.notify_all()
-            if acquired:
-                self._connect_lock.release()
-
-    def _connect_locked(self, deadline: float, epoch: int) -> bool:
-        # The connect lock is held throughout handshake and replay.
-        with self._condition:
-            if epoch != self._connect_epoch:
-                return False
-            if self.sock is not None:
-                return True
-            if self._session.recovery_required or time.monotonic() < self._retry_after_until:
-                return False
-
-        connect_timeout = deadline - time.monotonic()
-        if connect_timeout <= 0.0:
-            return False
-        if self._token_provider is not None:
-            self.token = self._token_provider()
-
-        connection = self._session.begin_connection()
-        if connection is None:
-            return False
-        generation = connection.generation
-
-        self.auth_rejected = False
-        self.hello_rejected = False
-        self.rejection_reason = ""
-        sock: socket.socket | None = None
-        published = False
-        acquired_send = False
-        try:
-            sock = socket.create_connection((self.host, self.port), timeout=connect_timeout)
-            with self._condition:
-                if epoch != self._connect_epoch:
-                    return False
-                self._connecting_socket = sock
-            sock.settimeout(max(0.001, deadline - time.monotonic()))
-            sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
-            send_msg(
-                sock,
-                make_hello(
-                    self.role,
-                    client_id=self.client_id,
-                    origin=self.origin,
-                    department=self.department,
-                    token=self.token,
-                    layer_mode=self.layer_mode,
-                    producer_session_id=self.session_id,
-                ),
-            )
-            sock.settimeout(max(0.001, deadline - time.monotonic()))
-            buf = recv_framed(sock)
-            with self._condition:
-                if epoch != self._connect_epoch:
-                    return False
-            env = decode_envelope(buf)
-            pt = env.PayloadType()
-            if not self._accept_handshake_response(sock, env, pt, generation):
-                return False
-
-            # Serialize publication of the socket with outbox replay. A new
-            # send cannot overtake an older pending transaction here.
-            acquired_send = self._send_lock.acquire(timeout=max(0.0, deadline - time.monotonic()))
-            if not acquired_send:
-                return False
-            with self._condition:
-                if epoch != self._connect_epoch or time.monotonic() >= deadline:
-                    return False
-                self.sock = sock
-                self._socket_generation = generation
-                self._connecting_socket = None
-                published = True
-            sock.settimeout(max(0.001, deadline - time.monotonic()))
-            replayed = 0
-            if not self._background_send:
-                while pending := self._session.claim_next_unsent(generation):
-                    remaining = deadline - time.monotonic()
-                    if remaining <= 0:
-                        raise TimeoutError("reconnect replay timed out")
-                    sock.settimeout(remaining)
-                    send_raw(sock, pending[1])
-                    replayed += 1
-            sock.settimeout(None)
-        except Exception as exc:
-            if not published:
-                if isinstance(exc, OSError):
-                    # An unreachable server is expected while retrying.
-                    LOG.info("EventSender: connect to %s:%d failed: %s", self.host, self.port, exc)
-                else:
-                    LOG.exception("EventSender: handshake failed")
-                return False
-            self._close(expected=sock)
-            if not isinstance(exc, OSError):
-                raise
-            LOG.info("EventSender: reconnect replay failed", exc_info=True)
-            return False
-        finally:
-            if acquired_send:
-                self._send_lock.release()
-            # Until publication this attempt owns both resources. Afterwards,
-            # _close(expected=sock) handles failures without closing a newer socket.
-            if not published:
-                self._session.disconnect(generation)
-                self._close_socket_object(sock)
-
-        reader = threading.Thread(
-            target=self._read_results,
-            args=(sock, generation),
-            name=f"openusdconnect-ack-{self.client_id}",
-            daemon=True,
-        )
-        try:
-            with self._condition:
-                if self.sock is not sock or generation != self._socket_generation:
-                    return False
-                self._reader_thread = reader
-                reader.start()
-                if self._background_send:
-                    writer = threading.Thread(
-                        target=self._write_pending,
-                        args=(sock, generation),
-                        name=f"openusdconnect-send-{self.client_id}",
-                        daemon=True,
-                    )
-                    writer.start()
-                    self._writer_thread = writer
-        except Exception:
-            self._close(expected=sock)
-            raise
-        LOG.info(
-            "EventSender connected to %s:%d (session=%s, pending=%d)",
-            self.host,
-            self.port,
-            self.session_id,
-            replayed,
-        )
-        return True
-
-    def _accept_handshake_response(
-        self, sock: socket.socket, env, payload_type: int, generation: int
-    ) -> bool:
-        """Validate one server hello and initialize connection metadata.
-
-        Application callbacks are observers. Their failure is logged but does
-        not invalidate an otherwise completed protocol handshake.
-        """
-        if payload_type == PayloadType.AuthRejected:
-            _, rejected = resolve_payload(env)
-            self.rejection_reason = self._decode_string(rejected.Reason())
-            self.auth_rejected = True
-            return False
-        if payload_type == PayloadType.HelloRejected:
-            _, rejected = resolve_payload(env)
-            self.rejection_reason = self._decode_string(rejected.Reason()) or "connection rejected"
-            self.hello_rejected = True
-            return False
-        if payload_type != PayloadType.HelloOk:
-            LOG.error("EventSender: unexpected handshake response %s", payload_type)
-            return False
-
-        _, hello_ok = resolve_payload(env)
-        with self._condition:
-            self._server_instance = self._decode_string(hello_ok.ServerInstance()) or ""
-            self._acknowledged_checkpoint = None
-        active_mode = LayerMode("shared_stage" if hello_ok.LayerMode() else "managed")
-        if active_mode is not self.layer_mode:
-            self.rejection_reason = (
-                f"server negotiated {active_mode.value} instead of {self.layer_mode.value}"
-            )
-            self.hello_rejected = True
-            return False
-        self.layer_mode_active = active_mode
-
-        committed_through = int(hello_ok.CommittedThrough())
-        result = self._session.accept_hello(generation, committed_through)
-        if result != _client_backend.ProducerResult.ACCEPTED:
-            self.rejection_reason = self._highwater_failure_reason(result, committed_through)
-            self._record_session_failure(
-                txn_id=committed_through,
-                code=int(TransactionRejectionCode.UnexpectedId),
-                reason=self.rejection_reason,
-            )
-            return False
-
-        issued = self._decode_string(hello_ok.Token())
-        if issued:
-            self.token = issued
-            self._notify_handshake_callback(
-                self._on_token_issued,
-                issued,
-                name="on_token_issued",
-            )
-
-        metadata = hello_ok.StageMetadata()
-        if metadata is not None:
-            decoded = _decode_stage_metadata_table(metadata)
-            if decoded:
-                self.stage_metadata = decoded
-                self._notify_handshake_callback(
-                    self._on_stage_metadata,
-                    decoded,
-                    name="on_stage_metadata",
-                )
-        sock.settimeout(None)
-        return True
-
-    @staticmethod
-    def _notify_handshake_callback(callback, value, *, name: str) -> None:
-        if callback is None:
-            return
-        try:
-            callback(value)
-        except Exception:
-            LOG.exception("EventSender: %s callback failed", name)
+        self._start()
+        return self._driver.connect(timeout)
 
     def disconnect(self) -> None:
-        """Close the socket while retaining unacknowledged transactions."""
-        self.cancel_connect()
-        if self._background_send:
-            # Shutdown must interrupt a blocked writer, not wait for its lock.
-            self._close()
-            return
-        with self._condition:
-            if self.sock is None:
-                return
-        with self._send_lock:
-            with self._condition:
-                sock = self.sock
-            if sock is not None:
-                try:
-                    send_msg(sock, make_quit())
-                except OSError:
-                    pass
-        if sock is not None:
-            self._close(expected=sock)
+        """Close the connection while retaining unacknowledged transactions."""
+        self._endpoint.disconnect()
+        self._driver.wake()
 
     def send_events(self, events: list, *, layer_key: str = "") -> bool:
         """Submit a transaction without waiting for its durable result.
 
         ``True`` means the encoded bytes are owned by the bounded outbox, even
-        if the socket fails during this call. ``False`` means no ownership was
-        taken (disconnected before submission, empty input, full outbox, or a
-        terminal rejection).
+        if the connection fails afterwards. ``False`` means no ownership was
+        taken (disconnected, empty input, full outbox, or a terminal rejection).
         """
         if not events:
             return False
-        validate_events(events, layer_mode=self.layer_mode)
-        submission_lock = self._condition if self._background_send else self._send_lock
-        try:
-            # Synchronous callers allocate IDs in socket order. Background
-            # callers only append; the writer claims that same ordered outbox.
-            with submission_lock:
-                with self._condition:
-                    if self.sock is None or self._failure is not None:
-                        return False
-                    if not self._session.can_append:
-                        return False
-                    generation = self._socket_generation
-                    txn_id = self._session.next_transaction_id
-                    payload = encode_message(
-                        make_txn(
-                            events,
-                            layer_key=layer_key,
-                            txn_id=txn_id,
-                        )
-                    )
-                    result = self._session.append(
-                        generation, txn_id, payload, len(events), layer_key
-                    )
-                    if result != _client_backend.ProducerResult.ACCEPTED:
-                        return False
-                    if self._background_send:
-                        self._condition.notify_all()
-                        return True
-                    sock = self.sock
-                if sock is not None:
-                    send_raw(sock, payload)
-        except OSError:
-            LOG.info(
-                "EventSender: send became ambiguous; retaining transaction",
-                exc_info=True,
-            )
-            self._close(expected=sock)
+        validate_events(events, layer_mode=self._layer_mode)
+        with self._submit_lock:
+            txn_id = self._endpoint.next_transaction_id()
+            payload = encode_message(make_txn(events, layer_key=layer_key, txn_id=txn_id))
+            result = self._endpoint.append(txn_id, payload, len(events), layer_key)
+        if result != _client_backend.ProducerResult.ACCEPTED:
+            return False
+        self._driver.wake()
         return True
-
-    def _write_pending(self, sock: socket.socket, generation: int) -> None:
-        """Send the native outbox in order for exactly one socket generation."""
-        try:
-            while True:
-                with self._condition:
-                    if (
-                        self.sock is not sock
-                        or self._socket_generation != generation
-                        or self._failure is not None
-                    ):
-                        return
-                    pending = self._session.claim_next_unsent(generation)
-                    if pending is None:
-                        self._condition.wait()
-                        continue
-                with self._send_lock:
-                    with self._condition:
-                        if self.sock is not sock or self._socket_generation != generation:
-                            return
-                    send_raw(sock, pending[1])
-        except OSError:
-            LOG.info("EventSender: background send failed; retaining transaction", exc_info=True)
-        except Exception:
-            LOG.exception("EventSender: background writer failed")
-        finally:
-            self._close(expected=sock)
-            with self._condition:
-                if self._writer_thread is threading.current_thread():
-                    self._writer_thread = None
-                self._condition.notify_all()
 
     def repair_rejected_transaction(self, events: list, *, layer_key: str = "") -> int:
         """Replace a recoverable rejected transaction at the same ordered ID.
@@ -637,33 +373,21 @@ class EventSender:
         """
         if not events:
             raise ValueError("repair events must not be empty")
-        validate_events(events, layer_mode=self.layer_mode)
-        with self._condition:
-            failure = self._failure
-            if failure is None:
+        validate_events(events, layer_mode=self._layer_mode)
+        with self._recovery_lock:
+            recovery = self._current_recovery_locked()
+            if recovery is None:
                 raise RuntimeError("there is no rejected transaction to retry")
+            failure = recovery[0].failure
             if failure.disposition is not RejectionDisposition.RECOVERABLE_CONFLICT:
                 raise RuntimeError(
                     f"{failure.code_name} is {failure.disposition.value}, not recoverable"
                 )
-
-        # A rejection normally already closes this socket. Make the boundary
-        # explicit so a racing reader cannot leave a repaired outbox attached to
-        # the connection that delivered the rejection.
-        self.disconnect()
-        payload = encode_message(make_txn(events, layer_key=layer_key, txn_id=failure.txn_id))
-        with self._send_lock:
-            with self._condition:
-                if self._failure is not failure:
-                    raise RuntimeError("transaction rejection changed during recovery")
-                result = self._session.repair_rejected(payload, len(events), layer_key)
-                if result != _client_backend.ProducerResult.ACCEPTED:
-                    raise RuntimeError(f"native recovery rejected repair: {result}")
-                self._failure = None
-                self._recovery_artifact = None
-                self._recovery_incident = None
-                self._retry_after_until = 0.0
-                self._condition.notify_all()
+            payload = encode_message(make_txn(events, layer_key=layer_key, txn_id=failure.txn_id))
+            result = self._endpoint.repair_rejected(payload, len(events), layer_key)
+            if result != _client_backend.ProducerResult.ACCEPTED:
+                raise RuntimeError(f"native recovery rejected repair: {result}")
+            self._recovery = None
         return failure.txn_id
 
     def abandon_rejected_session(self, *, session_id: str | None = None) -> RecoveryArtifact:
@@ -673,54 +397,30 @@ class EventSender:
         its USD stage before reconnecting or submitting rebuilt intent with the
         new producer session.
         """
-        replacement = session_id or uuid.uuid4().hex
-        if not replacement or len(replacement) > 128:
-            raise ValueError("session_id must contain 1-128 characters")
-
-        with self._condition:
-            failure = self._failure
-            artifact = self._recovery_artifact
-            previous_session_id = self.session_id
-            if failure is None or artifact is None:
+        replacement = _session_id(session_id)
+        with self._recovery_lock:
+            recovery = self._current_recovery_locked()
+            if recovery is None:
                 raise RuntimeError("there is no rejected producer session to abandon")
-            if replacement == previous_session_id:
+            artifact = recovery[0]
+            if replacement == artifact.producer_session_id:
                 raise ValueError("replacement session_id must differ from rejected session")
-
-        self.disconnect()
-        with self._send_lock:
-            with self._condition:
-                if self._failure is not failure or self._recovery_artifact is not artifact:
-                    raise RuntimeError("transaction rejection changed during recovery")
-                self._session.reset_session()
-                self.session_id = replacement
-                self._failure = None
-                self._recovery_artifact = None
-                self._recovery_incident = None
-                self._retry_after_until = 0.0
-                self.rejection_reason = ""
-                self._condition.notify_all()
+            # The checks above are the endpoint's preconditions.
+            abandoned = self._endpoint.abandon_rejected_session(replacement)
+            assert abandoned is not None
+            self._recovery = None
         return artifact
 
     def send_message(self, msg: dict) -> bool:
         """Send a non-transaction protocol message (not retained for replay)."""
-        with self._condition:
-            sock = self.sock
-        if sock is None:
+        if not self._endpoint.queue_control(encode_message(msg)):
             return False
-        try:
-            with self._send_lock:
-                with self._condition:
-                    if self.sock is not sock:
-                        return False
-                send_msg(sock, msg)
-            return True
-        except OSError:
-            self._close(expected=sock)
-            return False
+        self._driver.wake()
+        return True
 
     def drain_acknowledged_event_count(self) -> int:
         """Return successful event acknowledgements received since the last drain."""
-        return self._session.drain_acknowledged_event_count()
+        return self._endpoint.drain_acknowledged_event_count()
 
     def flush(self, timeout: float | None = None) -> bool:
         """Wait for all submitted transactions to reach a terminal result.
@@ -728,39 +428,16 @@ class EventSender:
         Reconnects and replays while time remains. Returns ``False`` on timeout;
         a deterministic server rejection raises ``TransactionRejectedError``.
         """
-        deadline = None if timeout is None else time.monotonic() + max(timeout, 0.0)
-        while True:
-            with self._condition:
-                if self._failure is not None:
-                    raise TransactionRejectedError(self._failure)
-                if self._session.empty:
-                    return True
-                connected = self.sock is not None
-                retry_at = self._retry_after_until
-                remaining = None if deadline is None else deadline - time.monotonic()
-                if remaining is not None and remaining <= 0:
-                    return False
-                if connected:
-                    self._condition.wait(
-                        timeout=0.25 if remaining is None else min(0.25, remaining)
-                    )
-                    continue
-            delay = max(0.0, retry_at - time.monotonic())
-            if delay:
-                if deadline is not None and time.monotonic() + delay >= deadline:
-                    return False
-                time.sleep(min(delay, 0.25))
-                continue
-            remaining = None if deadline is None else max(0.0, deadline - time.monotonic())
-            if not self.connect(timeout=remaining):
-                with self._condition:
-                    remaining = None if deadline is None else deadline - time.monotonic()
-                    if remaining is not None and remaining <= 0:
-                        return False
-                    self._condition.wait(timeout=0.1 if remaining is None else min(0.1, remaining))
+        result = self._driver.flush(timeout)
+        if result == _client_backend.FlushResult.RECOVERY_REQUIRED:
+            failure = self.transaction_failure
+            # None only when another thread resolved the failure meanwhile.
+            if failure is not None:
+                raise TransactionRejectedError(failure)
+        return result == _client_backend.FlushResult.FLUSHED
 
     def claim_playback(self, time: float | None = None) -> bool:
-        return self.send_message(make_claim_playback(self.client_id, time=time))
+        return self.send_message(make_claim_playback(self._client_id, time=time))
 
     def send_playback_control(
         self,
@@ -771,160 +448,55 @@ class EventSender:
     ) -> bool:
         return self.send_message(make_playback_control(action, time=time, rate=rate))
 
-    def _read_results(self, sock: socket.socket, generation: int) -> None:
-        try:
-            while True:
-                buf = recv_framed(sock)
-                env = decode_envelope(buf)
-                if env.PayloadType() == PayloadType.TransactionResult:
-                    _, result = resolve_payload(env)
-                    self._accept_result(result, generation)
-                elif env.PayloadType() == PayloadType.RateLimited:
-                    _, limited = resolve_payload(env)
-                    with self._condition:
-                        self._retry_after_until = max(
-                            self._retry_after_until,
-                            time.monotonic() + float(limited.RetryAfter()),
-                        )
-                    break
-        except (OSError, IncompleteRead, MessageTooLarge, ValueError):
-            pass
-        finally:
-            with self._condition:
-                is_current = generation == self._socket_generation and self.sock is sock
-            if is_current:
-                self._close(expected=sock)
+    def _start(self) -> None:
+        """Start the connection thread once; it runs until this sender is collected."""
+        if not self._started:
+            self._driver.start()
+            self._started = True
 
-    def _accept_result(self, result, generation: int) -> None:
-        txn_id = int(result.TxnId())
-        rejected_socket = None
-        with self._condition:
-            if generation != self._socket_generation or self.sock is None:
-                return
-            status_value = int(result.Status())
-            if status_value == TransactionStatus.Acknowledged:
-                accepted = self._session.acknowledge_through(generation, txn_id)
-                if accepted == _client_backend.ProducerResult.STALE_GENERATION:
-                    return
-                if accepted == _client_backend.ProducerResult.ACCEPTED:
-                    checkpoint = result.Checkpoint()
-                    self._acknowledged_checkpoint = (
-                        MirrorCheckpoint(
-                            server_instance=self._server_instance,
-                            epoch=int(checkpoint.Epoch()),
-                            head_seq=int(checkpoint.HeadSeq()),
-                        )
-                        if self._server_instance and checkpoint is not None
-                        else None
-                    )
-                if accepted != _client_backend.ProducerResult.ACCEPTED:
-                    failure = TransactionFailure(
-                        txn_id=txn_id,
-                        code=int(TransactionRejectionCode.UnexpectedId),
-                        reason=self._highwater_failure_reason(accepted, txn_id),
-                    )
-                    self._record_session_failure_locked(failure)
-                    rejected_socket = self.sock
-            else:
-                code = int(result.RejectionCode())
-                reason = self._decode_string(result.Reason())
-                failure = TransactionFailure(
-                    txn_id=txn_id,
-                    code=code,
-                    reason=reason,
-                    expected_txn_id=int(result.ExpectedTxnId()),
-                )
-                accepted = self._session.reject(
-                    generation, txn_id, _client_backend.rejection_disposition(code)
-                )
-                if accepted == _client_backend.ProducerResult.STALE_GENERATION:
-                    return
-                if accepted == _client_backend.ProducerResult.TRANSACTION_MISSING:
-                    failure = TransactionFailure(
-                        txn_id=txn_id,
-                        code=int(TransactionRejectionCode.UnexpectedId),
-                        reason=f"server rejected unknown transaction {txn_id}",
-                    )
-                self._record_session_failure_locked(failure)
-                rejected_socket = self.sock
-            self._condition.notify_all()
-        if rejected_socket is not None:
-            self._close(expected=rejected_socket)
+    def _current_recovery(self) -> tuple[RecoveryArtifact, RecoveryIncident] | None:
+        with self._recovery_lock:
+            return self._current_recovery_locked()
 
-    def _record_session_failure(
-        self, *, txn_id: int, code: int, reason: str, expected_txn_id: int = 0
-    ) -> None:
-        with self._condition:
-            self._record_session_failure_locked(
-                TransactionFailure(
-                    txn_id=txn_id,
-                    code=code,
-                    reason=reason,
-                    expected_txn_id=expected_txn_id,
-                )
+    def _current_recovery_locked(self) -> tuple[RecoveryArtifact, RecoveryIncident] | None:
+        # Only repair and abandon clear a failure, and both reset this cache.
+        if self._recovery is None:
+            native = self._endpoint.artifact()
+            if native is not None:
+                artifact = _artifact(native)
+                self._recovery = (artifact, make_recovery_incident(artifact))
+        return self._recovery
+
+    def _connection_token(self) -> str | None:
+        """The token for the next handshake; ``None`` abandons the attempt."""
+        if self._token_provider is not None:
+            try:
+                self.token = self._token_provider()
+            except Exception:
+                LOG.exception("EventSender: token provider failed")
+                return None
+        return self.token or ""
+
+    def _deliver(self, notification) -> None:
+        """Run the callback for a notification on the connection thread."""
+        if isinstance(notification, _client_backend.TokenIssued):
+            self.token = notification.token
+            self._notify(self._on_token_issued, notification.token, "on_token_issued")
+        elif isinstance(notification, _client_backend.StageMetadata):
+            self._notify(
+                self._on_stage_metadata,
+                _client_backend.stage_metadata_fields(notification),
+                "on_stage_metadata",
             )
-            self._condition.notify_all()
-
-    def _record_session_failure_locked(self, failure: TransactionFailure) -> None:
-        self._failure = failure
-        self._recovery_artifact = RecoveryArtifact(
-            producer_session_id=self.session_id,
-            failure=failure,
-            transactions=tuple(
-                QuarantinedTransaction(
-                    txn_id=pending_txn_id,
-                    payload=payload,
-                    event_count=event_count,
-                    layer_key=layer_key,
-                )
-                for pending_txn_id, payload, event_count, layer_key in self._session.entries()
-            ),
-        )
-        self._recovery_incident = make_recovery_incident(self._recovery_artifact)
-
-    def _highwater_failure_reason(self, result, transaction_id: int) -> str:
-        if result == _client_backend.ProducerResult.HIGHWATER_AHEAD:
-            return (
-                f"server producer highwater {transaction_id} is ahead of local "
-                f"transaction {self._session.next_transaction_id - 1}"
-            )
-        if result == _client_backend.ProducerResult.HIGHWATER_REGRESSED:
-            return (
-                f"server producer highwater regressed from "
-                f"{self._session.last_acknowledged_transaction_id} to {transaction_id}"
-            )
-        return f"invalid producer result for transaction {transaction_id}: {result}"
-
-    def _close(self, *, expected: socket.socket | None = None) -> None:
-        with self._condition:
-            sock = self.sock
-            if sock is None or (expected is not None and sock is not expected):
-                return
-            self.sock = None
-            # An unpublished handshake still owns its native connection and
-            # ends it itself; only the published socket's generation ends here.
-            self._session.disconnect(self._socket_generation)
-            self._condition.notify_all()
-        self._close_socket_object(sock)
 
     @staticmethod
-    def _close_socket_object(sock: socket.socket | None) -> None:
-        if sock is None:
+    def _notify(callback: Callable | None, value, name: str) -> None:
+        if callback is None:
             return
         try:
-            sock.shutdown(socket.SHUT_RDWR)
-        except OSError:
-            pass
-        try:
-            sock.close()
-        except OSError:
-            pass
-
-    @staticmethod
-    def _decode_string(value) -> str:
-        if isinstance(value, bytes):
-            return value.decode("utf-8")
-        return value or ""
+            callback(value)
+        except Exception:
+            LOG.exception("EventSender: %s callback failed", name)
 
 
 __all__ = ["EventSender", "TransactionRejectedError"]

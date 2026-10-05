@@ -1136,7 +1136,7 @@ def _try_send_dirty_events():
     """Build and send dirty events if emitter and sender are both connected."""
     if _state.author is not None and _state.author._applying_remote:
         return
-    if _state.notice_emitter is None or _state.sender is None or _state.sender.sock is None:
+    if _state.notice_emitter is None or _state.sender is None or not _state.sender.connected:
         return
     events = _state.notice_emitter.prepare_events_for_send()
     if events:
@@ -1580,7 +1580,7 @@ class USD_CONNECT_OT_connect_emitter(bpy.types.Operator):
         if not _cancel_emitter_reconnect():
             self.report({"WARNING"}, "Emitter reconnect cancellation is still finishing")
             return {"CANCELLED"}
-        if _state.sender is not None and _state.sender.sock is not None:
+        if _state.sender is not None and _state.sender.connected:
             self.report({"INFO"}, "Already connected")
             return {"CANCELLED"}
         sender = _state.sender

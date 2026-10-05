@@ -32,6 +32,7 @@ struct ScriptedChannel final
 	std::vector<std::uint8_t> Outbound;
 	bool Receiving = false;
 	bool ClientClosed = false;
+	bool SendsStalled = false;
 };
 
 struct ScriptedAttempt final
@@ -117,9 +118,9 @@ public:
 		return SocketResult::Success;
 	}
 
-	SocketResult SendAll(const std::uint8_t* data, std::size_t size, TimePoint) override
+	SocketResult SendAll(const std::uint8_t* data, std::size_t size, TimePoint deadline) override
 	{
-		std::lock_guard lock(State->Mutex);
+		std::unique_lock lock(State->Mutex);
 		if (Interrupted)
 		{
 			return SocketResult::Interrupted;
@@ -127,6 +128,15 @@ public:
 		if (!Channel)
 		{
 			return SocketResult::Failed;
+		}
+		if (Channel->SendsStalled)
+		{
+			const bool interrupted = State->Changed.wait_until(lock, deadline,
+															   [this]
+															   {
+																   return Interrupted;
+															   });
+			return interrupted ? SocketResult::Interrupted : SocketResult::Timeout;
 		}
 		Channel->Outbound.insert(Channel->Outbound.end(), data, data + size);
 		State->Changed.notify_all();
@@ -268,10 +278,26 @@ void ScriptedConnection::Close()
 	State->Changed.notify_all();
 }
 
+void ScriptedConnection::StallSends()
+{
+	std::lock_guard lock(State->Mutex);
+	Channel->SendsStalled = true;
+}
+
 std::vector<std::uint8_t> ScriptedConnection::Sent() const
 {
 	std::lock_guard lock(State->Mutex);
 	return Channel->Outbound;
+}
+
+bool ScriptedConnection::WaitSent(std::size_t size, std::chrono::milliseconds timeout) const
+{
+	std::unique_lock lock(State->Mutex);
+	return State->Changed.wait_for(lock, timeout,
+								   [&]
+								   {
+									   return Channel->Outbound.size() >= size;
+								   });
 }
 
 bool ScriptedConnection::WaitIdle(std::chrono::milliseconds timeout) const

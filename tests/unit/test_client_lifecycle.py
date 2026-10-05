@@ -20,7 +20,7 @@ from openusdconnect import (
 from openusdconnect import sender as sender_module
 from openusdconnect.client_observer import StageMetadata
 from openusdconnect.protocol_constants import LayerMode
-from tests.helpers import RecordingObserver, connect_client, embedded_server
+from tests.helpers import RecordingObserver, connect_client, embedded_server, recorded_hellos
 
 
 @pytest.fixture(scope="module")
@@ -226,22 +226,18 @@ def test_credential_keeps_a_token_issued_while_storage_loads(monkeypatch):
     assert credential.current() == "issued-during-load"
 
 
-def test_sender_takes_its_token_from_the_provider_on_every_attempt(monkeypatch):
+def test_sender_takes_its_token_from_the_provider_on_every_attempt(monkeypatch, managed_server):
+    hellos = recorded_hellos(monkeypatch)
     tokens = iter(["first", "second"])
-    presented = []
-
-    def refuse(*args, **kwargs):
-        presented.append(sender.token)
-        raise OSError("refused")
-
-    monkeypatch.setattr(sender_module.socket, "create_connection", refuse)
     sender = sender_module.EventSender(
-        "localhost", 1, client_id="token-attempts", token="stale",
-        token_provider=lambda: next(tokens),
+        "127.0.0.1", managed_server.server_address[1], client_id="token-attempts",
+        token="stale", token_provider=lambda: next(tokens),
     )
-    assert not sender.connect(timeout=0.5)
-    assert not sender.connect(timeout=0.5)
-    assert presented == ["first", "second"]
+    for expected in ("first", "second"):
+        assert sender.connect(timeout=5)
+        assert sender.token == expected
+        sender.disconnect()
+    assert [hello["token"] for hello in hellos] == ["first", "second"]
 
 
 @pytest.mark.parametrize("failure", [None, "persistence", "observer"])
@@ -326,7 +322,8 @@ def test_update_schedules_handshake_without_waiting_or_touching_stage_in_worker(
     owner = threading.get_ident()
     threads = []
 
-    def connect(*args, **kwargs):
+    def provide():
+        # The handshake waits here, after the connection opened.
         threads.append(threading.get_ident())
         entered.set()
         try:
@@ -337,7 +334,7 @@ def test_update_schedules_handshake_without_waiting_or_touching_stage_in_worker(
 
     try:
         connect_client(client)
-        monkeypatch.setattr(sender_module.socket, "create_connection", connect)
+        monkeypatch.setattr(client._sender, "_token_provider", provide)
         result = client.update()
         assert entered.wait(2)
         assert not finished.is_set()

@@ -58,6 +58,19 @@ add_test(NAME OpenUSDConnectThreadedReceiverDriverTests
     COMMAND OpenUSDConnectThreadedReceiverDriverTests
 )
 
+add_executable(OpenUSDConnectThreadedProducerDriverTests test_threaded_producer_driver.cpp)
+target_link_libraries(OpenUSDConnectThreadedProducerDriverTests
+    PRIVATE OpenUSDConnect::ClientDriver OpenUSDConnect::ClientDriverTesting
+)
+if(MSVC)
+    target_compile_options(OpenUSDConnectThreadedProducerDriverTests PRIVATE /W4 /permissive-)
+else()
+    target_compile_options(OpenUSDConnectThreadedProducerDriverTests PRIVATE -Wall -Wextra -Wpedantic)
+endif()
+add_test(NAME OpenUSDConnectThreadedProducerDriverTests
+    COMMAND OpenUSDConnectThreadedProducerDriverTests
+)
+
 add_executable(OpenUSDConnectTcpSocketTests test_tcp_socket.cpp)
 target_link_libraries(OpenUSDConnectTcpSocketTests
     PRIVATE OpenUSDConnect::ClientDriver $<$<PLATFORM_ID:Windows>:ws2_32>

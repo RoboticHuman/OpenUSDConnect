@@ -217,9 +217,6 @@ void TestAcceptedHelloNotifiesInOrder()
 {
 	Receiver receiver;
 	static_cast<void>(receiver.Start());
-	// Anything before the handshake response is ignored.
-	receiver.Feed(server::Ping());
-	receiver.Feed(server::Event(1));
 	CHECK(!receiver.Status().Connected);
 	StageMetadata metadata;
 	metadata.TimeCodesPerSecond = 24.0;
@@ -699,6 +696,15 @@ void TestProtocolErrorsCloseTheConnection()
 			CHECK(receiver.Single<CloseAction>().Reason == DisconnectReason::ProtocolError);
 			CHECK(receiver.Reconnect().SyncFrom == 1);
 		}
+	}
+	// The server answers a Hello before it sends anything else.
+	for (const Bytes& early : {server::Ping(), server::Event(1)})
+	{
+		Receiver receiver;
+		static_cast<void>(receiver.Start());
+		receiver.Feed(early);
+		CHECK(receiver.Single<CloseAction>().Reason == DisconnectReason::ProtocolError);
+		CHECK(!receiver.Status().Connected && receiver.Status().QueuedFrames == 0);
 	}
 }
 

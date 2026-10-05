@@ -396,6 +396,7 @@ ProducerStatus ProducerEndpoint::Status() const
 	ProducerStatus status;
 	status.Connected = State == ConnectionState::Connected;
 	status.Handshaking = IsAttempting();
+	status.Closing = State == ConnectionState::Closing;
 	status.Stopped = State == ConnectionState::Stopped;
 	status.Rejection = Rejection;
 	status.LayerModeActive = LayerModeActive;
@@ -499,18 +500,14 @@ void ProducerEndpoint::HandleFrame(const std::vector<std::uint8_t>& frame)
 
 void ProducerEndpoint::HandleHandshake(EnvelopeView envelope)
 {
-	detail::HandshakeOutcome outcome = detail::ClassifyHandshake(envelope);
+	const detail::HandshakeOutcome outcome = detail::ClassifyHandshake(envelope);
 	if (outcome.Accepted)
 	{
 		AcceptHello(*outcome.Accepted);
 	}
 	else if (outcome.Rejection)
 	{
-		if (!outcome.Rejection->Authentication && outcome.Rejection->Reason.empty())
-		{
-			outcome.Rejection->Reason = "connection rejected";
-		}
-		Reject(std::move(*outcome.Rejection));
+		Reject(*outcome.Rejection);
 	}
 	else
 	{

@@ -59,6 +59,9 @@ struct ProducerStatus final
 	bool Connected = false;
 	// An attempt is connecting or awaiting the handshake response.
 	bool Handshaking = false;
+	// The endpoint closed a connection or attempt that the host has not yet
+	// reported gone; Connect is Busy until it does.
+	bool Closing = false;
 	bool Stopped = false;
 	std::optional<HandshakeRejected> Rejection;
 	OpenUSDConnect::LayerMode LayerModeActive = OpenUSDConnect::LayerMode::Managed;

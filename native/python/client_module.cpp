@@ -1,3 +1,5 @@
+#include "driver_bindings.h"
+
 #include "openusdconnect/client/engine/status.h"
 #include "openusdconnect/client/frame_codec.h"
 #include "openusdconnect/client/producer_recovery.h"
@@ -31,8 +33,9 @@ using openusdconnect::client::ProducerRecoveryDisposition;
 using openusdconnect::client::ProducerResult;
 using openusdconnect::client::ReceiverMessageKind;
 
-// Defined in receiver_bindings.cpp.
+// Defined in receiver_bindings.cpp and producer_bindings.cpp.
 void BindReceiver(nb::module_& module);
+void BindProducer(nb::module_& module);
 
 namespace
 {
@@ -405,5 +408,7 @@ NB_MODULE(_native_client, module)
 		.def_prop_ro("last_acknowledged_transaction_id",
 					 &PythonProducerSession::LastAcknowledgedTransactionId);
 
+	openusdconnect::python::BindDriverTypes(module);
 	BindReceiver(module);
+	BindProducer(module);
 }

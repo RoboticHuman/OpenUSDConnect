@@ -30,8 +30,13 @@ public:
 	[[nodiscard]] bool DeliverTimeout();
 	// Receive reports Closed once the earlier deliveries are read.
 	void Close();
+	// Every later SendAll waits, as for a peer that stopped reading, until its
+	// deadline passes and then reports Timeout.
+	void StallSends();
 
 	[[nodiscard]] std::vector<std::uint8_t> Sent() const;
+	// Waits until the client has sent at least size bytes.
+	[[nodiscard]] bool WaitSent(std::size_t size, std::chrono::milliseconds timeout) const;
 	// The client waits in Receive with every delivery read, so it handled them all.
 	[[nodiscard]] bool WaitIdle(std::chrono::milliseconds timeout) const;
 	[[nodiscard]] bool WaitClosed(std::chrono::milliseconds timeout) const;

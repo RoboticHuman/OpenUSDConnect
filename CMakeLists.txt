@@ -26,6 +26,8 @@ add_subdirectory(native/client_core)
 
 nanobind_add_module(_native_client STABLE_ABI
     native/python/client_module.cpp
+    native/python/driver_bindings.cpp
+    native/python/producer_bindings.cpp
     native/python/receiver_bindings.cpp
 )
 target_link_libraries(_native_client PRIVATE OpenUSDConnect::ClientDriver)

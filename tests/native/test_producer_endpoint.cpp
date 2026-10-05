@@ -1,7 +1,7 @@
 #include "openusdconnect/client/engine/producer_endpoint.h"
 
 #include "endpoint_host.h"
-#include "frames.h"
+#include "producer_frames.h"
 #include "test_check.h"
 
 #include <algorithm>
@@ -23,76 +23,7 @@ using namespace std::chrono_literals;
 namespace
 {
 
-using namespace endpoint_test;
-
-[[nodiscard]] ProducerConfig TestConfig()
-{
-	ProducerConfig config;
-	config.Host = "127.0.0.1";
-	config.Port = 7200;
-	config.ClientId = "client";
-	config.Origin = "origin";
-	config.SessionId = "session";
-	return config;
-}
-
-// A one-event transaction frame, encoded as a host encodes it.
-[[nodiscard]] Bytes TransactionFrame(std::uint64_t transaction_id, std::string_view prim,
-									 std::string_view layer_key = {})
-{
-	flatbuffers::FlatBufferBuilder builder(128);
-	flatbuffers::Offset<OpenUSDConnect::EventWrapper> event;
-	CHECK(BuildVisibilityEvent(builder, VisibilityEventView{prim, true}, event) ==
-		  ProtocolResult::Success);
-	CHECK(FinishTransactionFrame(builder, transaction_id, &event, 1, layer_key) ==
-		  ProtocolResult::Success);
-	const std::uint8_t* bytes = builder.GetBufferPointer();
-	return {bytes, bytes + builder.GetSize()};
-}
-
-[[nodiscard]] Bytes ClaimFrame()
-{
-	flatbuffers::FlatBufferBuilder builder(64);
-	const auto claim =
-		OpenUSDConnect::CreateClaimPlayback(builder, CreateString(builder, "client"));
-	CHECK(FinishEnvelopeFrame(builder, OpenUSDConnect::CreateEnvelope(
-										   builder, Payload::ClaimPlayback, claim.Union(),
-										   kSchemaVersion)) == ProtocolResult::Success);
-	const std::uint8_t* bytes = builder.GetBufferPointer();
-	return {bytes, bytes + builder.GetSize()};
-}
-
-[[nodiscard]] std::vector<Payload> Kinds(const std::vector<Bytes>& frames)
-{
-	std::vector<Payload> kinds;
-	for (const Bytes& frame : frames)
-	{
-		kinds.push_back(DecodeSent(frame).payload_type());
-	}
-	return kinds;
-}
-
-[[nodiscard]] std::vector<std::uint64_t> TransactionIds(const std::vector<Bytes>& frames)
-{
-	std::vector<std::uint64_t> ids;
-	for (const Bytes& frame : frames)
-	{
-		const OpenUSDConnect::Txn* transaction = DecodeSent(frame).payload_as_Txn();
-		CHECK(transaction != nullptr);
-		ids.push_back(transaction->txn_id());
-	}
-	return ids;
-}
-
-[[nodiscard]] Bytes Concatenate(const std::vector<Bytes>& frames)
-{
-	Bytes bytes;
-	for (const Bytes& frame : frames)
-	{
-		bytes.insert(bytes.end(), frame.begin(), frame.end());
-	}
-	return bytes;
-}
+using namespace producer_test;
 
 // Plays the host around one endpoint.
 class Producer final : public Host<ProducerEndpoint>
@@ -328,9 +259,10 @@ void TestHandshakeRejectionsHoldUntilAnExplicitConnect()
 		producer.Feed(server::HelloOk());
 		CHECK(producer.Status().Connected);
 	}
+	// An empty reason stays empty; hosts word their own default.
 	const std::pair<Bytes, HandshakeRejected> rejections[] = {
 		{server::HelloRejected(HelloRejectionCode::Unspecified, ""),
-		 {false, HelloRejectionCode::Unspecified, "connection rejected"}},
+		 {false, HelloRejectionCode::Unspecified, ""}},
 		{server::HelloRejected(HelloRejectionCode::LayerModeMismatch, "server uses shared_stage"),
 		 {false, HelloRejectionCode::LayerModeMismatch, "server uses shared_stage"}},
 	};
@@ -574,12 +506,13 @@ void TestCancelDuringHandshakeKeepsTheSessionHealthy(bool disconnect)
 	producer.Feed(server::HelloOk());
 	const ProducerStatus status = producer.Status();
 	CHECK(!status.Connected && !status.Handshaking && !status.Failure);
-	CHECK(!finished);
+	CHECK(status.Closing && !finished);
 	CHECK(producer.Single<CloseAction>().Reason == DisconnectReason::Cancelled);
 	CHECK(producer.Notices().empty());
 	CHECK(!producer.Endpoint.RequestConnect(producer.Now, producer.Now + 2s));
 	CHECK(producer.Endpoint.Connect(producer.Now, producer.Now + 2s) == ConnectResult::Busy);
 	producer.Disconnect(DisconnectReason::Cancelled);
+	CHECK(!producer.Status().Closing);
 	CHECK(producer.Endpoint.CancelConnect());
 
 	CHECK(producer.Handshake() == std::vector<Bytes>{unsent});
@@ -655,7 +588,8 @@ void TestAnUntakenAttemptIsWithdrawn()
 			break;
 		}
 		CHECK(producer.Commands().empty());
-		CHECK(!producer.Status().Handshaking && !producer.Endpoint.NextWake());
+		const ProducerStatus status = producer.Status();
+		CHECK(!status.Handshaking && !status.Closing && !producer.Endpoint.NextWake());
 		CHECK(producer.Endpoint.RequestConnect(producer.Now, producer.Now + 2s) == (end != 3));
 	}
 }

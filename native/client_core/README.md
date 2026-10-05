@@ -12,9 +12,10 @@ The native core is split into four composable C++17 targets:
   replay identity, outbox replay and transaction results, control messages, and reconnect policy.
   They start no threads and open no sockets.
 - `OpenUSDConnect::ClientDriver` is an optional reference host loop
-  (`driver/threaded_receiver_driver.h`): one thread with blocking Winsock or BSD sockets
-  (`driver/socket.h`) drives an endpoint. The Python module links it; hosts with their own I/O
-  loop and scheduler drive the endpoint directly and never link it.
+  (`driver/threaded_receiver_driver.h`, `driver/threaded_producer_driver.h`): one thread with
+  blocking Winsock or BSD sockets drives an endpoint. `driver/socket.h` holds what a host supplies:
+  the socket factory and the `DriverCallbacks`. The Python module links it; hosts with their own
+  I/O loop and scheduler drive the endpoint directly and never link it.
 
 The protocol layer deliberately does not own transport, threads, queues, event-offset storage, or
 serialized buffers. Decoded views borrow the caller's receive buffer. Builders operate on a
@@ -66,12 +67,20 @@ through an event the socket waits on, since `shutdown()` does not wake a blocked
 complete the replay, such as `RequestReplayFrom` or `MarkReplayApplied`, call `Wake()` so the loop
 applies the new actions and `WaitConnected`/`WaitSynchronized` re-check.
 
+`ThreadedProducerDriver` runs a `ProducerEndpoint` the same way. `Start()` runs the loop, which
+idles between connections until `Stop()`. Call `Wake()` after `Append`, `QueueControl`,
+`RequestConnect`, `CancelConnect`, or `Disconnect` so the loop applies their actions. The blocking
+calls run on another thread: `Connect(timeout)` makes one attempt once any attempt or close in
+flight ends, and `Flush(timeout)` waits until every appended transaction is acknowledged,
+connecting outside the rate-limit window while time remains, and reports `RecoveryRequired` once
+a rejection needs recovery.
+
 `driver/testing/scripted_socket.h` is a seam for the C++ tests only. It is built into
 `OpenUSDConnect::ClientDriverTesting`, which no shipped module links and which builds only when a
 target links it. Each connect of a `ScriptedSocketFactory` socket waits until
 the test accepts or refuses it; the accepted `ScriptedConnection` delivers scripted bytes, read
-timeouts, or a peer close, records what the client sent, and `WaitIdle` returns once the client
-handled every delivery and waits for more.
+timeouts, or a peer close, records what the client sent, can stall the client's writes, and
+`WaitIdle` returns once the client handled every delivery and waits for more.
 
 When included with `add_subdirectory`, link `OpenUSDConnect::ClientProtocol`,
 `OpenUSDConnect::ClientEngine`, or `OpenUSDConnect::ClientDriver` (which links `ws2_32` on

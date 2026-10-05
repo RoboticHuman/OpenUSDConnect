@@ -81,6 +81,8 @@ Behavior:
 - `ReceiverThread` is no longer a `threading.Thread`. Its settings and state
   are read-only properties (`token` and `reconnect` stay assignable), and the
   `sock` attribute is gone.
+- `EventSender` settings and state are read-only properties (`token` stays
+  assignable), and the `sock` attribute is gone; check `connected` instead.
 
 The low-level `EventSender`, `ReceiverThread`, and `EventDispatcher` keep their
 callable arguments and properties.
@@ -101,9 +103,6 @@ callable arguments and properties.
   `no_pending_recovery_stage`).
 - `claim_playback()` and `send_playback_control()` on `SharedStageClient` and
   `UsdPublisher`.
-- Opt-in `background_send=True` moves transaction writes to a worker thread.
-  The worker needs the GIL, adding about 5 ms per write while the host's main
-  thread runs Python.
 - `token_provider=` on `EventSender` and `ReceiverThread` supplies the token
   for each connection attempt.
 - `EventDispatcher.drained_message_count`, `ReceiverThread.stopped`, and
@@ -121,12 +120,22 @@ callable arguments and properties.
   returns at once. Building the extension fetches the pinned FlatBuffers
   headers on first configure, which needs network access unless
   `FETCHCONTENT_SOURCE_DIR_FLATBUFFERS` names a local copy.
+- `EventSender` runs its connection on a native thread in the client core and
+  keeps its constructor, callbacks, properties, and methods. Transaction
+  writes no longer run on the calling thread or need the GIL. `connect()`
+  first waits for an attempt already in flight, the token provider and other
+  callbacks run on the connection thread, and a token provider that raises is
+  logged and fails that attempt instead of raising from `connect()`. While
+  recovery is required, `rejection_reason` names the failure.
 
 ### Fixed
 
 - A receiver continuing from a live-open snapshot replayed the full history
   over it when the integration did not seed the dispatcher cursor.
 - MCP writes were confirmed before the mirror applied them.
+- `EventSender.send_events()` accepted a transaction above the 16 MiB frame
+  limit, which the server then dropped with the connection on every replay;
+  it now returns `False`.
 - Replay completion markers were lost when a resync reset applied progress.
 - The emitter dropped property edits absorbed by a prim resync.
 - Bidirectional clients read the token file on every `update()` while their

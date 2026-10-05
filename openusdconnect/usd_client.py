@@ -201,7 +201,6 @@ class UsdPublisher(EmitterClientBase):
         replicated_api_schemas: set[str] | None = None,
         extra_channels: Sequence[PrimChannel] | None = None,
         transform_coalesce_seconds: float = 0.0,
-        background_send: bool = False,
     ):
         app_name = require_app_name(app_name)
         if not isinstance(stage, Usd.Stage):
@@ -224,7 +223,6 @@ class UsdPublisher(EmitterClientBase):
             origin=origin or client_origin(app_name, "emit"),
             department=department,
             on_stage_metadata=self._hooks.on_stage_metadata,
-            background_send=background_send,
             **self._credential.endpoint_kwargs(),
         )
 

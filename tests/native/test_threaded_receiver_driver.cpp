@@ -1,6 +1,7 @@
 #include "openusdconnect/client/driver/testing/scripted_socket.h"
 #include "openusdconnect/client/driver/threaded_receiver_driver.h"
 
+#include "driver_recorder.h"
 #include "receiver_frames.h"
 #include "test_check.h"
 
@@ -8,21 +9,17 @@
 #include <chrono>
 #include <future>
 #include <memory>
-#include <mutex>
 #include <optional>
 #include <string>
-#include <string_view>
 #include <utility>
 #include <vector>
 
+using namespace driver_test;
 using namespace receiver_test;
 using namespace std::chrono_literals;
 
 namespace
 {
-
-constexpr std::chrono::milliseconds kPatience = 5s;
-constexpr int kRefused = 10061;
 
 [[nodiscard]] ReceiverConfig FastConfig()
 {
@@ -32,64 +29,6 @@ constexpr int kRefused = 10061;
 	return config;
 }
 
-// Records what the driver thread reports.
-class Recorder final
-{
-public:
-	void Add(Notification notification)
-	{
-		std::lock_guard lock(Mutex);
-		if (const TokenIssued* issued = std::get_if<TokenIssued>(&notification))
-		{
-			Token = issued->Token;
-		}
-		Notices.push_back(std::move(notification));
-	}
-
-	void Log(const std::string& message)
-	{
-		std::lock_guard lock(Mutex);
-		Logs.push_back(message);
-	}
-
-	[[nodiscard]] std::string IssuedToken() const
-	{
-		std::lock_guard lock(Mutex);
-		return Token;
-	}
-
-	[[nodiscard]] bool Logged(std::string_view text) const
-	{
-		std::lock_guard lock(Mutex);
-		for (const std::string& log : Logs)
-		{
-			if (log.find(text) != std::string::npos)
-			{
-				return true;
-			}
-		}
-		return false;
-	}
-
-	template <typename T>
-	[[nodiscard]] std::size_t Count() const
-	{
-		std::lock_guard lock(Mutex);
-		std::size_t count = 0;
-		for (const Notification& notice : Notices)
-		{
-			count += std::holds_alternative<T>(notice) ? 1 : 0;
-		}
-		return count;
-	}
-
-private:
-	mutable std::mutex Mutex;
-	std::vector<Notification> Notices;
-	std::vector<std::string> Logs;
-	std::string Token;
-};
-
 // One endpoint driven by the reference driver over scripted sockets.
 class Harness final
 {
@@ -98,7 +37,7 @@ public:
 		: Endpoint(config, Notifications)
 		, Sockets(std::make_shared<ScriptedSocketFactory>())
 		, Driver(std::make_unique<ThreadedReceiverDriver>(Endpoint, Notifications, Sockets,
-														  WithRecorder(std::move(callbacks))))
+														  Record.Recording(std::move(callbacks))))
 	{
 	}
 
@@ -142,23 +81,6 @@ public:
 	Recorder Record;
 	const std::shared_ptr<ScriptedSocketFactory> Sockets;
 	std::unique_ptr<ThreadedReceiverDriver> Driver;
-
-private:
-	DriverCallbacks WithRecorder(DriverCallbacks callbacks)
-	{
-		if (!callbacks.Notifications)
-		{
-			callbacks.Notifications = [this](Notification notification)
-			{
-				Record.Add(std::move(notification));
-			};
-		}
-		callbacks.Log = [this](LogLevel, const std::string& message)
-		{
-			Record.Log(message);
-		};
-		return callbacks;
-	}
 };
 
 void TestConnectSendsTheHelloWithTheProvidedToken()
