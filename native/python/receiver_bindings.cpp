@@ -11,25 +11,22 @@
 
 #include <cstddef>
 #include <cstdint>
-#include <functional>
 #include <memory>
 #include <new>
 #include <optional>
-#include <thread>
 #include <utility>
 #include <vector>
 
 namespace nb = nanobind;
 using namespace nb::literals;
 using namespace openusdconnect::client;
-using openusdconnect::python::Milliseconds;
-using openusdconnect::python::Seconds;
+using openusdconnect::python::DurationProperty;
 using openusdconnect::python::Timeout;
 
 namespace
 {
 
-using PythonReceiverDriver = openusdconnect::python::PythonDriver<ThreadedReceiverDriver, ReceiverEndpoint>;
+using PythonReceiverDriver = openusdconnect::python::PythonDriver<ThreadedReceiverDriver>;
 
 [[nodiscard]] nb::list ToPythonBytes(const std::vector<std::vector<std::uint8_t>>& frames)
 {
@@ -43,8 +40,8 @@ using PythonReceiverDriver = openusdconnect::python::PythonDriver<ThreadedReceiv
 
 void BindEndpoint(nb::module_& module)
 {
-	nb::class_<ReceiverConfig>(module, "ReceiverConfig")
-		.def(nb::init<>())
+	nb::class_<ReceiverConfig> config_class(module, "ReceiverConfig");
+	config_class.def(nb::init<>())
 		.def_rw("host", &ReceiverConfig::Host)
 		.def_rw("port", &ReceiverConfig::Port)
 		.def_rw("client_id", &ReceiverConfig::ClientId)
@@ -55,37 +52,10 @@ void BindEndpoint(nb::module_& module)
 		.def_rw("sync_from", &ReceiverConfig::SyncFrom)
 		.def_rw("max_queue", &ReceiverConfig::MaxQueue)
 		.def_rw("max_consecutive_timeouts", &ReceiverConfig::MaxConsecutiveTimeouts)
-		.def_rw("reconnect", &ReceiverConfig::Reconnect)
-		.def_prop_rw(
-			"socket_timeout",
-			[](const ReceiverConfig& config)
-			{
-				return Seconds(config.SocketTimeout);
-			},
-			[](ReceiverConfig& config, double seconds)
-			{
-				config.SocketTimeout = Milliseconds(seconds);
-			})
-		.def_prop_rw(
-			"reconnect_base_delay",
-			[](const ReceiverConfig& config)
-			{
-				return Seconds(config.ReconnectBaseDelay);
-			},
-			[](ReceiverConfig& config, double seconds)
-			{
-				config.ReconnectBaseDelay = Milliseconds(seconds);
-			})
-		.def_prop_rw(
-			"reconnect_max_delay",
-			[](const ReceiverConfig& config)
-			{
-				return Seconds(config.ReconnectMaxDelay);
-			},
-			[](ReceiverConfig& config, double seconds)
-			{
-				config.ReconnectMaxDelay = Milliseconds(seconds);
-			});
+		.def_rw("reconnect", &ReceiverConfig::Reconnect);
+	DurationProperty(config_class, "socket_timeout", &ReceiverConfig::SocketTimeout);
+	DurationProperty(config_class, "reconnect_base_delay", &ReceiverConfig::ReconnectBaseDelay);
+	DurationProperty(config_class, "reconnect_max_delay", &ReceiverConfig::ReconnectMaxDelay);
 
 	nb::class_<ReceiverStatus>(module, "ReceiverStatus")
 		.def_ro("connected", &ReceiverStatus::Connected)
@@ -141,39 +111,20 @@ void BindEndpoint(nb::module_& module)
 
 void BindDriver(nb::module_& module)
 {
-	nb::class_<PythonReceiverDriver>(module, "ReceiverDriver")
-		.def(
-			"__init__",
-			[](PythonReceiverDriver* driver, nb::object endpoint, nb::object notifications,
-			   std::shared_ptr<SocketFactory> sockets, nb::object token_provider,
-			   nb::object notification_sink, nb::object log)
-			{
-				new (driver) PythonReceiverDriver("receiver", std::move(endpoint),
-												  std::move(notifications), std::move(sockets),
-												  std::move(token_provider),
-												  std::move(notification_sink), std::move(log));
-			},
-			"endpoint"_a, "notifications"_a, "sockets"_a, nb::kw_only(),
-			"token_provider"_a = nb::none(), "notification_sink"_a = nb::none(),
-			"log"_a = nb::none())
-		.def("start", &PythonReceiverDriver::Start)
-		.def("stop",
-			 [](PythonReceiverDriver& driver)
-			 {
-				 driver.Get().Stop();
-			 })
-		.def("wake",
-			 [](PythonReceiverDriver& driver)
-			 {
-				 driver.Get().Wake();
-			 })
-		.def(
-			"join",
-			[](PythonReceiverDriver& driver, std::optional<double> timeout)
-			{
-				return driver.Get().Join(Timeout(timeout));
-			},
-			"timeout"_a = nb::none(), nb::call_guard<nb::gil_scoped_release>())
+	nb::class_<PythonReceiverDriver> cls(module, "ReceiverDriver");
+	cls.def(
+		   "__init__",
+		   [](PythonReceiverDriver* driver, ReceiverEndpoint& endpoint,
+			  NotificationQueue& notifications, std::shared_ptr<SocketFactory> sockets,
+			  nb::object token_provider, nb::object notification_sink, nb::object log)
+		   {
+			   new (driver) PythonReceiverDriver("receiver", endpoint, notifications,
+												 std::move(sockets), std::move(token_provider),
+												 std::move(notification_sink), std::move(log));
+		   },
+		   "endpoint"_a, "notifications"_a, "sockets"_a, nb::kw_only(),
+		   "token_provider"_a = nb::none(), "notification_sink"_a = nb::none(),
+		   "log"_a = nb::none(), nb::keep_alive<1, 2>(), nb::keep_alive<1, 3>())
 		.def(
 			"wait_connected",
 			[](PythonReceiverDriver& driver, std::optional<double> timeout)
@@ -187,32 +138,8 @@ void BindDriver(nb::module_& module)
 			{
 				return driver.Get().WaitSynchronized(Timeout(timeout));
 			},
-			"timeout"_a = nb::none(), nb::call_guard<nb::gil_scoped_release>())
-		.def_prop_ro("running",
-					 [](PythonReceiverDriver& driver)
-					 {
-						 return driver.Get().Running();
-					 })
-		.def_prop_ro("stopped",
-					 [](PythonReceiverDriver& driver)
-					 {
-						 return driver.Get().Stopped();
-					 })
-		.def_prop_ro("ident",
-					 [](PythonReceiverDriver& driver) -> std::optional<std::size_t>
-					 {
-						 const std::optional<std::thread::id> id = driver.Get().ThreadId();
-						 return id ? std::optional(std::hash<std::thread::id>()(*id))
-								   : std::nullopt;
-					 })
-		.def_prop_ro("last_failure",
-					 [](PythonReceiverDriver& driver)
-					 {
-						 return driver.Get().LastFailure();
-					 });
-
-	nb::module_::import_("atexit").attr("register")(
-		nb::cpp_function(&PythonReceiverDriver::StopAll));
+			"timeout"_a = nb::none(), nb::call_guard<nb::gil_scoped_release>());
+	openusdconnect::python::BindThreadedDriver(cls);
 }
 
 } // namespace

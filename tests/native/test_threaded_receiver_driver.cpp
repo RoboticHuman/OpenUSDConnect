@@ -7,7 +7,6 @@
 
 #include <atomic>
 #include <chrono>
-#include <future>
 #include <memory>
 #include <optional>
 #include <string>
@@ -29,59 +28,7 @@ namespace
 	return config;
 }
 
-// One endpoint driven by the reference driver over scripted sockets.
-class Harness final
-{
-public:
-	explicit Harness(const ReceiverConfig& config = FastConfig(), DriverCallbacks callbacks = {})
-		: Endpoint(config, Notifications)
-		, Sockets(std::make_shared<ScriptedSocketFactory>())
-		, Driver(std::make_unique<ThreadedReceiverDriver>(Endpoint, Notifications, Sockets,
-														  Record.Recording(std::move(callbacks))))
-	{
-	}
-
-	~Harness()
-	{
-		if (Driver)
-		{
-			Driver->Stop();
-			CHECK(Driver->Join(kPatience));
-		}
-	}
-
-	Harness(const Harness&) = delete;
-	Harness& operator=(const Harness&) = delete;
-
-	[[nodiscard]] std::shared_ptr<ScriptedConnection> Accept()
-	{
-		std::shared_ptr<ScriptedConnection> connection = Sockets->Accept(kPatience);
-		CHECK(connection != nullptr);
-		CHECK(connection->WaitIdle(kPatience));
-		return connection;
-	}
-
-	void Deliver(ScriptedConnection& connection, const Bytes& frame)
-	{
-		CHECK(connection.Deliver(frame));
-		CHECK(connection.WaitIdle(kPatience));
-	}
-
-	[[nodiscard]] std::shared_ptr<ScriptedConnection> Handshake(const server::Hello& hello = {})
-	{
-		CHECK(Driver->Start());
-		std::shared_ptr<ScriptedConnection> connection = Accept();
-		Deliver(*connection, server::HelloOk(hello));
-		CHECK(Driver->WaitConnected(kPatience));
-		return connection;
-	}
-
-	NotificationQueue Notifications;
-	ReceiverEndpoint Endpoint;
-	Recorder Record;
-	const std::shared_ptr<ScriptedSocketFactory> Sockets;
-	std::unique_ptr<ThreadedReceiverDriver> Driver;
-};
+using Harness = DriverHarness<ThreadedReceiverDriver>;
 
 void TestConnectSendsTheHelloWithTheProvidedToken()
 {
@@ -106,7 +53,7 @@ void TestConnectSendsTheHelloWithTheProvidedToken()
 
 void TestFramesReachTheEndpoint()
 {
-	Harness harness;
+	Harness harness(FastConfig());
 	const std::shared_ptr<ScriptedConnection> connection = harness.Handshake();
 	Bytes batch = server::Event(1);
 	const Bytes second = server::Event(2);
@@ -168,13 +115,10 @@ void TestAbandonedTokenRetries()
 void TestReadTimeoutsReconnect()
 {
 	ReceiverConfig config = FastConfig();
+	config.SocketTimeout = 50ms;
 	config.MaxConsecutiveTimeouts = 2;
 	Harness harness(config);
 	const std::shared_ptr<ScriptedConnection> connection = harness.Handshake();
-	CHECK(connection->DeliverTimeout());
-	CHECK(connection->WaitIdle(kPatience));
-	CHECK(harness.Endpoint.Status().Connected);
-	CHECK(connection->DeliverTimeout());
 	CHECK(connection->WaitClosed(kPatience));
 	CHECK(harness.Record.Logged("2 consecutive read timeouts"));
 	CHECK(DecodeHello(harness.Accept()->Sent()).SyncFrom == 1);
@@ -182,7 +126,7 @@ void TestReadTimeoutsReconnect()
 
 void TestFailedConnectIsRecordedAndRetried()
 {
-	Harness harness;
+	Harness harness(FastConfig());
 	CHECK(harness.Driver->Start());
 	CHECK(harness.Sockets->Refuse(kPatience, kRefused));
 	const std::shared_ptr<ScriptedConnection> connection = harness.Accept();
@@ -208,7 +152,7 @@ void TestFailedConnectIsRecordedAndRetried()
 void TestStopInterruptsBlockingCalls()
 {
 	{
-		Harness harness;
+		Harness harness(FastConfig());
 		const std::shared_ptr<ScriptedConnection> connection = harness.Handshake();
 		harness.Driver->Stop();
 		CHECK(harness.Driver->Join(kPatience));
@@ -217,7 +161,7 @@ void TestStopInterruptsBlockingCalls()
 		CHECK(harness.Endpoint.Status().Stopped);
 	}
 	{
-		Harness harness;
+		Harness harness(FastConfig());
 		CHECK(harness.Driver->Start());
 		harness.Driver->Stop();
 		CHECK(harness.Driver->Join(kPatience));
@@ -225,7 +169,7 @@ void TestStopInterruptsBlockingCalls()
 	}
 	{
 		// A host may stop the endpoint before the driver starts.
-		Harness harness;
+		Harness harness(FastConfig());
 		harness.Driver->Stop();
 		CHECK(harness.Driver->Start());
 		CHECK(harness.Driver->Join(kPatience));
@@ -235,7 +179,7 @@ void TestStopInterruptsBlockingCalls()
 
 void TestWakeAppliesAReplayRequest()
 {
-	Harness harness;
+	Harness harness(FastConfig());
 	const std::shared_ptr<ScriptedConnection> connection = harness.Handshake();
 	harness.Deliver(*connection, server::Event(1));
 	CHECK(harness.Endpoint.RequestReplayFrom(1));
@@ -282,26 +226,6 @@ void TestCallbacksReenterTheEndpointAndDriver()
 	CHECK(harness.Driver->Join(kPatience));
 }
 
-void TestExitedMayDestroyTheDriver()
-{
-	ReceiverConfig config = FastConfig();
-	config.Reconnect = false;
-	std::promise<void> destroyed;
-	std::unique_ptr<ThreadedReceiverDriver>* owner = nullptr;
-	DriverCallbacks callbacks;
-	callbacks.Exited = [&]
-	{
-		owner->reset();
-		destroyed.set_value();
-	};
-	Harness harness(config, std::move(callbacks));
-	owner = &harness.Driver;
-	CHECK(harness.Driver->Start());
-	CHECK(harness.Sockets->Refuse(kPatience, kRefused));
-	CHECK(destroyed.get_future().wait_for(kPatience) == std::future_status::ready);
-	CHECK(harness.Driver == nullptr);
-}
-
 } // namespace
 
 int main()
@@ -315,6 +239,5 @@ int main()
 	TestStopInterruptsBlockingCalls();
 	TestWakeAppliesAReplayRequest();
 	TestCallbacksReenterTheEndpointAndDriver();
-	TestExitedMayDestroyTheDriver();
 	return 0;
 }

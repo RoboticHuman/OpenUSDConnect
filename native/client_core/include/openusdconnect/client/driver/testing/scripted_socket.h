@@ -26,8 +26,6 @@ public:
 
 	// One Receive returns each delivery. False once the client closed its socket.
 	[[nodiscard]] bool Deliver(std::vector<std::uint8_t> bytes);
-	// The next Receive reports Timeout without waiting.
-	[[nodiscard]] bool DeliverTimeout();
 	// Receive reports Closed once the earlier deliveries are read.
 	void Close();
 	// Every later SendAll waits, as for a peer that stopped reading, until its

@@ -158,7 +158,7 @@ void ProducerEndpoint::Disconnect()
 {
 	std::lock_guard lock(Mutex);
 	ResetBackoff();
-	Quit(DisconnectReason::Cancelled);
+	Close(DisconnectReason::Cancelled);
 }
 
 void ProducerEndpoint::OnConnected(std::string_view token)
@@ -252,7 +252,7 @@ void ProducerEndpoint::Stop()
 	{
 		return;
 	}
-	Quit(DisconnectReason::Stopped);
+	Close(DisconnectReason::Stopped);
 	State = ConnectionState::Stopped;
 	Log(LogLevel::Info, "stopped");
 }
@@ -429,7 +429,6 @@ void ProducerEndpoint::BeginAttempt(TimePoint now, TimePoint deadline, bool back
 	BackoffOnFailure = backoff_on_failure;
 	Log(LogLevel::Info, "connecting to " + Address(Config));
 	Actions.push_back(ConnectAction{Config.Host, Config.Port, AttemptDeadline});
-	Actions.push_back(WakeAction{AttemptDeadline});
 }
 
 void ProducerEndpoint::ResetBackoff() noexcept
@@ -439,23 +438,21 @@ void ProducerEndpoint::ResetBackoff() noexcept
 	BackoffOnFailure = false;
 }
 
-void ProducerEndpoint::Quit(DisconnectReason reason)
+void ProducerEndpoint::Close(DisconnectReason reason)
 {
-	if (State == ConnectionState::Connected)
+	if (State != ConnectionState::Connecting && !IsOpen())
+	{
+		return;
+	}
+	// The host ending a published connection says Quit first.
+	if (State == ConnectionState::Connected &&
+		(reason == DisconnectReason::Stopped || reason == DisconnectReason::Cancelled))
 	{
 		Actions.push_back(SendAction{BuildQuitFrame()});
 	}
-	if (State == ConnectionState::Connecting || IsOpen())
-	{
-		Close(reason);
-	}
-}
-
-void ProducerEndpoint::Close(DisconnectReason reason)
-{
 	EndConnection(reason);
 	// An attempt the host has not taken ends here, so no close can follow it.
-	if (State == ConnectionState::Connecting && Discard<ConnectAction, WakeAction>(Actions))
+	if (State == ConnectionState::Connecting && Discard<ConnectAction>(Actions))
 	{
 		BackoffOnFailure = false;
 		State = ConnectionState::Idle;

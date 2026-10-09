@@ -28,34 +28,12 @@ namespace
 	return std::chrono::steady_clock::now();
 }
 
-// One endpoint driven by the reference driver over scripted sockets.
-class Harness final
+class Harness final : public DriverHarness<ThreadedProducerDriver>
 {
 public:
 	explicit Harness(const ProducerConfig& config = TestConfig(), DriverCallbacks callbacks = {})
-		: Endpoint(config, Notifications)
-		, Sockets(std::make_shared<ScriptedSocketFactory>())
-		, Driver(std::make_unique<ThreadedProducerDriver>(Endpoint, Notifications, Sockets,
-														  Record.Recording(std::move(callbacks))))
+		: DriverHarness(config, std::move(callbacks))
 	{
-	}
-
-	~Harness()
-	{
-		Driver->Stop();
-		CHECK(Driver->Join(kPatience));
-	}
-
-	Harness(const Harness&) = delete;
-	Harness& operator=(const Harness&) = delete;
-
-	// Accepts the pending connect and returns once the client sent its Hello.
-	[[nodiscard]] std::shared_ptr<ScriptedConnection> Accept()
-	{
-		std::shared_ptr<ScriptedConnection> connection = Sockets->Accept(kPatience);
-		CHECK(connection != nullptr);
-		CHECK(connection->WaitIdle(kPatience));
-		return connection;
 	}
 
 	[[nodiscard]] std::future<bool> ConnectAsync()
@@ -84,8 +62,7 @@ public:
 			CHECK(Driver->Start());
 		}
 		std::future<bool> connected = ConnectAsync();
-		std::shared_ptr<ScriptedConnection> connection = Accept();
-		CHECK(connection->Deliver(server::HelloOk(hello)));
+		std::shared_ptr<ScriptedConnection> connection = DriverHarness::Handshake(hello);
 		CHECK(connected.get());
 		return connection;
 	}
@@ -99,12 +76,6 @@ public:
 		Driver->Wake();
 		return frame;
 	}
-
-	NotificationQueue Notifications;
-	ProducerEndpoint Endpoint;
-	Recorder Record;
-	const std::shared_ptr<ScriptedSocketFactory> Sockets;
-	const std::unique_ptr<ThreadedProducerDriver> Driver;
 };
 
 // The frames a connection carried after its Hello.

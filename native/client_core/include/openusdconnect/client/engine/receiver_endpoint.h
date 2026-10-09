@@ -2,7 +2,6 @@
 
 #include "openusdconnect/client/engine/actions.h"
 #include "openusdconnect/client/engine/notification.h"
-#include "openusdconnect/client/engine/reconnect_policy.h"
 #include "openusdconnect/client/protocol_codec.h"
 #include "openusdconnect/client/receiver_session.h"
 

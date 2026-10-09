@@ -1,11 +1,9 @@
 #include "openusdconnect/client/driver/threaded_producer_driver.h"
 
-#include "driver_loop.h"
-#include "openusdconnect/client/engine/producer_endpoint.h"
-
 #include <algorithm>
 #include <chrono>
-#include <utility>
+#include <optional>
+#include <thread>
 
 namespace openusdconnect::client
 {
@@ -15,15 +13,11 @@ namespace
 // How long Flush waits after a failed attempt before it connects again.
 constexpr std::chrono::milliseconds kFlushRetryPause{100};
 
-[[nodiscard]] TimePoint Now() noexcept
-{
-	return std::chrono::steady_clock::now();
-}
-
 [[nodiscard]] std::chrono::milliseconds Until(TimePoint deadline) noexcept
 {
-	return std::max(std::chrono::ceil<std::chrono::milliseconds>(deadline - Now()),
-					std::chrono::milliseconds::zero());
+	return std::max(
+		std::chrono::ceil<std::chrono::milliseconds>(deadline - std::chrono::steady_clock::now()),
+		std::chrono::milliseconds::zero());
 }
 
 [[nodiscard]] std::optional<std::chrono::milliseconds> Until(std::optional<TimePoint> deadline)
@@ -33,64 +27,31 @@ constexpr std::chrono::milliseconds kFlushRetryPause{100};
 
 } // namespace
 
-ThreadedProducerDriver::ThreadedProducerDriver(ProducerEndpoint& endpoint,
-											   NotificationQueue& notifications,
-											   std::shared_ptr<SocketFactory> sockets,
-											   DriverCallbacks callbacks)
-	: Endpoint(endpoint)
-	, Loop(std::make_unique<detail::DriverLoop<ProducerEndpoint>>(
-		  endpoint, detail::LoopRole<ProducerEndpoint>{endpoint.Configuration().HandshakeTimeout},
-		  notifications, std::move(sockets), std::move(callbacks)))
-{
-}
-
-ThreadedProducerDriver::~ThreadedProducerDriver() = default;
-
-bool ThreadedProducerDriver::Start()
-{
-	return Loop->Start();
-}
-
-void ThreadedProducerDriver::Stop()
-{
-	Loop->Stop();
-}
-
-void ThreadedProducerDriver::Wake()
-{
-	Loop->Wake();
-}
-
-bool ThreadedProducerDriver::Join(std::optional<std::chrono::milliseconds> timeout)
-{
-	return Loop->Join(timeout);
-}
-
 bool ThreadedProducerDriver::Connect(std::optional<std::chrono::milliseconds> timeout)
 {
 	if (!CanWait())
 	{
-		return Endpoint.Status().Connected;
+		return Target.Status().Connected;
 	}
-	const std::chrono::milliseconds handshake = Endpoint.Configuration().HandshakeTimeout;
+	const std::chrono::milliseconds handshake = Target.Configuration().HandshakeTimeout;
 	const TimePoint deadline = Now() + (timeout ? std::min(*timeout, handshake) : handshake);
 	for (;;)
 	{
-		switch (Endpoint.Connect(Now(), deadline))
+		switch (Target.Connect(Now(), deadline))
 		{
 		case ConnectResult::Connected:
 			return true;
 		case ConnectResult::Refused:
 			return false;
 		case ConnectResult::Started:
-			Loop->Wake();
+			Wake();
 			static_cast<void>(WaitSettled(deadline));
-			return Endpoint.Status().Connected;
+			return Target.Status().Connected;
 		case ConnectResult::Busy:
 			// Retry once the attempt or close in flight ends.
 			if (!WaitSettled(deadline))
 			{
-				return Endpoint.Status().Connected;
+				return Target.Status().Connected;
 			}
 			break;
 		}
@@ -103,7 +64,7 @@ FlushResult ThreadedProducerDriver::Flush(std::optional<std::chrono::millisecond
 		timeout ? std::optional(Now() + *timeout) : std::nullopt;
 	for (;;)
 	{
-		const ProducerStatus status = Endpoint.Status();
+		const ProducerStatus status = Target.Status();
 		if (status.Failure)
 		{
 			return FlushResult::RecoveryRequired;
@@ -119,10 +80,10 @@ FlushResult ThreadedProducerDriver::Flush(std::optional<std::chrono::millisecond
 		}
 		if (status.Connected)
 		{
-			static_cast<void>(Loop->Wait(
+			static_cast<void>(Wait(
 				[this]
 				{
-					const ProducerStatus current = Endpoint.Status();
+					const ProducerStatus current = Target.Status();
 					return !current.Connected || current.PendingTransactions == 0 ||
 						   current.Failure;
 				},
@@ -144,38 +105,18 @@ FlushResult ThreadedProducerDriver::Flush(std::optional<std::chrono::millisecond
 	}
 }
 
-bool ThreadedProducerDriver::Running() const
-{
-	return Loop->Running();
-}
-
-bool ThreadedProducerDriver::Stopped() const
-{
-	return Loop->Stopped();
-}
-
-std::optional<std::thread::id> ThreadedProducerDriver::ThreadId() const
-{
-	return Loop->ThreadId();
-}
-
-std::optional<TransportFailure> ThreadedProducerDriver::LastFailure() const
-{
-	return Loop->LastFailure();
-}
-
 bool ThreadedProducerDriver::CanWait() const
 {
 	// On the loop thread a wait would wait for itself.
-	return Loop->Running() && Loop->ThreadId() != std::this_thread::get_id();
+	return Running() && ThreadId() != std::this_thread::get_id();
 }
 
 bool ThreadedProducerDriver::WaitSettled(TimePoint deadline)
 {
-	return Loop->Wait(
+	return Wait(
 		[this]
 		{
-			const ProducerStatus status = Endpoint.Status();
+			const ProducerStatus status = Target.Status();
 			return !status.Handshaking && !status.Closing;
 		},
 		Until(deadline));
@@ -183,7 +124,7 @@ bool ThreadedProducerDriver::WaitSettled(TimePoint deadline)
 
 void ThreadedProducerDriver::Pause(TimePoint until)
 {
-	static_cast<void>(Loop->Wait(
+	static_cast<void>(Wait(
 		[]
 		{
 			return false;

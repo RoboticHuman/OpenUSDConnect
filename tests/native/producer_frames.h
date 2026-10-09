@@ -53,16 +53,6 @@ using namespace endpoint_test;
 	return {bytes, bytes + builder.GetSize()};
 }
 
-[[nodiscard]] inline std::vector<Payload> Kinds(const std::vector<Bytes>& frames)
-{
-	std::vector<Payload> kinds;
-	for (const Bytes& frame : frames)
-	{
-		kinds.push_back(DecodeSent(frame).payload_type());
-	}
-	return kinds;
-}
-
 [[nodiscard]] inline std::vector<std::uint64_t> TransactionIds(const std::vector<Bytes>& frames)
 {
 	std::vector<std::uint64_t> ids;

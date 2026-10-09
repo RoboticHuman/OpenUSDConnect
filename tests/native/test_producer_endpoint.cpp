@@ -13,6 +13,7 @@
 #include <string>
 #include <string_view>
 #include <thread>
+#include <tuple>
 #include <utility>
 #include <variant>
 #include <vector>
@@ -59,13 +60,9 @@ public:
 	// Takes a new attempt's actions and returns its deadline, when the endpoint wakes.
 	TimePoint Attempt()
 	{
-		const ConnectAction connect = Next<ConnectAction>();
+		const ConnectAction connect = Single<ConnectAction>();
 		CHECK(connect.Host == "127.0.0.1" && connect.Port == 7200);
 		CHECK(Endpoint.NextWake() == connect.Deadline);
-		for (const Action& action : Commands())
-		{
-			CHECK(std::holds_alternative<WakeAction>(action));
-		}
 		return connect.Deadline;
 	}
 
@@ -426,58 +423,71 @@ void TestHandshakeDeadline()
 	}
 }
 
-void TestRequestBackoffDoublesAndResetsOnPublication()
+void FailRequest(Producer& producer)
 {
-	Producer producer;
-	for (const std::chrono::milliseconds delay : {1s, 2s, 4s, 8s, 8s})
-	{
-		CHECK(producer.Endpoint.RequestConnect(producer.Now, producer.Now + 2s));
-		static_cast<void>(producer.Attempt());
-		producer.Disconnect(DisconnectReason::ConnectFailed);
-		CHECK(!producer.Endpoint.RequestConnect(producer.Now + delay - 1ms, producer.Now + 1h));
-		producer.Now += delay;
-	}
-	static_cast<void>(producer.Handshake());
-	producer.Disconnect();
-	// A lost connection is not a failed attempt, and publication reset the delay.
 	CHECK(producer.Endpoint.RequestConnect(producer.Now, producer.Now + 2s));
 	static_cast<void>(producer.Attempt());
 	producer.Disconnect(DisconnectReason::ConnectFailed);
-	CHECK(!producer.Endpoint.RequestConnect(producer.Now + 999ms, producer.Now + 1h));
-	CHECK(producer.Endpoint.RequestConnect(producer.Now + 1s, producer.Now + 1h));
 }
 
-void TestExplicitConnectNeitherWaitsForNorExtendsTheBackoff()
+// After a failed requested attempt, what happens next decides whether
+// RequestConnect is allowed at once and a second later.
+void TestRequestBackoff()
 {
-	Producer producer;
-	CHECK(producer.Endpoint.RequestConnect(producer.Now, producer.Now + 2s));
-	static_cast<void>(producer.Attempt());
-	producer.Disconnect(DisconnectReason::ConnectFailed);
-	CHECK(producer.Endpoint.Connect(producer.Now, producer.Now + 2s) == ConnectResult::Started);
-	static_cast<void>(producer.Attempt());
-	producer.Disconnect(DisconnectReason::ConnectFailed);
-	CHECK(producer.Endpoint.RequestConnect(producer.Now + 1s, producer.Now + 1h));
-}
-
-void TestCancelAndDisconnectResetTheBackoff()
-{
-	for (const bool cancel : {true, false})
+	const std::tuple<void (*)(Producer&), bool, bool> rows[] = {
+		{nullptr, false, true},
+		// A second failure once the backoff ends doubles it.
+		{[](Producer& producer)
+		 {
+			 producer.Now += 1s;
+			 FailRequest(producer);
+		 },
+		 false, false},
+		// An explicit Connect neither waits for nor extends it.
+		{[](Producer& producer)
+		 {
+			 CHECK(producer.Endpoint.Connect(producer.Now, producer.Now + 2s) ==
+				   ConnectResult::Started);
+			 static_cast<void>(producer.Attempt());
+			 producer.Disconnect(DisconnectReason::ConnectFailed);
+		 },
+		 false, true},
+		// Cancelling, disconnecting, and a published connection reset it; a lost
+		// connection is not a failed attempt.
+		{[](Producer& producer)
+		 {
+			 CHECK(producer.Endpoint.CancelConnect());
+		 },
+		 true, true},
+		{[](Producer& producer)
+		 {
+			 producer.Endpoint.Disconnect();
+		 },
+		 true, true},
+		{[](Producer& producer)
+		 {
+			 producer.Now += 1s;
+			 static_cast<void>(producer.Handshake());
+			 producer.Disconnect();
+			 FailRequest(producer);
+		 },
+		 false, true},
+	};
+	for (const auto& [then, allowed_now, allowed_later] : rows)
 	{
-		Producer producer;
-		CHECK(producer.Endpoint.RequestConnect(producer.Now, producer.Now + 2s));
-		static_cast<void>(producer.Attempt());
-		producer.Disconnect(DisconnectReason::ConnectFailed);
-		CHECK(!producer.Endpoint.RequestConnect(producer.Now, producer.Now + 2s));
-		if (cancel)
+		for (const std::chrono::milliseconds later : {0s, 1s})
 		{
-			CHECK(producer.Endpoint.CancelConnect());
+			Producer producer;
+			FailRequest(producer);
+			if (then)
+			{
+				then(producer);
+			}
+			CHECK(producer.Commands().empty());
+			const TimePoint at = producer.Now + later;
+			CHECK(producer.Endpoint.RequestConnect(at, at + 2s) ==
+				  (later == 0s ? allowed_now : allowed_later));
 		}
-		else
-		{
-			producer.Endpoint.Disconnect();
-		}
-		CHECK(producer.Commands().empty());
-		CHECK(producer.Endpoint.RequestConnect(producer.Now, producer.Now + 2s));
 	}
 }
 
@@ -1015,7 +1025,7 @@ void TestControlFramesFollowTheConnection()
 	CHECK(producer.Endpoint.QueueControl(ClaimFrame()));
 	CHECK(producer.Submit("/B") == ProducerResult::Accepted);
 	CHECK(!producer.Endpoint.QueueControl(Bytes{1, 2, 3}));
-	CHECK((Kinds(producer.Sends()) ==
+	CHECK((Kinds<DecodeSent>(producer.Sends()) ==
 		   std::vector<Payload>{Payload::Txn, Payload::ClaimPlayback, Payload::Txn}));
 	producer.Disconnect();
 	CHECK(TransactionIds(producer.Handshake()) == (std::vector<std::uint64_t>{1, 2}));
@@ -1134,9 +1144,7 @@ int main()
 	TestHelloHighwaterRegressionRequiresRecovery();
 	TestHandshakeProtocolErrorsAreFailedAttempts();
 	TestHandshakeDeadline();
-	TestRequestBackoffDoublesAndResetsOnPublication();
-	TestExplicitConnectNeitherWaitsForNorExtendsTheBackoff();
-	TestCancelAndDisconnectResetTheBackoff();
+	TestRequestBackoff();
 	TestCancelDuringHandshakeKeepsTheSessionHealthy(false);
 	TestCancelDuringHandshakeKeepsTheSessionHealthy(true);
 	TestCancelBeforeTheSocketOpens();

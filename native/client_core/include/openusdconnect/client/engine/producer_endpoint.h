@@ -2,7 +2,6 @@
 
 #include "openusdconnect/client/engine/actions.h"
 #include "openusdconnect/client/engine/notification.h"
-#include "openusdconnect/client/engine/reconnect_policy.h"
 #include "openusdconnect/client/producer_recovery.h"
 #include "openusdconnect/client/producer_session.h"
 #include "openusdconnect/client/protocol_codec.h"
@@ -168,7 +167,6 @@ private:
 	[[nodiscard]] bool IsOpen() const noexcept;
 	void BeginAttempt(TimePoint now, TimePoint deadline, bool backoff_on_failure);
 	void ResetBackoff() noexcept;
-	void Quit(DisconnectReason reason);
 	void Close(DisconnectReason reason);
 	void EndConnection(DisconnectReason reason);
 

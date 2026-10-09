@@ -9,7 +9,6 @@
 #include <condition_variable>
 #include <cstddef>
 #include <cstdint>
-#include <functional>
 #include <memory>
 #include <mutex>
 #include <optional>
@@ -19,83 +18,45 @@
 #include <variant>
 #include <vector>
 
-namespace openusdconnect::client::detail
+namespace openusdconnect::client
 {
 
-// What a DriverLoop needs from an endpoint beyond the host I/O they share.
+// Reference host loop: one thread with blocking sockets applies a started
+// endpoint's actions. Of the endpoint it calls only the host I/O both
+// endpoints share (OnConnected, OnBytes, OnDisconnected, OnTick, Stop,
+// TakeActions, NextWake, Status().Stopped) and the OnReadTimeout its role
+// supplies. It ticks at NextWake, during reads too, and exits once the
+// endpoint stops. A host thread that queues actions through the endpoint must
+// then Wake it. Never destroy the driver from one of its callbacks. Hosts with
+// their own scheduler drive the endpoint instead.
 template <typename Endpoint>
-struct LoopRole final
-{
-	// A write that still waits for the peer this long after it began is a TransportError.
-	std::chrono::milliseconds SendTimeout{};
-	// Optional: called when a read waits ReadTimeout without receiving a byte.
-	void (Endpoint::*OnReadTimeout)() = nullptr;
-	std::chrono::milliseconds ReadTimeout{};
-};
-
-// One thread applying a started endpoint's actions with blocking sockets. Of
-// the endpoint it calls only the host I/O both endpoints share (OnConnected,
-// OnBytes, OnDisconnected, OnTick, Stop, TakeActions, NextWake,
-// Status().Stopped) and LoopRole. It ticks at NextWake, during reads too, and
-// exits once the endpoint stops. A host thread that queues actions through the
-// endpoint, such as Append, QueueControl, or RequestConnect, must then Wake it.
-template <typename Endpoint>
-class DriverLoop final
+class ThreadedDriver
 {
 public:
-	DriverLoop(Endpoint& endpoint, LoopRole<Endpoint> role, NotificationQueue& notifications,
-			   std::shared_ptr<SocketFactory> sockets, DriverCallbacks callbacks)
-		: Target(endpoint)
-		, Role(role)
-		, Notifications(notifications)
-		, Sockets(std::move(sockets))
-		, Callbacks(std::move(callbacks))
-		, Buffer(kReadBufferSize)
-	{
-	}
+	using EndpointType = Endpoint;
 
-	~DriverLoop()
-	{
-		Stop();
-		std::lock_guard join_lock(JoinMutex);
-		if (!Thread.joinable())
-		{
-			return;
-		}
-		if (Thread.get_id() == std::this_thread::get_id())
-		{
-			Thread.detach();
-		}
-		else
-		{
-			Thread.join();
-		}
-	}
+	ThreadedDriver(const ThreadedDriver&) = delete;
+	ThreadedDriver& operator=(const ThreadedDriver&) = delete;
 
-	DriverLoop(const DriverLoop&) = delete;
-	DriverLoop& operator=(const DriverLoop&) = delete;
-
+	// Starts the loop; false when already started.
 	[[nodiscard]] bool Start()
 	{
-		std::lock_guard join_lock(JoinMutex);
+		std::lock_guard lock(Mutex);
+		if (Started)
 		{
-			std::lock_guard lock(Mutex);
-			if (Started)
-			{
-				return false;
-			}
+			return false;
 		}
 		Thread = std::thread(
 			[this]
 			{
 				Run();
 			});
-		std::lock_guard lock(Mutex);
 		Started = true;
 		ThreadIdentity = Thread.get_id();
 		return true;
 	}
 
+	// Stops the endpoint and wakes the loop, which then exits. Never blocks.
 	void Stop()
 	{
 		// First, so a loop that StopRequested wakes finds the endpoint stopped.
@@ -128,37 +89,91 @@ public:
 		Changed.notify_all();
 	}
 
-	[[nodiscard]] bool Join(std::optional<std::chrono::milliseconds> timeout)
+	// Waits for the loop to exit; false on timeout or on the driver thread.
+	[[nodiscard]] bool Join(std::optional<std::chrono::milliseconds> timeout = std::nullopt)
 	{
+		std::unique_lock lock(Mutex);
+		if (!Started)
 		{
-			std::unique_lock lock(Mutex);
-			if (!Started)
-			{
-				return true;
-			}
-			if (ThreadIdentity == std::this_thread::get_id())
-			{
-				return false;
-			}
-			const auto exited = [this]
-			{
-				return Exited;
-			};
-			if (!timeout)
-			{
-				Changed.wait(lock, exited);
-			}
-			else if (!Changed.wait_for(lock, *timeout, exited))
-			{
-				return false;
-			}
+			return true;
 		}
-		std::lock_guard join_lock(JoinMutex);
+		if (ThreadIdentity == std::this_thread::get_id())
+		{
+			return false;
+		}
+		const auto exited = [this]
+		{
+			return Exited;
+		};
+		if (!timeout)
+		{
+			Changed.wait(lock, exited);
+		}
+		else if (!Changed.wait_for(lock, *timeout, exited))
+		{
+			return false;
+		}
+		// The loop takes Mutex no more once it exited, so joining under it cannot block it.
 		if (Thread.joinable())
 		{
 			Thread.join();
 		}
 		return true;
+	}
+
+	[[nodiscard]] bool Running() const
+	{
+		std::lock_guard lock(Mutex);
+		return Started && !Exited;
+	}
+
+	// The loop ran and exited.
+	[[nodiscard]] bool Stopped() const
+	{
+		std::lock_guard lock(Mutex);
+		return Started && Exited;
+	}
+
+	[[nodiscard]] std::optional<std::thread::id> ThreadId() const
+	{
+		std::lock_guard lock(Mutex);
+		if (ThreadIdentity == std::thread::id())
+		{
+			return std::nullopt;
+		}
+		return ThreadIdentity;
+	}
+
+	// Why the latest connection attempt failed, if it did.
+	[[nodiscard]] std::optional<TransportFailure> LastFailure() const
+	{
+		std::lock_guard lock(Mutex);
+		return Failure;
+	}
+
+protected:
+	// notifications must be the queue the endpoint pushes to. A write still
+	// waiting for the peer socket_timeout after it began is a TransportError;
+	// with on_read_timeout set, a read that waits as long without a byte calls it.
+	ThreadedDriver(Endpoint& endpoint, NotificationQueue& notifications,
+				   std::shared_ptr<SocketFactory> sockets, DriverCallbacks callbacks,
+				   std::chrono::milliseconds socket_timeout,
+				   void (Endpoint::*on_read_timeout)() = nullptr)
+		: Target(endpoint)
+		, Notifications(notifications)
+		, Sockets(std::move(sockets))
+		, Callbacks(std::move(callbacks))
+		, SocketTimeout(socket_timeout)
+		, OnReadTimeout(on_read_timeout)
+		, Buffer(kReadBufferSize)
+	{
+	}
+
+	// Stops and joins the loop.
+	~ThreadedDriver()
+	{
+		Stop();
+		static_cast<void>(Join());
 	}
 
 	// Waits until ready holds, the loop stops or exits, or timeout passes.
@@ -182,48 +197,18 @@ public:
 		return ready();
 	}
 
-	[[nodiscard]] bool Running() const
-	{
-		std::lock_guard lock(Mutex);
-		return Started && !Exited;
-	}
-
-	[[nodiscard]] bool Stopped() const
-	{
-		std::lock_guard lock(Mutex);
-		return Started && Exited;
-	}
-
-	[[nodiscard]] std::optional<std::thread::id> ThreadId() const
-	{
-		std::lock_guard lock(Mutex);
-		if (ThreadIdentity == std::thread::id())
-		{
-			return std::nullopt;
-		}
-		return ThreadIdentity;
-	}
-
-	[[nodiscard]] std::optional<TransportFailure> LastFailure() const
-	{
-		std::lock_guard lock(Mutex);
-		return Failure;
-	}
-
-private:
-	static constexpr std::size_t kReadBufferSize = 64 * 1024;
-
 	[[nodiscard]] static TimePoint Now() noexcept
 	{
 		return std::chrono::steady_clock::now();
 	}
 
+	Endpoint& Target;
+
+private:
+	static constexpr std::size_t kReadBufferSize = 64 * 1024;
+
 	void Run()
 	{
-		{
-			std::lock_guard lock(Mutex);
-			ThreadIdentity = std::this_thread::get_id();
-		}
 		for (;;)
 		{
 			Dispatch();
@@ -239,7 +224,11 @@ private:
 			Sleep(Target.NextWake());
 			Target.OnTick(Now());
 		}
-		Finish();
+		{
+			std::lock_guard lock(Mutex);
+			Exited = true;
+		}
+		Changed.notify_all();
 	}
 
 	// Delivers notifications before applying each batch of actions, so a
@@ -323,8 +312,8 @@ private:
 		{
 			return;
 		}
-		const SocketResult result = Connection->SendAll(action.Bytes->data(), action.Bytes->size(),
-														Now() + Role.SendTimeout);
+		const SocketResult result =
+			Connection->SendAll(action.Bytes->data(), action.Bytes->size(), Now() + SocketTimeout);
 		if (result != SocketResult::Success)
 		{
 			Fail(SocketOperation::Send, result, *Connection, "send failed");
@@ -337,11 +326,6 @@ private:
 		Close(action.Reason);
 	}
 
-	void Apply(const WakeAction&)
-	{
-		// Run and Read tick at NextWake, which covers every WakeAction.
-	}
-
 	void Apply(const LogAction& action)
 	{
 		Log(action.Level, action.Message);
@@ -351,9 +335,9 @@ private:
 	{
 		const std::optional<TimePoint> wake = Target.NextWake();
 		std::optional<TimePoint> deadline = wake;
-		if (Role.OnReadTimeout)
+		if (OnReadTimeout)
 		{
-			const TimePoint timeout = Now() + Role.ReadTimeout;
+			const TimePoint timeout = Now() + SocketTimeout;
 			deadline = wake ? std::min(*wake, timeout) : timeout;
 		}
 		std::size_t received = 0;
@@ -369,9 +353,9 @@ private:
 			{
 				Target.OnTick(now);
 			}
-			else if (Role.OnReadTimeout)
+			else if (OnReadTimeout)
 			{
-				(Target.*Role.OnReadTimeout)();
+				(Target.*OnReadTimeout)();
 			}
 			return;
 		case SocketResult::Interrupted:
@@ -439,28 +423,11 @@ private:
 		}
 	}
 
-	// Run returns right after this; nothing here may touch the loop after
-	// the Exited callback, which may destroy it.
-	void Finish()
-	{
-		std::function<void()> exited;
-		{
-			std::lock_guard lock(Mutex);
-			Exited = true;
-			exited = std::move(Callbacks.Exited);
-		}
-		Changed.notify_all();
-		if (exited)
-		{
-			exited();
-		}
-	}
-
-	Endpoint& Target;
-	const LoopRole<Endpoint> Role;
 	NotificationQueue& Notifications;
 	const std::shared_ptr<SocketFactory> Sockets;
-	DriverCallbacks Callbacks;
+	const DriverCallbacks Callbacks;
+	const std::chrono::milliseconds SocketTimeout;
+	void (Endpoint::* const OnReadTimeout)();
 	std::vector<std::uint8_t> Buffer;
 
 	mutable std::mutex Mutex;
@@ -473,10 +440,7 @@ private:
 	bool Exited = false;
 	bool StopRequested = false;
 	bool WakeRequested = false;
-
-	// Serializes joining, apart from Mutex so Exited may still use the loop.
-	std::mutex JoinMutex;
 	std::thread Thread;
 };
 
-} // namespace openusdconnect::client::detail
+} // namespace openusdconnect::client

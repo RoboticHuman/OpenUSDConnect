@@ -324,7 +324,6 @@ void ReceiverEndpoint::ScheduleNextAttempt(TimePoint now)
 	State = ConnectionState::Backoff;
 	const auto delay = std::chrono::duration_cast<std::chrono::milliseconds>(WakeTime - now);
 	Log(LogLevel::Info, "reconnecting in " + std::to_string(delay.count()) + " ms");
-	Actions.push_back(WakeAction{WakeTime});
 }
 
 void ReceiverEndpoint::PollDrain(TimePoint now)
@@ -341,7 +340,6 @@ void ReceiverEndpoint::PollDrain(TimePoint now)
 	else if (now >= WakeTime)
 	{
 		WakeTime = std::min(now + kDrainPollInterval, DrainDeadline);
-		Actions.push_back(WakeAction{WakeTime});
 	}
 }
 

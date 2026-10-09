@@ -24,16 +24,6 @@ using namespace endpoint_test;
 	return config;
 }
 
-[[nodiscard]] inline std::vector<Payload> Kinds(const std::vector<Bytes>& frames)
-{
-	std::vector<Payload> kinds;
-	for (const Bytes& frame : frames)
-	{
-		kinds.push_back(Decode(frame).payload_type());
-	}
-	return kinds;
-}
-
 [[nodiscard]] inline std::vector<std::int32_t> Sequences(const std::vector<Bytes>& frames)
 {
 	std::vector<std::int32_t> sequences;

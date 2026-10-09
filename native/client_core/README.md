@@ -11,11 +11,11 @@ The native core is split into four composable C++17 targets:
   `engine/producer_endpoint.h`) that own the connection protocol: handshake and negotiation,
   replay identity, outbox replay and transaction results, control messages, and reconnect policy.
   They start no threads and open no sockets.
-- `OpenUSDConnect::ClientDriver` is an optional reference host loop
-  (`driver/threaded_receiver_driver.h`, `driver/threaded_producer_driver.h`): one thread with
-  blocking Winsock or BSD sockets drives an endpoint. `driver/socket.h` holds what a host supplies:
-  the socket factory and the `DriverCallbacks`. The Python module links it; hosts with their own
-  I/O loop and scheduler drive the endpoint directly and never link it.
+- `OpenUSDConnect::ClientDriver` is an optional reference host loop (`driver/threaded_driver.h`,
+  with the roles in `driver/threaded_receiver_driver.h` and `driver/threaded_producer_driver.h`):
+  one thread with blocking Winsock or BSD sockets drives an endpoint. `driver/socket.h` holds what
+  a host supplies: the socket factory and the `DriverCallbacks`. The Python module links it; hosts
+  with their own I/O loop and scheduler drive the endpoint directly and never link it.
 
 The protocol layer deliberately does not own transport, threads, queues, event-offset storage, or
 serialized buffers. Decoded views borrow the caller's receive buffer. Builders operate on a
@@ -39,11 +39,10 @@ unchanged.
 A host drives `ReceiverEndpoint` from its own I/O loop and scheduler:
 
 1. Call `Start(now)`, then apply `TakeActions()` in order: `ConnectAction` opens a socket,
-   `SendAction` writes, `CloseAction` closes it, `WakeAction` schedules `OnTick`, and `LogAction`
-   goes to the host's log.
+   `SendAction` writes, `CloseAction` closes it, and `LogAction` goes to the host's log.
 2. Report `OnConnected(token)`, every read with `OnBytes`, each read that waited `SocketTimeout`
-   with `OnReadTimeout`, and the end of a socket or connect attempt with `OnDisconnected`. Apply
-   the actions again after each report.
+   with `OnReadTimeout`, the end of a socket or connect attempt with `OnDisconnected`, and the
+   time with `OnTick` once `NextWake()` passes. Apply the actions again after each report.
 3. The stage-owning thread drains frames with `DrainFrames` and reports progress as the header
    describes. Notifications arrive in the `NotificationQueue` the host drains.
 
@@ -58,29 +57,32 @@ the next connection. `Append` takes a complete length-prefixed `Txn` frame that 
 id through `Append`. A rejection stays in `Status().Failure` until `RepairRejected` or
 `AbandonRejectedSession` resolves it.
 
-`ThreadedReceiverDriver` is that loop on one thread. `Start()` starts the endpoint and runs it, and
-the optional `DriverCallbacks` supply the token for each handshake, receive the drained
-notifications, take log lines, and report the thread's exit; they run on the driver thread with no
-lock held. `Stop()` never blocks: it stops the endpoint and interrupts a pending connect or read
-through an event the socket waits on, since `shutdown()` does not wake a blocked Winsock call.
-`Join(timeout)` waits for the thread. After a consumer-thread call that can close the connection or
-complete the replay, such as `RequestReplayFrom` or `MarkReplayApplied`, call `Wake()` so the loop
-applies the new actions and `WaitConnected`/`WaitSynchronized` re-check.
+`ThreadedDriver<Endpoint>` is that loop on one thread, and `ThreadedReceiverDriver` and
+`ThreadedProducerDriver` are its two roles. The optional `DriverCallbacks` supply the token for each
+handshake, receive the drained notifications, and take log lines; they run on the driver thread
+with no lock held and must not destroy the driver. `Stop()` never blocks: it stops the endpoint and
+interrupts a pending connect or read through an event the socket waits on, since `shutdown()` does
+not wake a blocked Winsock call. `Join(timeout)` waits for the thread, and destroying the driver
+stops and joins it.
 
-`ThreadedProducerDriver` runs a `ProducerEndpoint` the same way. `Start()` runs the loop, which
-idles between connections until `Stop()`. Call `Wake()` after `Append`, `QueueControl`,
-`RequestConnect`, `CancelConnect`, or `Disconnect` so the loop applies their actions. The blocking
-calls run on another thread: `Connect(timeout)` makes one attempt once any attempt or close in
+`ThreadedReceiverDriver::Start()` starts the endpoint, then the loop. After a consumer-thread call
+that can close the connection or complete the replay, such as `RequestReplayFrom` or
+`MarkReplayApplied`, call `Wake()` so the loop applies the new actions and
+`WaitConnected`/`WaitSynchronized` re-check.
+
+`ThreadedProducerDriver::Start()` runs the loop, which idles between connections until `Stop()`.
+Call `Wake()` after `Append`, `QueueControl`, `RequestConnect`, `CancelConnect`, or `Disconnect` so
+the loop applies their actions. The blocking calls run on another thread: `Connect(timeout)` makes one attempt once any attempt or close in
 flight ends, and `Flush(timeout)` waits until every appended transaction is acknowledged,
 connecting outside the rate-limit window while time remains, and reports `RecoveryRequired` once
 a rejection needs recovery.
 
 `driver/testing/scripted_socket.h` is a seam for the C++ tests only. It is built into
 `OpenUSDConnect::ClientDriverTesting`, which no shipped module links and which builds only when a
-target links it. Each connect of a `ScriptedSocketFactory` socket waits until
-the test accepts or refuses it; the accepted `ScriptedConnection` delivers scripted bytes, read
-timeouts, or a peer close, records what the client sent, can stall the client's writes, and
-`WaitIdle` returns once the client handled every delivery and waits for more.
+target links it. Each connect of a `ScriptedSocketFactory` socket waits until the test accepts or
+refuses it; the accepted `ScriptedConnection` delivers scripted bytes or a peer close, records what
+the client sent, can stall the client's writes, and `WaitIdle` returns once the client handled
+every delivery and waits for more. A read that waits past its deadline reports `Timeout`.
 
 When included with `add_subdirectory`, link `OpenUSDConnect::ClientProtocol`,
 `OpenUSDConnect::ClientEngine`, or `OpenUSDConnect::ClientDriver` (which links `ws2_32` on

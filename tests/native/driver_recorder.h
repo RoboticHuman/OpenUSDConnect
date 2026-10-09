@@ -1,10 +1,15 @@
 #pragma once
 
 #include "openusdconnect/client/driver/socket.h"
+#include "openusdconnect/client/driver/testing/scripted_socket.h"
 #include "openusdconnect/client/engine/notification.h"
+
+#include "frames.h"
+#include "test_check.h"
 
 #include <chrono>
 #include <cstddef>
+#include <memory>
 #include <mutex>
 #include <string>
 #include <string_view>
@@ -13,7 +18,7 @@
 #include <variant>
 #include <vector>
 
-// What the reference drivers report, shared by the driver tests.
+// What the driver tests share: patience, a recorder, and a harness.
 namespace driver_test
 {
 
@@ -128,6 +133,71 @@ private:
 	std::vector<Notification> Notices;
 	std::vector<std::string> Logs;
 	std::string Token;
+};
+
+// One endpoint driven by its reference driver over scripted sockets.
+template <typename DriverType>
+class DriverHarness
+{
+public:
+	using EndpointType = typename DriverType::EndpointType;
+
+	template <typename Config>
+	explicit DriverHarness(const Config& config, DriverCallbacks callbacks = {})
+		: Endpoint(config, Notifications)
+		, Sockets(std::make_shared<ScriptedSocketFactory>())
+		, Driver(std::make_unique<DriverType>(Endpoint, Notifications, Sockets,
+											  Record.Recording(std::move(callbacks))))
+	{
+	}
+
+	~DriverHarness()
+	{
+		Driver->Stop();
+		CHECK(Driver->Join(kPatience));
+	}
+
+	DriverHarness(const DriverHarness&) = delete;
+	DriverHarness& operator=(const DriverHarness&) = delete;
+
+	// Accepts the pending connect and returns once the client sent its Hello.
+	[[nodiscard]] std::shared_ptr<ScriptedConnection> Accept()
+	{
+		std::shared_ptr<ScriptedConnection> connection = Sockets->Accept(kPatience);
+		CHECK(connection != nullptr);
+		CHECK(connection->WaitIdle(kPatience));
+		return connection;
+	}
+
+	void Deliver(ScriptedConnection& connection, const endpoint_test::Bytes& frame)
+	{
+		CHECK(connection.Deliver(frame));
+		CHECK(connection.WaitIdle(kPatience));
+	}
+
+	// Starts the loop if needed, then accepts the pending attempt with a HelloOk.
+	[[nodiscard]] std::shared_ptr<ScriptedConnection>
+	Handshake(const endpoint_test::server::Hello& hello = {})
+	{
+		if (!Driver->Running())
+		{
+			CHECK(Driver->Start());
+		}
+		std::shared_ptr<ScriptedConnection> connection = Accept();
+		Deliver(*connection, endpoint_test::server::HelloOk(hello));
+		CHECK(Eventually(
+			[this]
+			{
+				return Endpoint.Status().Connected;
+			}));
+		return connection;
+	}
+
+	NotificationQueue Notifications;
+	EndpointType Endpoint;
+	Recorder Record;
+	const std::shared_ptr<ScriptedSocketFactory> Sockets;
+	const std::unique_ptr<DriverType> Driver;
 };
 
 } // namespace driver_test

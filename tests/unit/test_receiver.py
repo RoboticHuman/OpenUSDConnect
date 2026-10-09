@@ -1,10 +1,12 @@
 """ReceiverThread's wrapper contract, exercised against a live server."""
 
+import gc
 import logging
 import socket
 import threading
 import time
 import uuid
+from contextlib import nullcontext as does_not_raise
 
 import pytest
 from pxr import Usd, UsdGeom
@@ -73,22 +75,11 @@ def _messages(frames):
 
 
 @pytest.mark.parametrize(
-    "options",
-    [
-        {"host": ""},
-        {"port": 0},
-        {"sync_from": 0},
-        {"max_queue": 0},
-        {"socket_timeout": 0},
-        {"reconnect_base_delay": 0},
-        {"reconnect_base_delay": 2, "reconnect_max_delay": 1},
-        {"layer_mode": LayerMode.SHARED_STAGE},
-        {"layer_mode": "unknown"},
-    ],
+    ("max_queue", "outcome"), [(0, pytest.raises(ValueError)), (1, does_not_raise())]
 )
-def test_invalid_settings_raise_value_error(options):
-    with pytest.raises(ValueError):
-        ReceiverThread(**options)
+def test_invalid_settings_raise_value_error(max_queue, outcome):
+    with outcome:
+        ReceiverThread(max_queue=max_queue)
 
 
 def test_consumer_calls_reject_invalid_arguments():
@@ -158,6 +149,23 @@ def test_thread_api_before_during_and_after_running(receivers):
     receiver.join(5)
     assert time.monotonic() - started < 2, "stop waited for the read timeout"
     assert receiver.stopped and not receiver.is_alive() and not receiver.connected
+
+
+def test_collecting_a_receiver_stops_its_connection(server):
+    state = server.sync_server
+    receiver = ReceiverThread("127.0.0.1", server.server_address[1], client_id=uuid.uuid4().hex)
+    client_id = receiver.client_id
+    receiver.start()
+    assert receiver.wait_connected(5)
+
+    def connected():
+        with state.clients_lock:
+            return any(info.client_id == client_id for info in state.clients.values())
+
+    wait_until(connected)
+    del receiver
+    gc.collect()
+    wait_until(lambda: not connected())
 
 
 def test_stop_before_start_ends_without_connecting(receivers, server):

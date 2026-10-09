@@ -273,22 +273,20 @@ BuildHelloFrame(flatbuffers::FlatBufferBuilder& builder, const HelloParameters& 
 	{
 		return ProtocolResult::InvalidArgument;
 	}
-	const auto replay_server_instance = parameters.ReplayPrefix
-		? CreateString(builder, parameters.ReplayPrefix->ServerInstance())
-		: flatbuffers::Offset<flatbuffers::String>();
+	const auto replay_server_instance =
+		parameters.ReplayPrefix ? CreateString(builder, parameters.ReplayPrefix->ServerInstance())
+								: flatbuffers::Offset<flatbuffers::String>();
 	const std::optional<std::uint64_t> claimed_epoch =
 		parameters.ReplayPrefix ? parameters.ReplayPrefix->Epoch() : std::nullopt;
-	const auto replay_epoch = claimed_epoch
-		? flatbuffers::Optional<std::uint64_t>(*claimed_epoch)
-		: flatbuffers::nullopt;
+	const auto replay_epoch =
+		claimed_epoch ? flatbuffers::Optional<std::uint64_t>(*claimed_epoch) : flatbuffers::nullopt;
 
 	const auto hello = OpenUSDConnect::CreateHello(
 		builder, CreateString(builder, parameters.Role), kProtocolVersion, parameters.SyncFrom,
 		CreateString(builder, parameters.ClientId), CreateString(builder, parameters.Origin),
 		CreateString(builder, parameters.Department), CreateString(builder, parameters.Token),
 		parameters.LayeredReplay, parameters.LayerMode,
-		CreateString(builder, parameters.ProducerSessionId), replay_server_instance,
-		replay_epoch);
+		CreateString(builder, parameters.ProducerSessionId), replay_server_instance, replay_epoch);
 	const auto envelope = OpenUSDConnect::CreateEnvelope(builder, OpenUSDConnect::Payload::Hello,
 														 hello.Union(), kSchemaVersion);
 	return FinishEnvelopeFrame(builder, envelope, max_frame_size);

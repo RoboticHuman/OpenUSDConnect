@@ -47,6 +47,18 @@ using Bytes = std::vector<std::uint8_t>;
 	return *view.Get();
 }
 
+// The payload type of each frame, decoded with Decoder.
+template <const OpenUSDConnect::Envelope& (*Decoder)(const Bytes&)>
+[[nodiscard]] std::vector<Payload> Kinds(const std::vector<Bytes>& frames)
+{
+	std::vector<Payload> kinds;
+	for (const Bytes& frame : frames)
+	{
+		kinds.push_back(Decoder(frame).payload_type());
+	}
+	return kinds;
+}
+
 // Server-to-client frames, length-prefixed as they arrive on the socket.
 namespace server
 {

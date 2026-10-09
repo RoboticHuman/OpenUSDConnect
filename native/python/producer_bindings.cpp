@@ -24,14 +24,14 @@
 namespace nb = nanobind;
 using namespace nb::literals;
 using namespace openusdconnect::client;
+using openusdconnect::python::DurationProperty;
 using openusdconnect::python::Milliseconds;
-using openusdconnect::python::Seconds;
 using openusdconnect::python::Timeout;
 
 namespace
 {
 
-using PythonProducerDriver = openusdconnect::python::PythonDriver<ThreadedProducerDriver, ProducerEndpoint>;
+using PythonProducerDriver = openusdconnect::python::PythonDriver<ThreadedProducerDriver>;
 
 // Python passes and receives bare envelopes; the endpoint keeps them framed.
 // An envelope that cannot be framed leaves the frame empty, which the endpoint
@@ -51,8 +51,8 @@ using PythonProducerDriver = openusdconnect::python::PythonDriver<ThreadedProduc
 
 void BindTypes(nb::module_& module)
 {
-	nb::class_<ProducerConfig>(module, "ProducerConfig")
-		.def(nb::init<>())
+	nb::class_<ProducerConfig> config_class(module, "ProducerConfig");
+	config_class.def(nb::init<>())
 		.def_rw("host", &ProducerConfig::Host)
 		.def_rw("port", &ProducerConfig::Port)
 		.def_rw("client_id", &ProducerConfig::ClientId)
@@ -60,17 +60,8 @@ void BindTypes(nb::module_& module)
 		.def_rw("department", &ProducerConfig::Department)
 		.def_rw("layer_mode", &ProducerConfig::LayerMode)
 		.def_rw("session_id", &ProducerConfig::SessionId)
-		.def_rw("max_pending_transactions", &ProducerConfig::MaxPendingTransactions)
-		.def_prop_rw(
-			"handshake_timeout",
-			[](const ProducerConfig& config)
-			{
-				return Seconds(config.HandshakeTimeout);
-			},
-			[](ProducerConfig& config, double seconds)
-			{
-				config.HandshakeTimeout = Milliseconds(seconds);
-			});
+		.def_rw("max_pending_transactions", &ProducerConfig::MaxPendingTransactions);
+	DurationProperty(config_class, "handshake_timeout", &ProducerConfig::HandshakeTimeout);
 
 	nb::class_<ProducerStatus>(module, "ProducerStatus")
 		.def_ro("connected", &ProducerStatus::Connected)
@@ -173,38 +164,25 @@ void BindEndpoint(nb::module_& module)
 				return endpoint.RepairRejected(Frame(envelope), event_count, std::move(layer_key));
 			},
 			"envelope"_a, "event_count"_a, "layer_key"_a = "")
-		.def("abandon_rejected_session", &ProducerEndpoint::AbandonRejectedSession,
-			 "session_id"_a);
+		.def("abandon_rejected_session", &ProducerEndpoint::AbandonRejectedSession, "session_id"_a);
 }
 
 void BindDriver(nb::module_& module)
 {
-	nb::class_<PythonProducerDriver>(module, "ProducerDriver")
-		.def(
-			"__init__",
-			[](PythonProducerDriver* driver, nb::object endpoint, nb::object notifications,
-			   std::shared_ptr<SocketFactory> sockets, nb::object token_provider,
-			   nb::object notification_sink, nb::object log)
-			{
-				new (driver) PythonProducerDriver("producer", std::move(endpoint),
-												  std::move(notifications), std::move(sockets),
-												  std::move(token_provider),
-												  std::move(notification_sink), std::move(log));
-			},
-			"endpoint"_a, "notifications"_a, "sockets"_a, nb::kw_only(),
-			"token_provider"_a = nb::none(), "notification_sink"_a = nb::none(),
-			"log"_a = nb::none())
-		.def("start", &PythonProducerDriver::Start)
-		.def("stop",
-			 [](PythonProducerDriver& driver)
-			 {
-				 driver.Get().Stop();
-			 })
-		.def("wake",
-			 [](PythonProducerDriver& driver)
-			 {
-				 driver.Get().Wake();
-			 })
+	nb::class_<PythonProducerDriver> cls(module, "ProducerDriver");
+	cls.def(
+		   "__init__",
+		   [](PythonProducerDriver* driver, ProducerEndpoint& endpoint,
+			  NotificationQueue& notifications, std::shared_ptr<SocketFactory> sockets,
+			  nb::object token_provider, nb::object notification_sink, nb::object log)
+		   {
+			   new (driver) PythonProducerDriver("producer", endpoint, notifications,
+												 std::move(sockets), std::move(token_provider),
+												 std::move(notification_sink), std::move(log));
+		   },
+		   "endpoint"_a, "notifications"_a, "sockets"_a, nb::kw_only(),
+		   "token_provider"_a = nb::none(), "notification_sink"_a = nb::none(),
+		   "log"_a = nb::none(), nb::keep_alive<1, 2>(), nb::keep_alive<1, 3>())
 		.def(
 			"connect",
 			[](PythonProducerDriver& driver, std::optional<double> timeout)
@@ -219,9 +197,7 @@ void BindDriver(nb::module_& module)
 				return driver.Get().Flush(Timeout(timeout));
 			},
 			"timeout"_a = nb::none(), nb::call_guard<nb::gil_scoped_release>());
-
-	nb::module_::import_("atexit").attr("register")(
-		nb::cpp_function(&PythonProducerDriver::StopAll));
+	openusdconnect::python::BindThreadedDriver(cls);
 }
 
 } // namespace

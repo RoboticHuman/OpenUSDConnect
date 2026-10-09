@@ -4,13 +4,17 @@
 #include "openusdconnect/client/engine/notification.h"
 
 #include <nanobind/nanobind.h>
+#include <nanobind/stl/optional.h>
 
 #include <chrono>
+#include <cstddef>
+#include <functional>
 #include <memory>
 #include <mutex>
 #include <optional>
 #include <set>
 #include <string>
+#include <thread>
 #include <utility>
 #include <vector>
 
@@ -29,29 +33,46 @@ void BindDriverTypes(nb::module_& module);
 [[nodiscard]] double Seconds(std::chrono::milliseconds duration);
 [[nodiscard]] std::optional<std::chrono::milliseconds> Timeout(std::optional<double> seconds);
 
+// Binds a duration field as a property in seconds.
+template <typename Config>
+void DurationProperty(nb::class_<Config>& cls, const char* name,
+					  std::chrono::milliseconds Config::* member)
+{
+	cls.def_prop_rw(
+		name,
+		[member](const Config& config)
+		{
+			return Seconds(config.*member);
+		},
+		[member](Config& config, double seconds)
+		{
+			config.*member = Milliseconds(seconds);
+		});
+}
+
 [[nodiscard]] nb::object ToPython(client::Notification notification);
 
-// Owns a reference driver whose thread calls Python. Every Python object here
-// is touched only with the GIL, and the GIL is released around every wait.
-template <typename Driver, typename Endpoint>
+// Owns a reference driver whose thread calls Python, and stops and joins it
+// when destroyed. Every Python object here is touched only with the GIL, and
+// the GIL is released around every wait.
+template <typename Driver>
 class PythonDriver final
 {
 public:
+	using Endpoint = typename Driver::EndpointType;
+
 	// role names the callbacks in unraisable-exception reports.
-	PythonDriver(const std::string& role, nb::object endpoint, nb::object notifications,
+	PythonDriver(const std::string& role, Endpoint& endpoint,
+				 client::NotificationQueue& notifications,
 				 std::shared_ptr<client::SocketFactory> sockets, nb::object token_provider,
 				 nb::object notification_sink, nb::object log)
 		: TokenContext(role + " token provider")
 		, SinkContext(role + " notification sink")
 		, LogContext(role + " log")
-		, EndpointObject(std::move(endpoint))
-		, QueueObject(std::move(notifications))
 		, TokenProvider(std::move(token_provider))
 		, Sink(std::move(notification_sink))
 		, LogCallback(std::move(log))
-		, Native(std::make_unique<Driver>(nb::cast<Endpoint&>(EndpointObject),
-										  nb::cast<client::NotificationQueue&>(QueueObject),
-										  std::move(sockets), Callbacks()))
+		, Native(std::make_unique<Driver>(endpoint, notifications, std::move(sockets), Callbacks()))
 	{
 		std::lock_guard lock(RegistryMutex());
 		Registry().insert(this);
@@ -59,29 +80,18 @@ public:
 
 	~PythonDriver()
 	{
+		Destroying = true;
 		{
-			nb::gil_scoped_release release;
-			Native->Stop();
-			static_cast<void>(Native->Join());
+			std::lock_guard lock(RegistryMutex());
+			Registry().erase(this);
 		}
-		std::lock_guard lock(RegistryMutex());
-		Registry().erase(this);
+		nb::gil_scoped_release release;
+		Native->Stop();
+		static_cast<void>(Native->Join());
 	}
 
 	PythonDriver(const PythonDriver&) = delete;
 	PythonDriver& operator=(const PythonDriver&) = delete;
-
-	// The running thread keeps this object alive, as Python keeps a running
-	// thread; its Exited callback, which needs the GIL held here, releases it.
-	[[nodiscard]] bool Start()
-	{
-		if (!Native->Start())
-		{
-			return false;
-		}
-		Self = nb::find(this);
-		return true;
-	}
 
 	[[nodiscard]] Driver& Get() noexcept
 	{
@@ -91,23 +101,20 @@ public:
 	// Runs at interpreter exit, before threads may no longer take the GIL.
 	static void StopAll()
 	{
-		std::vector<std::pair<nb::object, Driver*>> running;
+		std::vector<std::pair<nb::object, Driver*>> drivers;
 		{
 			std::lock_guard lock(RegistryMutex());
 			for (PythonDriver* driver : Registry())
 			{
-				if (driver->Self.is_valid())
-				{
-					running.emplace_back(driver->Self, driver->Native.get());
-				}
+				drivers.emplace_back(nb::find(driver), driver->Native.get());
 			}
 		}
 		nb::gil_scoped_release release;
-		for (const auto& [object, driver] : running)
+		for (const auto& [object, driver] : drivers)
 		{
 			driver->Stop();
 		}
-		for (const auto& [object, driver] : running)
+		for (const auto& [object, driver] : drivers)
 		{
 			static_cast<void>(driver->Join());
 		}
@@ -131,98 +138,140 @@ private:
 		client::DriverCallbacks callbacks;
 		if (!TokenProvider.is_none())
 		{
+			// Anything but a str abandons the connection attempt.
 			callbacks.Token = [this]
 			{
-				return ReadToken();
+				std::optional<std::string> token;
+				CallPython(TokenContext,
+						   [&]
+						   {
+							   std::string text;
+							   if (nb::try_cast(TokenProvider(), text))
+							   {
+								   token = std::move(text);
+							   }
+						   });
+				return token;
 			};
 		}
 		if (!Sink.is_none())
 		{
 			callbacks.Notifications = [this](client::Notification notification)
 			{
-				Notify(std::move(notification));
+				CallPython(SinkContext,
+						   [&]
+						   {
+							   Sink(ToPython(std::move(notification)));
+						   });
 			};
 		}
 		if (!LogCallback.is_none())
 		{
 			callbacks.Log = [this](client::LogLevel level, const std::string& message)
 			{
-				Log(level, message);
+				CallPython(LogContext,
+						   [&]
+						   {
+							   LogCallback(level, message);
+						   });
 			};
 		}
-		callbacks.Exited = [this]
-		{
-			Exit();
-		};
 		return callbacks;
 	}
 
-	// Anything but a str abandons the connection attempt.
-	[[nodiscard]] std::optional<std::string> ReadToken()
+	// Runs call, which calls into Python, on the driver thread with the GIL
+	// held; a Python exception is reported as unraisable under context.
+	template <typename Call>
+	void CallPython(const std::string& context, Call call)
 	{
 		nb::gil_scoped_acquire gil;
+		// Python may drop every other reference to this driver meanwhile, and
+		// destroying it on its own thread would join that thread from itself.
+		nb::object self = Destroying ? nb::object() : nb::find(this);
 		try
 		{
-			std::string token;
-			if (nb::try_cast(TokenProvider(), token))
-			{
-				return token;
-			}
+			call();
 		}
 		catch (nb::python_error& error)
 		{
-			error.discard_as_unraisable(TokenContext.c_str());
+			error.discard_as_unraisable(context.c_str());
 		}
-		return std::nullopt;
-	}
-
-	void Notify(client::Notification notification)
-	{
-		nb::gil_scoped_acquire gil;
-		try
+		if (self.is_valid() && Py_REFCNT(self.ptr()) == 1)
 		{
-			Sink(ToPython(std::move(notification)));
+			// Its owner is gone: stop now, and destroy it on the main thread. A
+			// full pending-call queue leaks the stopped driver instead.
+			Native->Stop();
+			static_cast<void>(Py_AddPendingCall(
+				[](void* object)
+				{
+					nb::handle(static_cast<PyObject*>(object)).dec_ref();
+					return 0;
+				},
+				self.release().ptr()));
 		}
-		catch (nb::python_error& error)
-		{
-			error.discard_as_unraisable(SinkContext.c_str());
-		}
-	}
-
-	void Log(client::LogLevel level, const std::string& message)
-	{
-		nb::gil_scoped_acquire gil;
-		try
-		{
-			LogCallback(level, message);
-		}
-		catch (nb::python_error& error)
-		{
-			error.discard_as_unraisable(LogContext.c_str());
-		}
-	}
-
-	void Exit()
-	{
-		nb::gil_scoped_acquire gil;
-		TokenProvider = nb::none();
-		Sink = nb::none();
-		LogCallback = nb::none();
-		// Released last: it may destroy this object.
-		const nb::object self = std::move(Self);
 	}
 
 	const std::string TokenContext;
 	const std::string SinkContext;
 	const std::string LogContext;
-	nb::object EndpointObject;
-	nb::object QueueObject;
 	nb::object TokenProvider;
 	nb::object Sink;
 	nb::object LogCallback;
-	nb::object Self;
+	bool Destroying = false;
 	// Destroyed first, so its thread has exited before the objects above go.
 	const std::unique_ptr<Driver> Native;
 };
+
+// Binds the lifecycle every reference driver shares; a role adds its own methods.
+template <typename Driver>
+void BindThreadedDriver(nb::class_<PythonDriver<Driver>>& cls)
+{
+	using Bound = PythonDriver<Driver>;
+	cls.def("start",
+			[](Bound& driver)
+			{
+				return driver.Get().Start();
+			})
+		.def("stop",
+			 [](Bound& driver)
+			 {
+				 driver.Get().Stop();
+			 })
+		.def("wake",
+			 [](Bound& driver)
+			 {
+				 driver.Get().Wake();
+			 })
+		.def(
+			"join",
+			[](Bound& driver, std::optional<double> timeout)
+			{
+				return driver.Get().Join(Timeout(timeout));
+			},
+			nb::arg("timeout") = nb::none(), nb::call_guard<nb::gil_scoped_release>())
+		.def_prop_ro("running",
+					 [](Bound& driver)
+					 {
+						 return driver.Get().Running();
+					 })
+		.def_prop_ro("stopped",
+					 [](Bound& driver)
+					 {
+						 return driver.Get().Stopped();
+					 })
+		.def_prop_ro("ident",
+					 [](Bound& driver) -> std::optional<std::size_t>
+					 {
+						 const std::optional<std::thread::id> id = driver.Get().ThreadId();
+						 return id ? std::optional(std::hash<std::thread::id>()(*id))
+								   : std::nullopt;
+					 })
+		.def_prop_ro("last_failure",
+					 [](Bound& driver)
+					 {
+						 return driver.Get().LastFailure();
+					 });
+	nb::module_::import_("atexit").attr("register")(nb::cpp_function(&Bound::StopAll));
+}
 
 } // namespace openusdconnect::python

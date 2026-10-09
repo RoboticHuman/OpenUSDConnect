@@ -80,7 +80,8 @@ Behavior:
   reconnects, like the other clients.
 - `ReceiverThread` is no longer a `threading.Thread`. Its settings and state
   are read-only properties (`token` and `reconnect` stay assignable), and the
-  `sock` attribute is gone.
+  `sock` attribute is gone. A receiver or sender that is garbage collected
+  stops its connection, so hosts keep the handle while it should run.
 - `EventSender` settings and state are read-only properties (`token` stays
   assignable), and the `sock` attribute is gone; check `connected` instead.
 

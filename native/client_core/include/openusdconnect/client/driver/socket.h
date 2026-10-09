@@ -106,8 +106,6 @@ struct DriverCallbacks final
 	// endpoint call, so a notification is handled before the next attempt.
 	std::function<void(Notification)> Notifications;
 	std::function<void(LogLevel, const std::string&)> Log;
-	// The driver thread's last action; it may destroy the driver.
-	std::function<void()> Exited;
 };
 
 } // namespace openusdconnect::client

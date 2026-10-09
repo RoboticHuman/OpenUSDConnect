@@ -18,7 +18,6 @@ struct ScriptedChannel final
 	enum class Kind : std::uint8_t
 	{
 		Bytes,
-		Timeout,
 		Closed,
 	};
 
@@ -222,9 +221,6 @@ private:
 			}
 			return SocketResult::Success;
 		}
-		case ScriptedChannel::Kind::Timeout:
-			Channel->Inbound.pop_front();
-			return SocketResult::Timeout;
 		case ScriptedChannel::Kind::Closed:
 			return SocketResult::Closed;
 		}
@@ -255,18 +251,6 @@ bool ScriptedConnection::Deliver(std::vector<std::uint8_t> bytes)
 		return false;
 	}
 	Channel->Inbound.push_back({ScriptedChannel::Kind::Bytes, std::move(bytes)});
-	State->Changed.notify_all();
-	return true;
-}
-
-bool ScriptedConnection::DeliverTimeout()
-{
-	std::lock_guard lock(State->Mutex);
-	if (Channel->ClientClosed)
-	{
-		return false;
-	}
-	Channel->Inbound.push_back({ScriptedChannel::Kind::Timeout, {}});
 	State->Changed.notify_all();
 	return true;
 }

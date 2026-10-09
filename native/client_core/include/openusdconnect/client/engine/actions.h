@@ -1,5 +1,7 @@
 #pragma once
 
+#include <algorithm>
+#include <cassert>
 #include <chrono>
 #include <cstdint>
 #include <memory>
@@ -12,6 +14,64 @@ namespace openusdconnect::client
 
 // Hosts pass the current time in; the engine never reads a clock.
 using TimePoint = std::chrono::steady_clock::time_point;
+
+// Exponential backoff between connection attempts, expressed as due times.
+class ReconnectPolicy final
+{
+public:
+	ReconnectPolicy(bool enabled, std::chrono::milliseconds base_delay,
+					std::chrono::milliseconds max_delay) noexcept
+		: EnabledValue(enabled)
+		, BaseDelay(base_delay)
+		, MaxDelay(max_delay)
+		, Delay(base_delay)
+	{
+		assert(IsValidConfiguration(BaseDelay, MaxDelay));
+	}
+
+	[[nodiscard]] static bool IsValidConfiguration(std::chrono::milliseconds base_delay,
+												   std::chrono::milliseconds max_delay) noexcept
+	{
+		return base_delay.count() > 0 && max_delay >= base_delay;
+	}
+
+	[[nodiscard]] bool Enabled() const noexcept
+	{
+		return EnabledValue;
+	}
+
+	void SetEnabled(bool enabled) noexcept
+	{
+		EnabledValue = enabled;
+	}
+
+	// A session reached its connected state; the next wait starts from the base.
+	void Reset() noexcept
+	{
+		Delay = BaseDelay;
+	}
+
+	[[nodiscard]] TimePoint NextAttempt(TimePoint now) noexcept
+	{
+		const TimePoint due = now + Delay;
+		Delay = std::min(Delay * 2, MaxDelay);
+		return due;
+	}
+
+	// After an overflow the next attempt waits for the consumer to drain the
+	// queue, but no longer than this deadline.
+	[[nodiscard]] TimePoint DrainDeadline(TimePoint now) noexcept
+	{
+		Reset();
+		return now + MaxDelay;
+	}
+
+private:
+	bool EnabledValue;
+	const std::chrono::milliseconds BaseDelay;
+	const std::chrono::milliseconds MaxDelay;
+	std::chrono::milliseconds Delay;
+};
 
 enum class DisconnectReason : std::uint8_t
 {
@@ -57,14 +117,6 @@ struct SendAction final
 	std::shared_ptr<const std::vector<std::uint8_t>> Bytes;
 };
 
-// How a connection or attempt ends, in both endpoints and the reference driver:
-//   Stop            the host ends it, and no attempt follows.
-//   Disconnect      the host ends the producer's; later attempts may follow.
-//   Close           the endpoint ends it with a CloseAction; the driver's Close applies one.
-//   Quit            the producer's Close that first says Quit to a published connection.
-//   EndConnection   the endpoint's accounting for any end, whichever side caused it.
-//   OnDisconnected  the host reports that the socket or attempt is gone.
-//
 // Both endpoints Close with ProtocolError on an undecodable frame or a handshake answer other than
 // HelloOk, HelloRejected, or AuthRejected. After the handshake the receiver closes on a payload
 // type it does not know; the producer ignores everything but transaction results and RateLimited.
@@ -75,18 +127,12 @@ struct CloseAction final
 	DisconnectReason Reason = DisconnectReason::Stopped;
 };
 
-// Call OnTick at Time.
-struct WakeAction final
-{
-	TimePoint Time;
-};
-
 struct LogAction final
 {
 	LogLevel Level = LogLevel::Info;
 	std::string Message;
 };
 
-using Action = std::variant<ConnectAction, SendAction, CloseAction, WakeAction, LogAction>;
+using Action = std::variant<ConnectAction, SendAction, CloseAction, LogAction>;
 
 } // namespace openusdconnect::client

@@ -24,10 +24,6 @@ _SOCKET_TIMEOUT = 30.0
 _MAX_QUEUE_DEPTH = 50_000
 
 
-def _log(level, message: str) -> None:
-    LOG.log(_client_backend.LOG_LEVELS[level], "%s", message)
-
-
 def _transport_error(failure) -> OSError:
     if failure.result == _client_backend.SocketResult.TIMEOUT:
         return TimeoutError(failure.description)
@@ -295,16 +291,14 @@ class ReceiverThread:
         return deque(self._endpoint.drain_frames(max_messages))
 
     def start(self) -> None:
-        """Start connecting on a native thread; a receiver starts once."""
+        """Start connecting on a native thread that runs until stopped or collected; once only."""
         if self._driver is not None:
             raise RuntimeError("a receiver can only be started once")
         self._driver = _client_backend.ReceiverDriver(
             self._endpoint,
             self._notifications,
             _client_backend.TcpSocketFactory(),
-            token_provider=self._connection_token,
-            notification_sink=self._deliver,
-            log=_log,
+            **_client_backend.driver_callbacks(self, LOG),
         )
         if not self._driver.start():
             raise RuntimeError("could not start the receiver thread")

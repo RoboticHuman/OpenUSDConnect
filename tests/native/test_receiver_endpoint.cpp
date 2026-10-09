@@ -71,7 +71,7 @@ public:
 	SentHello Reconnect()
 	{
 		Disconnect();
-		Now = Single<WakeAction>().Time;
+		Now = Endpoint.NextWake().value();
 		Endpoint.OnTick(Now);
 		return Connect();
 	}
@@ -81,7 +81,7 @@ public:
 	SentHello ReconnectAfterDrain()
 	{
 		Disconnect();
-		const TimePoint poll = Single<WakeAction>().Time;
+		const TimePoint poll = Endpoint.NextWake().value();
 		static_cast<void>(Apply());
 		Now = poll;
 		Endpoint.OnTick(Now);
@@ -122,26 +122,6 @@ public:
 	// The consumer's applied cursor.
 	std::int32_t Applied;
 };
-
-void TestReconnectPolicy()
-{
-	const TimePoint now{};
-	ReconnectPolicy policy(true, 1s, 4s);
-	CHECK(policy.Enabled());
-	CHECK(policy.NextAttempt(now) == now + 1s);
-	CHECK(policy.NextAttempt(now) == now + 2s);
-	CHECK(policy.NextAttempt(now) == now + 4s);
-	CHECK(policy.NextAttempt(now) == now + 4s);
-	policy.Reset();
-	CHECK(policy.NextAttempt(now) == now + 1s);
-	CHECK(policy.NextAttempt(now) == now + 2s);
-	CHECK(policy.DrainDeadline(now) == now + 4s);
-	CHECK(policy.NextAttempt(now) == now + 1s);
-	CHECK(!ReconnectPolicy(false, 1s, 1s).Enabled());
-	CHECK(ReconnectPolicy::IsValidConfiguration(1s, 1s));
-	CHECK(!ReconnectPolicy::IsValidConfiguration(0ms, 1s));
-	CHECK(!ReconnectPolicy::IsValidConfiguration(2s, 1s));
-}
 
 void TestConfigurationValidation()
 {
@@ -332,7 +312,7 @@ void TestNegotiationRejections()
 		CHECK(receiver.Status().LayerModeActive == LayerMode::SharedStage);
 		receiver.Feed(server::LayerGraph(1));
 		CHECK(receiver.Status().LastSequence == 1);
-		CHECK(Kinds(receiver.Endpoint.DrainFrames()) ==
+		CHECK(Kinds<Decode>(receiver.Endpoint.DrainFrames()) ==
 			  std::vector<Payload>{Payload::LayerGraphState});
 	}
 }
@@ -357,7 +337,8 @@ void TestControlMessages()
 	CHECK(As<PlaybackClaimed>(notices[1]).LeaderClientId == "me");
 	const PlaybackRejected& rejected = As<PlaybackRejected>(notices[2]);
 	CHECK(rejected.Reason == "already led" && rejected.CurrentLeaderClientId == "other");
-	CHECK(Kinds(receiver.Endpoint.DrainFrames()) == std::vector<Payload>{Payload::LayerStackState});
+	CHECK(Kinds<Decode>(receiver.Endpoint.DrainFrames()) ==
+		  std::vector<Payload>{Payload::LayerStackState});
 }
 
 void TestReplayCompleteWaitsForDrainedFrames()
@@ -401,7 +382,7 @@ void TestInPlaceResyncClearsReadyUntilApplied()
 	receiver.Feed(server::Event(1));
 	receiver.Feed(server::ReplayComplete(1, 2));
 	CHECK(!receiver.Status().Synchronized);
-	CHECK((Kinds(receiver.Apply()) ==
+	CHECK((Kinds<Decode>(receiver.Apply()) ==
 		   std::vector<Payload>{Payload::Resync, Payload::BroadcastEvent}));
 	const ReceiverStatus status = receiver.Status();
 	CHECK(status.Synchronized);
@@ -481,12 +462,7 @@ void TestOverflowWaitsForTheDrain(DrainOutcome outcome)
 		const std::optional<TimePoint> poll = receiver.Endpoint.NextWake();
 		CHECK(poll && *poll > receiver.Now && *poll < receiver.Now + 2s);
 		receiver.Advance(1s);
-		const std::vector<Action> commands = receiver.Commands();
-		CHECK(std::all_of(commands.begin(), commands.end(),
-						  [](const Action& action)
-						  {
-							  return std::holds_alternative<WakeAction>(action);
-						  }));
+		CHECK(receiver.Commands().empty());
 	}
 	if (outcome == DrainOutcome::DrainedDuringWait)
 	{
@@ -540,8 +516,7 @@ void TestBackoffDoublesAndResetsAfterConnectedSession()
 	const auto next_attempt = [&](DisconnectReason reason)
 	{
 		receiver.Disconnect(reason);
-		const TimePoint due = receiver.Single<WakeAction>().Time;
-		CHECK(receiver.Endpoint.NextWake() == due);
+		const TimePoint due = receiver.Endpoint.NextWake().value();
 		waits.push_back(std::chrono::duration_cast<std::chrono::milliseconds>(due - receiver.Now));
 		receiver.Now = due - 1ms;
 		receiver.Endpoint.OnTick(receiver.Now);
@@ -637,7 +612,6 @@ void TestReplayRequests()
 
 	// Without an open connection the next Hello carries the request.
 	receiver.Disconnect();
-	static_cast<void>(receiver.Single<WakeAction>());
 	CHECK(receiver.Endpoint.RequestReplayFrom(2));
 	CHECK(receiver.Commands().empty());
 	receiver.Advance(1s);
@@ -714,7 +688,6 @@ void TestHostDisconnectEndsTheSession()
 	static_cast<void>(receiver.Start());
 	receiver.Disconnect(DisconnectReason::TransportError);
 	CHECK(receiver.Notices().empty());
-	static_cast<void>(receiver.Single<WakeAction>());
 	receiver.Advance(1s);
 	static_cast<void>(receiver.Connect());
 	receiver.Feed(server::HelloOk());
@@ -725,7 +698,7 @@ void TestHostDisconnectEndsTheSession()
 	CHECK(receiver.Notice<Disconnected>().Reason == DisconnectReason::TransportError);
 	CHECK(!receiver.Status().Connected);
 	CHECK(!receiver.Status().Synchronized);
-	static_cast<void>(receiver.Single<WakeAction>());
+	CHECK(receiver.Endpoint.NextWake());
 	// A duplicate report for the same connection changes nothing.
 	receiver.Disconnect();
 	CHECK(receiver.Commands().empty());
@@ -762,7 +735,7 @@ void TestStop()
 		Receiver receiver;
 		static_cast<void>(receiver.Handshake());
 		receiver.Disconnect();
-		static_cast<void>(receiver.Single<WakeAction>());
+		CHECK(receiver.Endpoint.NextWake());
 		receiver.Endpoint.Stop();
 		CHECK(receiver.Commands().empty());
 		CHECK(!receiver.Endpoint.NextWake());
@@ -831,7 +804,7 @@ void TestFullReplayRequestQueuesItsOwnReset()
 	receiver.Feed(server::Event(1));
 	receiver.Feed(server::ReplayComplete(1, 0));
 	CHECK(
-		(Kinds(receiver.Apply()) ==
+		(Kinds<Decode>(receiver.Apply()) ==
 		 std::vector<Payload>{Payload::Resync, Payload::LayerStackState, Payload::BroadcastEvent}));
 	CHECK(receiver.Status().Synchronized);
 
@@ -1030,7 +1003,7 @@ void TestQueueOverflowResumesTheReplay(OverflowStart start)
 		accept(false);
 	}
 	receiver.Feed(server::ReplayComplete(last, *hello.ReplayEpoch));
-	const std::vector<Payload> kinds = Kinds(receiver.Apply());
+	const std::vector<Payload> kinds = Kinds<Decode>(receiver.Apply());
 	CHECK(std::find(kinds.begin(), kinds.end(), Payload::Resync) == kinds.end());
 	CHECK(progress.size() > 1);
 	CHECK(std::adjacent_find(progress.begin(), progress.end(), std::greater_equal<>()) ==
@@ -1158,7 +1131,8 @@ void TestReplayRequestWithPendingResetClaimsTheAppliedReplay(ResetState state)
 	receiver.Feed(server::ReplayComplete(1, 1));
 	if (state != ResetState::Queued)
 	{
-		CHECK((Kinds(receiver.Endpoint.DrainFrames(1)) == std::vector<Payload>{Payload::Resync}));
+		CHECK((Kinds<Decode>(receiver.Endpoint.DrainFrames(1)) ==
+			   std::vector<Payload>{Payload::Resync}));
 	}
 	if (state == ResetState::Applied)
 	{
@@ -1190,7 +1164,6 @@ void TestOwnQueuedResetIsPending()
 
 int main()
 {
-	TestReconnectPolicy();
 	TestConfigurationValidation();
 	TestStartRequestsOneConnection();
 	TestFirstHelloCarriesConfigurationWithoutClaim();

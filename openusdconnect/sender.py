@@ -5,7 +5,6 @@ from __future__ import annotations
 import logging
 import threading
 import uuid
-import weakref
 from collections.abc import Callable
 
 from . import _client_backend
@@ -35,10 +34,6 @@ class TransactionRejectedError(RuntimeError):
     def __init__(self, failure: TransactionFailure):
         super().__init__(str(failure))
         self.failure = failure
-
-
-def _log(level, message: str) -> None:
-    LOG.log(_client_backend.LOG_LEVELS[level], "%s", message)
 
 
 def _session_id(session_id: str | None) -> str:
@@ -71,22 +66,6 @@ def _artifact(native) -> RecoveryArtifact:
             for entry in native.transactions
         ),
     )
-
-
-def _driver_callbacks(sender: EventSender) -> dict:
-    """Callbacks that do not keep *sender* alive, so collecting it stops its thread."""
-    owner = weakref.ref(sender)
-
-    def token() -> str | None:
-        alive = owner()
-        return None if alive is None else alive._connection_token()
-
-    def deliver(notification) -> None:
-        alive = owner()
-        if alive is not None:
-            alive._deliver(notification)
-
-    return {"token_provider": token, "notification_sink": deliver, "log": _log}
 
 
 class EventSender:
@@ -151,9 +130,8 @@ class EventSender:
             self._endpoint,
             notifications,
             _client_backend.TcpSocketFactory(),
-            **_driver_callbacks(self),
+            **_client_backend.driver_callbacks(self, LOG),
         )
-        weakref.finalize(self, self._driver.stop)
         self._started = False
         # Pairs each transaction ID with the frame that encodes it.
         self._submit_lock = threading.Lock()

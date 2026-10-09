@@ -459,8 +459,9 @@ rejection/recovery status on subsequent ticks. `cancel_connect()` invalidates
 pending attempts and reports whether they have finished; `disconnect()` also
 closes an established connection. Neither discards the transaction outbox.
 An `EventSender` starts its native connection thread on the first connection
-request, runs its callbacks there, and stops it when the sender is garbage
-collected or the interpreter exits.
+request and a `ReceiverThread` on `start()`. Each runs its callbacks on that
+thread and stops it when the object is garbage collected or the interpreter
+exits, so keep the handle while the connection should run.
 
 ## Embed a server
 

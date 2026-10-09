@@ -1,6 +1,7 @@
 """Native client-core API used by the Python integration, and its value conversions."""
 
 import logging
+import weakref
 
 from ._native_client import (  # type: ignore[import-not-found]
     ClientPhase,
@@ -55,6 +56,28 @@ def stage_metadata_fields(metadata) -> dict:
     return {key: value for key, value in fields.items() if value is not None}
 
 
+def driver_callbacks(owner, logger: logging.Logger) -> dict:
+    """Driver callbacks that hold *owner* weakly, so collecting it stops its driver thread.
+
+    *owner* supplies ``_connection_token()`` and ``_deliver(notification)``.
+    """
+    reference = weakref.ref(owner)
+
+    def token() -> str | None:
+        alive = reference()
+        return None if alive is None else alive._connection_token()
+
+    def deliver(notification) -> None:
+        alive = reference()
+        if alive is not None:
+            alive._deliver(notification)
+
+    def log(level, message: str) -> None:
+        logger.log(LOG_LEVELS[level], "%s", message)
+
+    return {"token_provider": token, "notification_sink": deliver, "log": log}
+
+
 __all__ = [
     "LAYER_MODES",
     "LOG_LEVELS",
@@ -80,6 +103,7 @@ __all__ = [
     "TcpSocketFactory",
     "TokenIssued",
     "compute_phase",
+    "driver_callbacks",
     "rejection_code_name",
     "rejection_disposition",
     "stage_metadata_fields",

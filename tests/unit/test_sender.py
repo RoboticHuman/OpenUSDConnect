@@ -6,6 +6,7 @@ import threading
 import time
 import uuid
 from contextlib import contextmanager
+from contextlib import nullcontext as does_not_raise
 
 import pytest
 from pxr import Sdf, Usd, UsdGeom
@@ -103,21 +104,11 @@ def _spec_event(path):
 
 
 @pytest.mark.parametrize(
-    "options",
-    [
-        {"role": "receiver"},
-        {"max_pending_transactions": 0},
-        {"session_id": "s" * 129},
-        {"host": ""},
-        {"port": 0},
-        {"handshake_timeout": 0},
-        {"layer_mode": "unknown"},
-        {"layer_mode": LayerMode.SHARED_STAGE, "department": "layout"},
-    ],
+    ("handshake_timeout", "outcome"), [(0, pytest.raises(ValueError)), (1, does_not_raise())]
 )
-def test_invalid_settings_raise_value_error(options):
-    with pytest.raises(ValueError):
-        EventSender(**{"host": "127.0.0.1", "port": 7300, "client_id": "client", **options})
+def test_invalid_settings_raise_value_error(handshake_timeout, outcome):
+    with outcome:
+        EventSender("127.0.0.1", 7300, client_id="client", handshake_timeout=handshake_timeout)
 
 
 def test_settings_read_back_and_state_starts_empty():

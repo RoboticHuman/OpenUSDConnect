@@ -60,7 +60,6 @@ openusdconnect_configure_client_library(OpenUSDConnectClientEngine)
 # Hosts with their own I/O and scheduler drive the engine directly instead.
 add_library(OpenUSDConnectClientDriver STATIC
     src/driver/threaded_producer_driver.cpp
-    src/driver/threaded_receiver_driver.cpp
     src/platform/bsd_socket.cpp
 )
 add_library(OpenUSDConnect::ClientDriver ALIAS OpenUSDConnectClientDriver)
