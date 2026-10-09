@@ -2,6 +2,7 @@
 
 import logging
 import weakref
+from collections.abc import Callable
 
 from ._native_client import (  # type: ignore[import-not-found]
     ClientPhase,
@@ -17,9 +18,11 @@ from ._native_client import (  # type: ignore[import-not-found]
     ProducerEndpoint,
     ProducerRecoveryDisposition,
     ProducerResult,
+    ProducerStatus,
     ReceiverConfig,
     ReceiverDriver,
     ReceiverEndpoint,
+    ReceiverStatus,
     SocketResult,
     StageMetadata,
     TcpSocketFactory,
@@ -56,26 +59,52 @@ def stage_metadata_fields(metadata) -> dict:
     return {key: value for key, value in fields.items() if value is not None}
 
 
-def driver_callbacks(owner, logger: logging.Logger) -> dict:
+def rejection_reason(rejection) -> str:
+    """Why a native handshake rejection refused the connection."""
+    if rejection.authentication:
+        return rejection.reason
+    return rejection.reason or "connection rejected"
+
+
+def notification_queue(
+    notifications: NotificationQueue | None, **callbacks: Callable | None
+) -> tuple[NotificationQueue, bool]:
+    """The queue an endpoint pushes to, and whether its wrapper delivers it to *callbacks*.
+
+    The owner of a given *notifications* drains it, so none of *callbacks* may be set.
+    """
+    if notifications is None:
+        return NotificationQueue(), True
+    named = [name for name, callback in callbacks.items() if callback is not None]
+    if named:
+        raise ValueError(f"notifications= cannot be combined with {', '.join(named)}")
+    return notifications, False
+
+
+def driver_callbacks(owner, logger: logging.Logger, *, sink: bool) -> dict:
     """Driver callbacks that hold *owner* weakly, so collecting it stops its driver thread.
 
-    *owner* supplies ``_connection_token()`` and ``_deliver(notification)``.
+    *owner* supplies ``_connection_token()``, ``_token_issued(token)``, and with
+    *sink* ``_deliver(notification)``.
     """
     reference = weakref.ref(owner)
 
-    def token() -> str | None:
-        alive = reference()
-        return None if alive is None else alive._connection_token()
+    def method(name: str) -> Callable:
+        def call(*args):
+            alive = reference()
+            return None if alive is None else getattr(alive, name)(*args)
 
-    def deliver(notification) -> None:
-        alive = reference()
-        if alive is not None:
-            alive._deliver(notification)
+        return call
 
     def log(level, message: str) -> None:
         logger.log(LOG_LEVELS[level], "%s", message)
 
-    return {"token_provider": token, "notification_sink": deliver, "log": log}
+    return {
+        "token_provider": method("_connection_token"),
+        "token_issued": method("_token_issued"),
+        "notification_sink": method("_deliver") if sink else None,
+        "log": log,
+    }
 
 
 __all__ = [
@@ -95,16 +124,20 @@ __all__ = [
     "ProducerEndpoint",
     "ProducerRecoveryDisposition",
     "ProducerResult",
+    "ProducerStatus",
     "ReceiverConfig",
     "ReceiverDriver",
     "ReceiverEndpoint",
+    "ReceiverStatus",
     "SocketResult",
     "StageMetadata",
     "TcpSocketFactory",
     "TokenIssued",
     "compute_phase",
     "driver_callbacks",
+    "notification_queue",
     "rejection_code_name",
     "rejection_disposition",
+    "rejection_reason",
     "stage_metadata_fields",
 ]

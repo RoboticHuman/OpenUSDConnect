@@ -166,13 +166,15 @@ DecodeStageMetadata(const OpenUSDConnect::SetStageMetadata* table)
 }
 
 // Notifies the token and the authored stage metadata a HelloOk carries, and
-// keeps that metadata.
-inline void NotifyHelloFields(const OpenUSDConnect::HelloOk& hello, StageMetadata& metadata,
+// keeps both.
+inline void NotifyHelloFields(const OpenUSDConnect::HelloOk& hello,
+							  std::optional<std::string>& issued_token, StageMetadata& metadata,
 							  NotificationQueue& notifications, std::vector<Action>& actions)
 {
 	if (std::string token = Text(hello.token()); !token.empty())
 	{
 		actions.push_back(LogAction{LogLevel::Info, "token issued by server"});
+		issued_token = token;
 		notifications.Push(TokenIssued{std::move(token)});
 	}
 	if (std::optional<StageMetadata> authored = DecodeStageMetadata(hello.stage_metadata()))

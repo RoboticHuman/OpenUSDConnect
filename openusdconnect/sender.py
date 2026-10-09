@@ -77,7 +77,8 @@ class EventSender:
     Hello-bound producer identity after a reconnect, so an acknowledgement lost
     after commit cannot apply the USD edits twice. A native thread, started by
     the first connection request, writes, reads, and runs the callbacks until
-    :meth:`close`.
+    :meth:`close`; given ``notifications``, the owner drains that queue instead
+    and only ``on_token_issued`` runs there.
     """
 
     def __init__(
@@ -97,6 +98,7 @@ class EventSender:
         layer_mode: LayerMode | str = LayerMode.MANAGED,
         session_id: str | None = None,
         max_pending_transactions: int = _MAX_PENDING_TRANSACTIONS,
+        notifications: _client_backend.NotificationQueue | None = None,
     ):
         if role != "emitter":
             raise ValueError("EventSender role must be 'emitter'")
@@ -125,13 +127,15 @@ class EventSender:
         config.session_id = _session_id(session_id)
         config.handshake_timeout = handshake_timeout
         config.max_pending_transactions = max_pending_transactions
-        notifications = _client_backend.NotificationQueue()
+        notifications, owns_notifications = _client_backend.notification_queue(
+            notifications, on_stage_metadata=on_stage_metadata
+        )
         self._endpoint = _client_backend.ProducerEndpoint(config, notifications)
         self._driver = _client_backend.ProducerDriver(
             self._endpoint,
             notifications,
             _client_backend.TcpSocketFactory(),
-            **_client_backend.driver_callbacks(self, LOG),
+            **_client_backend.driver_callbacks(self, LOG, sink=owns_notifications),
         )
         self._started = False
         # Pairs each transaction ID with the frame that encodes it.
@@ -213,9 +217,7 @@ class EventSender:
         """Why the latest handshake was refused, or the failure that refuses new ones."""
         rejection = self._endpoint.status().rejection
         if rejection is not None:
-            if rejection.authentication:
-                return rejection.reason
-            return rejection.reason or "connection rejected"
+            return _client_backend.rejection_reason(rejection)
         failure = self.transaction_failure
         return "" if failure is None else failure.reason
 
@@ -284,6 +286,10 @@ class EventSender:
     def recovery_required(self) -> bool:
         """Whether a deterministic rejection quarantined this producer session."""
         return self._current_recovery() is not None
+
+    def snapshot(self) -> _client_backend.ProducerStatus:
+        """The native status in one call, for reading several fields together."""
+        return self._endpoint.status()
 
     def request_connect(self, timeout: float | None = 2.0) -> bool:
         """Start one background attempt, returning whether it was scheduled.
@@ -475,12 +481,14 @@ class EventSender:
                 return None
         return self.token or ""
 
+    def _token_issued(self, token: str) -> None:
+        """Adopt a token the server issued, on the connection thread."""
+        self.token = token
+        self._notify(self._on_token_issued, token, "on_token_issued")
+
     def _deliver(self, notification) -> None:
         """Run the callback for a notification on the connection thread."""
-        if isinstance(notification, _client_backend.TokenIssued):
-            self.token = notification.token
-            self._notify(self._on_token_issued, notification.token, "on_token_issued")
-        elif isinstance(notification, _client_backend.StageMetadata):
+        if isinstance(notification, _client_backend.StageMetadata):
             self._notify(
                 self._on_stage_metadata,
                 _client_backend.stage_metadata_fields(notification),

@@ -36,8 +36,9 @@ class EventReceiver:
     A native thread runs the connection until :meth:`close` and queues scene
     messages as raw FlatBuffers for the consumer thread to decode and apply.
     Handshake and control messages, including their callbacks, are handled on
-    that thread. Overflow closes the connection and resumes by replay after
-    the queue drains or the drain wait expires.
+    that thread; given ``notifications``, the owner drains that queue instead
+    and only ``on_token_issued`` runs there. Overflow closes the connection and
+    resumes by replay after the queue drains or the drain wait expires.
     """
 
     def __init__(
@@ -62,6 +63,7 @@ class EventReceiver:
         on_playback_rejected: Callable[[dict], None] | None = None,
         layered_replay: bool = True,
         layer_mode: LayerMode | str = LayerMode.MANAGED,
+        notifications: _client_backend.NotificationQueue | None = None,
     ):
         self._host = host
         self._port = port
@@ -97,7 +99,13 @@ class EventReceiver:
         config.reconnect = self._reconnect
         config.reconnect_base_delay = reconnect_base_delay
         config.reconnect_max_delay = reconnect_max_delay
-        self._notifications = _client_backend.NotificationQueue()
+        self._notifications, self._owns_notifications = _client_backend.notification_queue(
+            notifications,
+            on_stage_metadata=on_stage_metadata,
+            on_playback_state=on_playback_state,
+            on_playback_claimed=on_playback_claimed,
+            on_playback_rejected=on_playback_rejected,
+        )
         self._endpoint = _client_backend.ReceiverEndpoint(config, self._notifications)
         self._driver = None
 
@@ -211,7 +219,7 @@ class EventReceiver:
     @property
     def rejection_reason(self) -> str:
         rejection = self._endpoint.status().rejection
-        return "" if rejection is None else rejection.reason
+        return "" if rejection is None else _client_backend.rejection_reason(rejection)
 
     @property
     def server_instance(self) -> str:
@@ -236,6 +244,10 @@ class EventReceiver:
         """Why the latest connection attempt failed, or ``None``."""
         failure = None if self._driver is None else self._driver.last_failure
         return self._token_error if failure is None else _transport_error(failure)
+
+    def snapshot(self) -> _client_backend.ReceiverStatus:
+        """The native status in one call, for reading several fields together."""
+        return self._endpoint.status()
 
     def mark_applied_through(self, generation: int, sequence: int) -> bool:
         """Advance the applied cursor for frames drained after reading ``generation``.
@@ -303,7 +315,7 @@ class EventReceiver:
             self._endpoint,
             self._notifications,
             _client_backend.TcpSocketFactory(),
-            **_client_backend.driver_callbacks(self, LOG),
+            **_client_backend.driver_callbacks(self, LOG, sink=self._owns_notifications),
         )
         if not self._driver.start():
             raise RuntimeError("could not start the receiver's connection thread")
@@ -344,12 +356,14 @@ class EventReceiver:
                 return None
         return self.token or ""
 
+    def _token_issued(self, token: str) -> None:
+        """Adopt a token the server issued, on the connection thread."""
+        self.token = token
+        self._notify(self._on_token_issued, token, "on_token_issued")
+
     def _deliver(self, notification) -> None:
         """Run the callback for a notification on the connection thread."""
-        if isinstance(notification, _client_backend.TokenIssued):
-            self.token = notification.token
-            self._notify(self._on_token_issued, notification.token, "on_token_issued")
-        elif isinstance(notification, _client_backend.StageMetadata):
+        if isinstance(notification, _client_backend.StageMetadata):
             self._notify(
                 self._on_stage_metadata,
                 _client_backend.stage_metadata_fields(notification),

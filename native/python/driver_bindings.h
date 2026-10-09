@@ -65,11 +65,13 @@ public:
 	PythonDriver(const std::string& role, Endpoint& endpoint,
 				 client::NotificationQueue& notifications,
 				 std::shared_ptr<client::SocketFactory> sockets, nb::object token_provider,
-				 nb::object notification_sink, nb::object log)
+				 nb::object token_issued, nb::object notification_sink, nb::object log)
 		: TokenContext(role + " token provider")
+		, IssuedContext(role + " token issued hook")
 		, SinkContext(role + " notification sink")
 		, LogContext(role + " log")
 		, TokenProvider(std::move(token_provider))
+		, IssuedHook(std::move(token_issued))
 		, Sink(std::move(notification_sink))
 		, LogCallback(std::move(log))
 		, Native(std::make_unique<Driver>(endpoint, notifications, std::move(sockets), Callbacks()))
@@ -154,6 +156,17 @@ private:
 				return token;
 			};
 		}
+		if (!IssuedHook.is_none())
+		{
+			callbacks.TokenIssued = [this](const std::string& token)
+			{
+				CallPython(IssuedContext,
+						   [&]
+						   {
+							   IssuedHook(token);
+						   });
+			};
+		}
 		if (!Sink.is_none())
 		{
 			callbacks.Notifications = [this](client::Notification notification)
@@ -212,9 +225,11 @@ private:
 	}
 
 	const std::string TokenContext;
+	const std::string IssuedContext;
 	const std::string SinkContext;
 	const std::string LogContext;
 	nb::object TokenProvider;
+	nb::object IssuedHook;
 	nb::object Sink;
 	nb::object LogCallback;
 	bool Destroying = false;

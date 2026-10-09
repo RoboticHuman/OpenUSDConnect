@@ -174,15 +174,18 @@ void BindDriver(nb::module_& module)
 		   "__init__",
 		   [](PythonProducerDriver* driver, ProducerEndpoint& endpoint,
 			  NotificationQueue& notifications, std::shared_ptr<SocketFactory> sockets,
-			  nb::object token_provider, nb::object notification_sink, nb::object log)
+			  nb::object token_provider, nb::object token_issued, nb::object notification_sink,
+			  nb::object log)
 		   {
-			   new (driver) PythonProducerDriver("producer", endpoint, notifications,
-												 std::move(sockets), std::move(token_provider),
-												 std::move(notification_sink), std::move(log));
+			   new (driver)
+				   PythonProducerDriver("producer", endpoint, notifications, std::move(sockets),
+										std::move(token_provider), std::move(token_issued),
+										std::move(notification_sink), std::move(log));
 		   },
 		   "endpoint"_a, "notifications"_a, "sockets"_a, nb::kw_only(),
-		   "token_provider"_a = nb::none(), "notification_sink"_a = nb::none(),
-		   "log"_a = nb::none(), nb::keep_alive<1, 2>(), nb::keep_alive<1, 3>())
+		   "token_provider"_a = nb::none(), "token_issued"_a = nb::none(),
+		   "notification_sink"_a = nb::none(), "log"_a = nb::none(), nb::keep_alive<1, 2>(),
+		   nb::keep_alive<1, 3>())
 		.def(
 			"connect",
 			[](PythonProducerDriver& driver, std::optional<double> timeout)

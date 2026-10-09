@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from types import SimpleNamespace
+
 import pytest
 from pxr import Ar, Sdf, Usd
 
@@ -25,7 +27,18 @@ def _create_root(path) -> Usd.Stage:
     return Usd.Stage.Open(root)
 
 
+def _sender_snapshot(sender) -> SimpleNamespace:
+    return SimpleNamespace(
+        connected=sender.connected,
+        rejection=None,
+        pending_events=sender.pending_event_count,
+        acknowledged_events=sender.acknowledged_event_count,
+    )
+
+
 class _RecoverySender:
+    snapshot = _sender_snapshot
+
     def __init__(self, artifact: RecoveryArtifact):
         self.connected = False
         self.auth_rejected = False
@@ -68,6 +81,7 @@ class _ReceiverStub:
     stopped = False
     auth_rejected = False
     hello_rejected = False
+    rejection = None
     rejection_reason = ""
     reconnect = False
     generation = 1
@@ -78,6 +92,9 @@ class _ReceiverStub:
 
     def complete_replay(self):
         self.connected = self.synchronized = True
+
+    def snapshot(self):
+        return self
 
     def start(self):
         pass
@@ -235,6 +252,7 @@ def test_status_exposes_shared_stage_partial_connection(tmp_path):
     original_sender = client._sender
 
     class _StatusSender:
+        snapshot = _sender_snapshot
         connected = False
         transaction_failure = None
         rejection_reason = ""

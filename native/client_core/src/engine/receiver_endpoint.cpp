@@ -202,6 +202,12 @@ std::vector<Action> ReceiverEndpoint::TakeActions()
 	return std::exchange(Actions, {});
 }
 
+std::optional<std::string> ReceiverEndpoint::TakeIssuedToken()
+{
+	std::lock_guard lock(Mutex);
+	return std::exchange(IssuedToken, std::nullopt);
+}
+
 std::optional<TimePoint> ReceiverEndpoint::NextWake() const
 {
 	std::lock_guard lock(Mutex);
@@ -427,7 +433,7 @@ void ReceiverEndpoint::AcceptHello(const OpenUSDConnect::HelloOk& hello)
 				"server did not negotiate requested layered replay"});
 		return;
 	}
-	detail::NotifyHelloFields(hello, Metadata, Notifications, Actions);
+	detail::NotifyHelloFields(hello, IssuedToken, Metadata, Notifications, Actions);
 
 	Identity.AcceptHello(ConnectionSyncFrom, hello.replay_identity(), Text(hello.server_instance()),
 						 Value(hello.replay_epoch()));

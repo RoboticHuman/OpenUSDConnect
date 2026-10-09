@@ -3,10 +3,7 @@
 from __future__ import annotations
 
 import logging
-import queue
-import threading
 import time
-from collections.abc import Callable
 from typing import TYPE_CHECKING
 
 from . import _client_backend
@@ -122,56 +119,6 @@ def submit_and_wait(client, timeout: float | None) -> bool:
                 return True
         if not _pause_before_poll(deadline):
             return False
-
-
-class ClientCallbackQueue:
-    """Deliver notifications raised on network threads during update() or close()."""
-
-    def __init__(self):
-        self._queue = queue.SimpleQueue()
-        self._lock = threading.Lock()
-        self._closed = False
-
-    def wrap(self, callback: Callable) -> Callable:
-        def enqueue(value):
-            with self._lock:
-                if not self._closed:
-                    self._queue.put((callback, value))
-
-        return enqueue
-
-    def drain(self) -> None:
-        # Only notifications queued before this tick, so a busy receiver cannot
-        # starve update().
-        for _ in range(self._queue.qsize()):
-            try:
-                callback, value = self._queue.get_nowait()
-            except queue.Empty:
-                break
-            callback(value)
-
-    def close(self) -> None:
-        """Refuse new notifications and deliver the queued ones.
-
-        Every queued notification runs even if one raises; the first error is
-        re-raised after the rest have been delivered.
-        """
-        with self._lock:
-            self._closed = True
-        error = None
-        while True:
-            try:
-                callback, value = self._queue.get_nowait()
-            except queue.Empty:
-                break
-            try:
-                callback(value)
-            except Exception as exc:
-                if error is not None:
-                    LOG.exception("Observer notification failed while closing")
-                error = error or exc
-        if error is not None:
-            raise error
 
 
 def raise_if_rejected(endpoint, role: str) -> None:

@@ -11,6 +11,7 @@ from contextlib import nullcontext as does_not_raise
 import pytest
 from pxr import Sdf, Usd, UsdGeom
 
+from openusdconnect import _client_backend
 from openusdconnect._client_utils import ClientCredential
 from openusdconnect.checkpoints import MirrorCheckpoint
 from openusdconnect.codec import message_to_dict
@@ -258,6 +259,47 @@ def test_token_provider_supplies_each_attempt_and_the_issued_token_is_presented(
     assert not failing.connect(timeout=5)
     assert "EventSender: token provider failed" in caplog.text
     assert len(hellos) == 2
+
+
+def test_a_given_queue_takes_the_notifications_and_snapshot_reads_the_status(senders, server):
+    with pytest.raises(ValueError, match="on_stage_metadata"):
+        EventSender(
+            "127.0.0.1",
+            _port(server),
+            client_id="refused",
+            notifications=_client_backend.NotificationQueue(),
+            on_stage_metadata=print,
+        )
+    notifications = _client_backend.NotificationQueue()
+    issued = []
+    sender = senders(
+        _port(server),
+        notifications=notifications,
+        on_token_issued=lambda token: issued.append((token, threading.get_ident())),
+    )
+    assert sender.connect(timeout=5)
+    wait_until(lambda: issued)
+    [(token, thread)] = issued
+    assert token == sender.token and thread != threading.get_ident()
+    kinds = [type(notification).__name__ for notification in notifications.drain()]
+    assert kinds == ["TokenIssued", "StageMetadata", "Connected"]
+
+    assert sender.send_events([ensure_prim_event("/SnapshotPrim")])
+    assert sender.flush(5)
+    snapshot = sender.snapshot()
+    assert (
+        snapshot.connected,
+        snapshot.session_id,
+        snapshot.pending_events,
+        snapshot.acknowledged_events,
+    ) == (
+        sender.connected,
+        sender.session_id,
+        sender.pending_event_count,
+        sender.acknowledged_event_count,
+    )
+    assert _client_backend.stage_metadata_fields(snapshot.metadata) == sender.stage_metadata
+    assert snapshot.rejection is None and not sender.hello_rejected
 
 
 def test_concurrent_submissions_commit_in_transaction_order(senders, server):

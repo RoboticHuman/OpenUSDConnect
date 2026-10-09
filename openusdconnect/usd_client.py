@@ -68,16 +68,15 @@ class UsdReceiver(ClientBase):
             client_id=client_id or make_stable_client_id(app_name),
             origin=origin or client_origin(app_name, "recv"),
             layered_replay=True,
+            notifications=self._notifications,
             **self._credential.endpoint_kwargs(),
-            **self._hooks.receiver_callbacks(),
         )
         self._dispatcher = EventDispatcher(
             receiver=self._receiver,
             adapter=destination,
             mirror_stage=None if destination.targets_stage() is stage else stage,
-            on_resync=self._hooks.on_resync,
         )
-        self._dispatcher.on_applied_events = self._hooks.applied_events_for(self._dispatcher)
+        self._observe_dispatcher(self._dispatcher)
 
     @property
     def stage(self) -> Usd.Stage | None:
@@ -166,8 +165,8 @@ class UsdReceiver(ClientBase):
         self._require_open()
         self._dispatcher.acknowledge_native_scene_rebuilt()
 
-    def _is_synchronized(self) -> bool:
-        return self._stage is not None and self._receiver.synchronized
+    def _synchronized(self, replayed: bool) -> bool:
+        return replayed and self._stage is not None
 
     def _is_parked(self) -> bool:
         return self._stage is None
@@ -222,7 +221,7 @@ class UsdPublisher(EmitterClientBase):
             client_id=client_id or make_stable_client_id(app_name),
             origin=origin or client_origin(app_name, "emit"),
             department=department,
-            on_stage_metadata=self._hooks.on_stage_metadata,
+            notifications=self._notifications,
             **self._credential.endpoint_kwargs(),
         )
 
@@ -251,9 +250,6 @@ class UsdPublisher(EmitterClientBase):
         elif not self._paused:
             self._sender.request_connect()
         return self._progress(submitted=sent)
-
-    def _is_synchronized(self) -> bool:
-        return self._sender.connected
 
     def _connect_sender(self, timeout: float | None = None) -> bool:
         self._paused = False

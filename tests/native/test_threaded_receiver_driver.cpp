@@ -8,6 +8,7 @@
 #include <atomic>
 #include <chrono>
 #include <memory>
+#include <mutex>
 #include <optional>
 #include <string>
 #include <utility>
@@ -74,17 +75,24 @@ void TestFramesReachTheEndpoint()
 	CHECK(harness.Record.Count<Connected>() == 1);
 }
 
-// A token issued by one handshake is presented by the next.
+// A token issued by one handshake reaches the hook once, before the next
+// handshake presents it.
 void TestIssuedTokenReachesTheNextHandshake()
 {
+	std::mutex mutex;
+	std::vector<std::string> issued;
 	DriverCallbacks callbacks;
-	Recorder* record = nullptr;
-	callbacks.Token = [&record]
+	callbacks.TokenIssued = [&](const std::string& token)
 	{
-		return std::optional<std::string>(record->IssuedToken());
+		std::lock_guard lock(mutex);
+		issued.push_back(token);
+	};
+	callbacks.Token = [&]
+	{
+		std::lock_guard lock(mutex);
+		return std::optional<std::string>(issued.empty() ? std::string() : issued.back());
 	};
 	Harness harness(FastConfig(), std::move(callbacks));
-	record = &harness.Record;
 	server::Hello hello;
 	hello.Token = "issued";
 	const std::shared_ptr<ScriptedConnection> first = harness.Handshake(hello);
@@ -94,6 +102,9 @@ void TestIssuedTokenReachesTheNextHandshake()
 	const std::shared_ptr<ScriptedConnection> second = harness.Accept();
 	CHECK(DecodeHello(second->Sent()).Token == "issued");
 	CHECK(harness.Record.Count<Disconnected>() == 1);
+	CHECK(harness.Record.IssuedToken() == "issued");
+	std::lock_guard lock(mutex);
+	CHECK(issued == std::vector<std::string>{"issued"});
 }
 
 void TestAbandonedTokenRetries()

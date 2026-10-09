@@ -82,7 +82,7 @@ Pass one `ClientObserver` subclass as `observer=` and override only what the
 host needs. Methods never run on a network thread: notifications arrive in
 `update()` or `close()`, and delivery methods run wherever the client applies
 authoritative state (`update()`, `refresh_asset_dependency()`, recovery). The
-client wires only overridden methods, so unused notifications cost nothing:
+client calls only overridden methods:
 
 ```python
 class HostObserver(ClientObserver):
@@ -458,6 +458,9 @@ receiver's on `start()`; callbacks run on that thread. `close(timeout=None)`,
 or leaving a `with` block, stops the thread for good and returns whether it
 exited in time (`False` at once from a callback). Closing does not flush. Keep
 a reference while the object should run: a collected one stops its thread.
+Either object also takes `notifications=`, a `NotificationQueue` its owner
+drains instead of every callback but `on_token_issued` (combining them raises
+`ValueError`), and offers `snapshot()`, its native status read in one call.
 
 ## Embed a server
 

@@ -102,6 +102,8 @@ struct DriverCallbacks final
 {
 	// Read just before each handshake; nullopt abandons that connection attempt.
 	std::function<std::optional<std::string>()> Token;
+	// The token an accepted Hello issued, before the next Token read.
+	std::function<void(const std::string&)> TokenIssued;
 	// When set, the driver drains the notification queue into it after every
 	// endpoint call, so a notification is handled before the next attempt.
 	std::function<void(Notification)> Notifications;

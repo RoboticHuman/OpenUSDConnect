@@ -84,6 +84,8 @@ public:
 	void OnTick(TimePoint now);
 	void Stop();
 	[[nodiscard]] std::vector<Action> TakeActions();
+	// The token the latest accepted Hello issued, once.
+	[[nodiscard]] std::optional<std::string> TakeIssuedToken();
 	[[nodiscard]] std::optional<TimePoint> NextWake() const;
 
 	// Stage-owning consumer. Read Generation before draining; report progress
@@ -152,6 +154,7 @@ private:
 	TimePoint WakeTime;
 	TimePoint DrainDeadline;
 	std::optional<HandshakeRejected> Rejection;
+	std::optional<std::string> IssuedToken;
 	bool LayeredReplayActive = false;
 	OpenUSDConnect::LayerMode LayerModeActive = OpenUSDConnect::LayerMode::Managed;
 	StageMetadata Metadata;

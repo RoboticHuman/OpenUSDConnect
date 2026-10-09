@@ -24,11 +24,11 @@ namespace openusdconnect::client
 // Reference host loop: one thread with blocking sockets applies a started
 // endpoint's actions. Of the endpoint it calls only the host I/O both
 // endpoints share (OnConnected, OnBytes, OnDisconnected, OnTick, Stop,
-// TakeActions, NextWake, Status().Stopped) and the OnReadTimeout its role
-// supplies. It ticks at NextWake, during reads too, and exits once the
-// endpoint stops. A host thread that queues actions through the endpoint must
-// then Wake it. Never destroy the driver from one of its callbacks. Hosts with
-// their own scheduler drive the endpoint instead.
+// TakeActions, TakeIssuedToken, NextWake, Status().Stopped) and the
+// OnReadTimeout its role supplies. It ticks at NextWake, during reads too, and
+// exits once the endpoint stops. A host thread that queues actions through the
+// endpoint must then Wake it. Never destroy the driver from one of its
+// callbacks. Hosts with their own scheduler drive the endpoint instead.
 template <typename Endpoint>
 class ThreadedDriver
 {
@@ -231,8 +231,9 @@ private:
 		Changed.notify_all();
 	}
 
-	// Delivers notifications before applying each batch of actions, so a
-	// token issued by one handshake is stored before the next connects.
+	// Reports an issued token and delivers notifications before applying each
+	// batch of actions, so a token issued by one handshake is stored before the
+	// next connects.
 	void Dispatch()
 	{
 		{
@@ -241,6 +242,11 @@ private:
 		}
 		for (;;)
 		{
+			if (std::optional<std::string> token = Target.TakeIssuedToken();
+				token && Callbacks.TokenIssued)
+			{
+				Callbacks.TokenIssued(*token);
+			}
 			Deliver();
 			std::vector<Action> actions = Target.TakeActions();
 			if (actions.empty())

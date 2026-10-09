@@ -64,7 +64,8 @@ Return values and defaults:
 Behavior:
 
 - Token, metadata, and playback notifications run during `update()` or
-  `close()` on the calling thread instead of on network threads.
+  `close()` on the calling thread instead of on network threads; stage
+  metadata is delivered when it changes.
 - Stage edits made in `on_resync` are no longer published, matching
   `on_applied`.
 - `UsdPublisher.update()` raises before `start()`. While disconnected it
@@ -107,6 +108,9 @@ callable arguments and properties.
   `UsdPublisher`.
 - `token_provider=` on `EventSender` and `EventReceiver` supplies the token
   for each connection attempt.
+- `notifications=` on `EventSender` and `EventReceiver` pushes their
+  notifications into a queue the owner drains, and `snapshot()` returns the
+  native status in one call.
 - `EventDispatcher.drained_message_count`, `EventReceiver.stopped`, and
   `NoticeEmitter.has_local_changes`.
 - Receiver replay identity and optional post-commit transaction checkpoints.

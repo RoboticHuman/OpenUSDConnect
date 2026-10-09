@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from types import SimpleNamespace
+
 import pytest
 from pxr import Sdf, Usd, UsdGeom
 
@@ -65,6 +67,14 @@ class _SenderStub:
         self.repaired: list[tuple[list[dict], str]] = []
         self.abandoned_session_ids: list[str | None] = []
         self.connect_requests = 0
+
+    def snapshot(self):
+        return SimpleNamespace(
+            connected=self.connected,
+            rejection=None,
+            pending_events=self.pending_event_count,
+            acknowledged_events=self.acknowledged_event_count,
+        )
 
     def send_events(self, events: list[dict]) -> bool:
         self.batches.append(events)
@@ -481,24 +491,25 @@ def test_managed_parked_client_is_not_ready(ready_managed_client):
 
 
 def test_managed_queued_callback_can_close_before_stage_work(monkeypatch):
-    client = ManagedClient(
-        Usd.Stage.CreateInMemory(), app_name="close-from-callback", persist_token=False,
-        observer=RecordingObserver(on_call=lambda _name, _value: client.close()),
-    )
-    client._started = True
-    monkeypatch.setattr(
-        client.dispatcher, "drain_and_apply", lambda: pytest.fail("closed client applied work"),
-    )
-    try:
-        client.receiver._on_playback_state(
-            {"playing": False, "time": 0.0, "rate": 1.0, "leader_client_id": ""}
+    with embedded_server(require_token=True) as server:
+        client = ManagedClient(
+            Usd.Stage.CreateInMemory(), app_name="close-from-callback",
+            port=server.server_address[1], persist_token=False,
+            observer=RecordingObserver(on_call=lambda _name, _value: client.close()),
         )
-        assert client.update() == SyncUpdate(applied_events=0, submitted_events=0)
-        assert client.status.phase is ClientPhase.CLOSED
-        with pytest.raises(RuntimeError, match="ManagedClient is closed"):
-            client.update()
-    finally:
-        client.close()
+        monkeypatch.setattr(
+            client.dispatcher, "drain_and_apply", lambda: pytest.fail("closed client applied work"),
+        )
+        try:
+            client.start()
+            # The issued token is queued once the handshake has completed.
+            assert client.receiver.wait_connected(5)
+            assert client.update() == SyncUpdate(applied_events=0, submitted_events=0)
+            assert client.status.phase is ClientPhase.CLOSED
+            with pytest.raises(RuntimeError, match="ManagedClient is closed"):
+                client.update()
+        finally:
+            client.close()
 
 
 @pytest.mark.parametrize("reconnects", [True, False])

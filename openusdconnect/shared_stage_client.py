@@ -150,10 +150,10 @@ class SharedStageClient(PublishingClientBase):
         self._receiver = EventReceiver(
             host=host, port=port, sync_from=1, reconnect=reconnect,
             layered_replay=False, layer_mode=LayerMode.SHARED_STAGE,
-            **identity, **credential, **self._hooks.receiver_callbacks(),
+            notifications=self._notifications, **identity, **credential,
         )
         self._sender = EventSender(
-            host, port, layer_mode=LayerMode.SHARED_STAGE,
+            host, port, layer_mode=LayerMode.SHARED_STAGE, notifications=self._notifications,
             **identity, **credential,
         )
         self._last_seq = 0
@@ -705,12 +705,8 @@ class SharedStageClient(PublishingClientBase):
         self._last_seq = 0
         old_tracker.close()
 
-    def _is_synchronized(self) -> bool:
-        return (
-            self._graph.ready
-            and self._receiver.synchronized
-            and not self._sender.recovery_required
-        )
+    def _synchronized(self, replayed: bool) -> bool:
+        return replayed and self._graph.ready and not self._sender.recovery_required
 
     def _prepared_events(self) -> int:
         return self._tracker.prepared_event_count

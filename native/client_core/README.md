@@ -56,9 +56,10 @@ The headers state each method's contract.
 
 `ThreadedReceiverDriver` and `ThreadedProducerDriver` run that loop for one endpoint on one
 thread from `Start()`. The host supplies a `SocketFactory` (`TcpSocketFactory` or its own) and
-optional `DriverCallbacks`: the token for each handshake, a sink that receives notifications
-after every endpoint call (without one, the host drains the queue), and a log sink. Callbacks
-run on the driver thread with no lock held and must not destroy the driver.
+optional `DriverCallbacks`: the token for each handshake, a hook for an issued token, a sink
+that receives notifications after every endpoint call (without one, the host drains the
+queue), and a log sink. Callbacks run on the driver thread with no lock held and must not
+destroy the driver.
 
 - After an endpoint call from another thread that queues actions (`Append`, `QueueControl`,
   `RequestConnect`, `CancelConnect`, `Disconnect`, `RequestReplayFrom`, `MarkReplayApplied`),

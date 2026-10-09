@@ -1,10 +1,11 @@
 """Host-facing lifecycle guarantees shared by the high-level clients."""
 
 import threading
+import uuid
 from types import SimpleNamespace
 
 import pytest
-from pxr import Sdf, Usd
+from pxr import Sdf, Usd, UsdGeom
 
 from openusdconnect import (
     ManagedClient,
@@ -41,6 +42,27 @@ def shared_server(tmp_path_factory):
     Sdf.Layer.CreateNew(str(root)).Save()
     with embedded_server(base_usd_path=str(root), layer_mode=LayerMode.SHARED_STAGE) as runtime:
         yield runtime
+
+
+@pytest.fixture(scope="module")
+def token_servers(tmp_path_factory):
+    """Servers by client kind that issue tokens and author an up axis."""
+    root = tmp_path_factory.mktemp("tokens") / "root.usda"
+    stage = Usd.Stage.CreateNew(str(root))
+    UsdGeom.SetStageUpAxis(stage, UsdGeom.Tokens.z)
+    stage.GetRootLayer().Save()
+    with (
+        embedded_server(base_usd_path=str(root), require_token=True) as managed,
+        embedded_server(
+            base_usd_path=str(root), require_token=True, layer_mode=LayerMode.SHARED_STAGE,
+        ) as shared,
+    ):
+        yield {
+            ManagedClient: managed,
+            SharedStageClient: shared,
+            UsdReceiver: managed,
+            UsdPublisher: managed,
+        }
 
 
 @pytest.fixture
@@ -136,48 +158,6 @@ def test_waits_raise_when_nothing_will_reconnect():
         receiver.close()
 
 
-def test_queued_notifications_run_on_update_thread_and_bound_each_drain():
-    notifications = _client_lifecycle.ClientCallbackQueue()
-    received = []
-
-    def observe(value):
-        received.append((value, threading.get_ident()))
-        if value == "first":
-            callback("next-tick")
-
-    callback = notifications.wrap(observe)
-    worker = threading.Thread(target=lambda: callback("first"))
-    worker.start()
-    worker.join(timeout=1)
-    assert not worker.is_alive()
-    assert received == []
-    notifications.drain()
-    assert received == [("first", threading.get_ident())]
-    notifications.drain()
-    assert received == [("first", threading.get_ident()), ("next-tick", threading.get_ident())]
-    callback("queued")
-    notifications.close()
-    callback("late")
-    notifications.drain()
-    assert [value for value, _thread in received] == ["first", "next-tick", "queued"]
-
-
-def test_queued_notification_failure_propagates_and_keeps_later_notifications():
-    notifications = _client_lifecycle.ClientCallbackQueue()
-    received = []
-
-    def fail(value):
-        raise RuntimeError("observer failed")
-
-    notifications.wrap(fail)(None)
-    notifications.wrap(received.append)("next")
-    with pytest.raises(RuntimeError, match="observer failed"):
-        notifications.drain()
-    assert received == []
-    notifications.drain()
-    assert received == ["next"]
-
-
 def test_public_status_types_keep_compatibility_identity():
     from openusdconnect import ClientPhase, ClientStatus, SyncUpdate
 
@@ -248,43 +228,49 @@ def test_sender_takes_its_token_from_the_provider_on_every_attempt(monkeypatch, 
 
 @pytest.mark.parametrize("failure", [None, "persistence", "observer"])
 def test_issued_token_is_persisted_before_notifying_and_used_by_both_roles(
-    failure, tmp_path, monkeypatch,
+    failure, tmp_path, monkeypatch, token_servers,
 ):
     calls = []
 
     def record(name, token):
-        calls.append((name, token))
+        calls.append((name, token, threading.get_ident()))
         if failure == name:
             raise RuntimeError(f"injected {name} failure")
 
+    monkeypatch.setattr(_client_utils, "load_token", lambda host, port: None)
     monkeypatch.setattr(
         _client_utils, "save_token", lambda host, port, token: record("persistence", token),
     )
-    stage = Usd.Stage.CreateNew(str(tmp_path / "scene.usda"))
-    observer = RecordingObserver(on_call=lambda name, token: record("observer", token))
+    hellos = recorded_hellos(monkeypatch)
+    observer = RecordingObserver(
+        on_call=lambda name, token: name == "token_issued" and record("observer", token),
+    )
     client = ManagedClient(
-        stage, app_name="shared-credentials", token="configured", persist_token=True,
-        observer=observer,
+        Usd.Stage.CreateNew(str(tmp_path / "scene.usda")), app_name="shared-credentials",
+        client_id=uuid.uuid4().hex, port=token_servers[ManagedClient].server_address[1],
+        persist_token=True, observer=observer,
     )
     try:
-        callback = client._sender._on_token_issued
-        if failure == "persistence":
-            with pytest.raises(RuntimeError, match="injected persistence failure"):
-                callback("replacement")
+        client.start()
+        wait_until(lambda: calls)
+        # The connection thread adopted and persisted the token; the host hears it in update().
+        [(name, issued, thread)] = calls
+        assert name == "persistence" and thread != threading.get_ident()
+        if failure == "observer":
+            with pytest.raises(RuntimeError, match="injected observer failure"):
+                client.update()
+            # Later notifications wait for the next call.
+            assert [call[0] for call in observer.calls] == ["token_issued"]
         else:
-            callback("replacement")
-        # The host observer is queued; the token is adopted and persisted first.
-        assert calls == [("persistence", "replacement")]
-        for endpoint in (client._sender, client._receiver):
-            assert endpoint._token_provider() == "replacement"
-
-        if failure != "persistence":
-            if failure == "observer":
-                with pytest.raises(RuntimeError, match="injected observer failure"):
-                    client._callbacks.drain()
-            else:
-                client._callbacks.drain()
-            assert calls[-1] == ("observer", "replacement")
+            client.update()
+        assert calls[-1] == ("observer", issued, threading.get_ident())
+        assert client.wait_until_ready(5)
+        client.update()
+        # Both roles' handshakes carried the same metadata.
+        assert [call[0] for call in observer.calls].count("stage_metadata") == 1
+        assert [(hello["role"], hello.get("token")) for hello in hellos] == [
+            ("receiver", None), ("emitter", issued),
+        ]
     finally:
         client.close()
 
@@ -412,23 +398,25 @@ def test_can_author_combines_readiness_role_and_edit_target(
 
 
 @pytest.mark.parametrize("kind", [ManagedClient, SharedStageClient, UsdReceiver, UsdPublisher])
-def test_close_delivers_notifications_queued_by_network_threads(kind, tmp_path):
+def test_close_delivers_notifications_queued_by_network_threads(kind, tmp_path, token_servers):
     observer = RecordingObserver()
     stage = Usd.Stage.CreateNew(str(tmp_path / "scene.usda"))
-    client = kind(stage, app_name="notifications", persist_token=False, observer=observer)
-    endpoint = client._sender if kind is UsdPublisher else client._receiver
+    client = kind(
+        stage, app_name="notifications", client_id=uuid.uuid4().hex,
+        port=token_servers[kind].server_address[1], persist_token=False, observer=observer,
+    )
     try:
-        worker = threading.Thread(target=lambda: (
-            endpoint._on_token_issued("issued"),
-            endpoint._on_stage_metadata({"upAxis": "Y"}),
-        ))
-        worker.start()
-        worker.join(timeout=1)
-        assert observer.calls == []
+        if kind is UsdPublisher:
+            assert client.connect(timeout=5)
+        else:
+            client.start()
+            assert client._receiver.wait_connected(5)
+        token = client._endpoints[0].token
+        assert token and observer.calls == []
     finally:
         client.close()
     # A host that stores tokens itself must receive one issued just before close.
-    assert observer.calls == [
-        ("token_issued", "issued", threading.get_ident()),
-        ("stage_metadata", StageMetadata(up_axis="Y"), threading.get_ident()),
+    assert [call for call in observer.calls if call[0] != "playback_state"] == [
+        ("token_issued", token, threading.get_ident()),
+        ("stage_metadata", StageMetadata(up_axis="Z"), threading.get_ident()),
     ]

@@ -86,20 +86,19 @@ class ManagedClient(EmitterClientBase):
         }
         credential = self._credential.endpoint_kwargs()
         self._sender = EventSender(
-            host, port, department=department,
+            host, port, department=department, notifications=self._notifications,
             **identity, **credential,
         )
         self._receiver = EventReceiver(
             host=host, port=port, sync_from=1, reconnect=reconnect, layered_replay=True,
-            **identity, **credential, **self._hooks.receiver_callbacks(),
+            notifications=self._notifications, **identity, **credential,
         )
         self._dispatcher = EventDispatcher(
             receiver=self._receiver,
             adapter=UsdStageAdapter(stage),
             emitter=self._emitter,
-            on_resync=self._hooks.on_resync,
         )
-        self._dispatcher.on_applied_events = self._hooks.applied_events_for(self._dispatcher)
+        self._observe_dispatcher(self._dispatcher)
         # Modify the stage last so a failed construction leaves it untouched.
         with self._emitter.suppressed():
             self._authoring_layer = self._create_authoring_layer(stage, app_name)
@@ -267,12 +266,8 @@ class ManagedClient(EmitterClientBase):
         self._resume_sender_after_recovery(remaining_time(deadline))
         return result
 
-    def _is_synchronized(self) -> bool:
-        return (
-            self._stage is not None
-            and self._receiver.synchronized
-            and not self._sender.recovery_required
-        )
+    def _synchronized(self, replayed: bool) -> bool:
+        return replayed and self._stage is not None and not self._sender.recovery_required
 
     def _is_parked(self) -> bool:
         return self._stage is None

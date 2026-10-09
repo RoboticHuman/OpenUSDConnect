@@ -11,6 +11,7 @@ from contextlib import nullcontext as does_not_raise
 import pytest
 from pxr import Usd, UsdGeom
 
+from openusdconnect import _client_backend
 from openusdconnect._client_utils import ClientCredential
 from openusdconnect.codec import HelloRejectionCode, message_to_dict
 from openusdconnect.protocol_constants import (
@@ -314,6 +315,33 @@ def test_legacy_callbacks_receive_message_dicts_once_on_the_connection_thread(
     assert threading.get_ident() not in {thread for _name, _value, thread in calls}
     assert "EventReceiver: on_token_issued callback failed" in caplog.text
     assert receiver.connected
+
+
+def test_a_given_queue_takes_the_notifications_and_snapshot_reads_the_status(receivers, server):
+    with pytest.raises(ValueError, match="on_playback_state"):
+        EventReceiver(notifications=_client_backend.NotificationQueue(), on_playback_state=print)
+    head = _commit(server, 1)
+    notifications = _client_backend.NotificationQueue()
+    issued = []
+    receiver = receivers(
+        notifications=notifications,
+        on_token_issued=lambda token: issued.append((token, threading.get_ident())),
+    )
+    receiver.start()
+    wait_until(lambda: issued and receiver.last_seq == head)
+    [(token, thread)] = issued
+    assert token == receiver.token and thread != threading.get_ident()
+    kinds = [type(notification).__name__ for notification in notifications.drain()]
+    assert kinds[:3] == ["TokenIssued", "StageMetadata", "Connected"]
+
+    snapshot = receiver.snapshot()
+    assert (snapshot.connected, snapshot.last_sequence, snapshot.layered_replay_active) == (
+        receiver.connected,
+        receiver.last_seq,
+        receiver.layered_replay_active,
+    )
+    assert _client_backend.stage_metadata_fields(snapshot.metadata) == receiver.stage_metadata
+    assert snapshot.rejection is None and not receiver.hello_rejected
 
 
 def test_replay_drains_in_batches_and_is_ready_once_marked_applied(receivers, server):

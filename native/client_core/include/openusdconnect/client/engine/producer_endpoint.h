@@ -123,6 +123,8 @@ public:
 	// Like Disconnect, and refuses every later attempt.
 	void Stop();
 	[[nodiscard]] std::vector<Action> TakeActions();
+	// The token the latest accepted Hello issued, once.
+	[[nodiscard]] std::optional<std::string> TakeIssuedToken();
 	[[nodiscard]] std::optional<TimePoint> NextWake() const;
 
 	// Frames are complete and length-prefixed. Append's frame must encode
@@ -205,6 +207,7 @@ private:
 	// Applied once the host reports the close that RateLimited requested.
 	std::optional<std::chrono::steady_clock::duration> PendingRetryAfter;
 	std::optional<HandshakeRejected> Rejection;
+	std::optional<std::string> IssuedToken;
 	std::optional<TransactionFailure> SessionFailure;
 	std::string SessionId;
 	std::string ServerInstance;

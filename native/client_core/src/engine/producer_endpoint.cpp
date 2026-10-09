@@ -263,6 +263,12 @@ std::vector<Action> ProducerEndpoint::TakeActions()
 	return std::exchange(Actions, {});
 }
 
+std::optional<std::string> ProducerEndpoint::TakeIssuedToken()
+{
+	std::lock_guard lock(Mutex);
+	return std::exchange(IssuedToken, std::nullopt);
+}
+
 std::optional<TimePoint> ProducerEndpoint::NextWake() const
 {
 	std::lock_guard lock(Mutex);
@@ -535,7 +541,7 @@ void ProducerEndpoint::AcceptHello(const OpenUSDConnect::HelloOk& hello)
 			  HighwaterFailureReason(accepted, committed_through)});
 		return;
 	}
-	detail::NotifyHelloFields(hello, Metadata, Notifications, Actions);
+	detail::NotifyHelloFields(hello, IssuedToken, Metadata, Notifications, Actions);
 	Publish();
 }
 
