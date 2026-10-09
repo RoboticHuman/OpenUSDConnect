@@ -1,14 +1,69 @@
+#include "openusdconnect/client/frame_codec.h"
 #include "openusdconnect/client/protocol_codec.h"
 
 #include "test_check.h"
 #include <cstdint>
 #include <string>
 #include <string_view>
+#include <vector>
 
 using namespace openusdconnect::client;
 
+using Bytes = std::vector<std::uint8_t>;
+
+[[nodiscard]] static Bytes ToBytes(std::string_view text)
+{
+	return Bytes(text.begin(), text.end());
+}
+
+static void TestFrameDecoderHandlesFragmentedAndCoalescedInput()
+{
+	Bytes stream;
+	for (const std::string_view payload : {"alpha", "beta"})
+	{
+		Bytes frame;
+		CHECK(EncodeFrame(ToBytes(payload).data(), payload.size(), frame) == FrameResult::Success);
+		stream.insert(stream.end(), frame.begin(), frame.end());
+	}
+	FrameDecoder decoder;
+	std::vector<Bytes> frames;
+	CHECK(decoder.Feed(stream.data(), 3, frames) == FrameResult::Success);
+	CHECK(frames.empty());
+	CHECK(decoder.BufferedBytes() == 3);
+	CHECK(decoder.Feed(stream.data() + 3, 5, frames) == FrameResult::Success);
+	CHECK(frames.empty());
+	CHECK(decoder.Feed(stream.data() + 8, stream.size() - 8, frames) == FrameResult::Success);
+	CHECK((frames == std::vector<Bytes>{ToBytes("alpha"), ToBytes("beta")}));
+	CHECK(decoder.BufferedBytes() == 0);
+}
+
+static void TestFrameDecoderRejectsAnInvalidSizeAtTheHeaderBoundary()
+{
+	FrameDecoder decoder(8);
+	const std::uint8_t header[kFrameHeaderSize] = {0, 0, 0, 9};
+	std::vector<Bytes> frames;
+	CHECK(decoder.Feed(header, sizeof(header), frames) == FrameResult::InvalidHeader);
+	CHECK(frames.empty());
+	CHECK(decoder.BufferedBytes() == 0);
+}
+
+static void TestFrameSizeValidation()
+{
+	CHECK(!IsValidMaxFrameSize(0));
+	CHECK(IsValidMaxFrameSize(kDefaultMaxFrameSize));
+	const Bytes payload = ToBytes("oversized");
+	Bytes frame;
+	CHECK(EncodeFrame(payload.data(), 0, frame) == FrameResult::EmptyPayload);
+	CHECK(EncodeFrame(payload.data(), payload.size(), frame, 4) == FrameResult::PayloadTooLarge);
+	CHECK(frame.empty());
+}
+
 int main()
 {
+	TestFrameDecoderHandlesFragmentedAndCoalescedInput();
+	TestFrameDecoderRejectsAnInvalidSizeAtTheHeaderBoundary();
+	TestFrameSizeValidation();
+
 	flatbuffers::FlatBufferBuilder hello_builder(256);
 	const HelloParameters hello{"emitter",	0,		 "client", "origin",
 								"lighting", "token", false,	   OpenUSDConnect::LayerMode::Managed,

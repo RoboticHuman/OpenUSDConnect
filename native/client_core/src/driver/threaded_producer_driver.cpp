@@ -39,8 +39,7 @@ ThreadedProducerDriver::ThreadedProducerDriver(ProducerEndpoint& endpoint,
 											   DriverCallbacks callbacks)
 	: Endpoint(endpoint)
 	, Loop(std::make_unique<detail::DriverLoop<ProducerEndpoint>>(
-		  endpoint,
-		  detail::LoopRole<ProducerEndpoint>{endpoint.Configuration().HandshakeTimeout},
+		  endpoint, detail::LoopRole<ProducerEndpoint>{endpoint.Configuration().HandshakeTimeout},
 		  notifications, std::move(sockets), std::move(callbacks)))
 {
 }
@@ -77,19 +76,23 @@ bool ThreadedProducerDriver::Connect(std::optional<std::chrono::milliseconds> ti
 	const TimePoint deadline = Now() + (timeout ? std::min(*timeout, handshake) : handshake);
 	for (;;)
 	{
-		const ConnectResult result = Endpoint.Connect(Now(), deadline);
-		if (result == ConnectResult::Connected || result == ConnectResult::Refused)
+		switch (Endpoint.Connect(Now(), deadline))
 		{
-			return result == ConnectResult::Connected;
-		}
-		if (result == ConnectResult::Started)
-		{
+		case ConnectResult::Connected:
+			return true;
+		case ConnectResult::Refused:
+			return false;
+		case ConnectResult::Started:
 			Loop->Wake();
-		}
-		// A Busy result retries once the attempt or close in flight ends.
-		if (!WaitSettled(deadline) || result == ConnectResult::Started)
-		{
+			static_cast<void>(WaitSettled(deadline));
 			return Endpoint.Status().Connected;
+		case ConnectResult::Busy:
+			// Retry once the attempt or close in flight ends.
+			if (!WaitSettled(deadline))
+			{
+				return Endpoint.Status().Connected;
+			}
+			break;
 		}
 	}
 }

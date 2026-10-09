@@ -65,12 +65,9 @@ struct SendAction final
 //   EndConnection   the endpoint's accounting for any end, whichever side caused it.
 //   OnDisconnected  the host reports that the socket or attempt is gone.
 //
-// Both endpoints Close with ProtocolError on a frame that does not decode, and
-// on a handshake answer other than HelloOk, HelloRejected, or AuthRejected, since
-// the server sends nothing before it. Once connected, the receiver also closes on
-// a payload type it does not know, which could be a sequenced message its
-// consumer would miss; the producer ignores every message but its transaction
-// results and RateLimited, including the playback replies to its control frames.
+// Both endpoints Close with ProtocolError on an undecodable frame or a handshake answer other than
+// HelloOk, HelloRejected, or AuthRejected. After the handshake the receiver closes on a payload
+// type it does not know; the producer ignores everything but transaction results and RateLimited.
 
 // Close the socket, or abandon the connect attempt, then report OnDisconnected.
 struct CloseAction final

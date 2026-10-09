@@ -1,5 +1,6 @@
 #include "openusdconnect/client/engine/status.h"
 #include "openusdconnect/client/producer_recovery.h"
+#include "openusdconnect/client/producer_session.h"
 #include "openusdconnect/client/receiver_session.h"
 #include "openusdconnect/client/schema/messages_generated.h"
 
@@ -10,6 +11,7 @@
 #include <iterator>
 #include <optional>
 #include <string_view>
+#include <vector>
 
 using namespace openusdconnect::client;
 
@@ -203,6 +205,156 @@ static void TestResetPendingUntilAppliedOrDiscarded()
 	CHECK(inbox.ResetPending());
 }
 
+// Queues an event whose payload is its sequence.
+[[nodiscard]] static AcceptResult AcceptEvent(TestInbox& inbox, std::uint64_t generation,
+											  std::int32_t sequence)
+{
+	return inbox.Accept(generation, ReceiverMessageKind::Event, sequence, sequence);
+}
+
+[[nodiscard]] static AcceptResult AcceptReset(TestInbox& inbox, std::uint64_t generation)
+{
+	return inbox.Accept(generation, ReceiverMessageKind::Resync, 0, 0);
+}
+
+static void TestInboxRejectsInvalidArguments()
+{
+	CHECK(!TestInbox::IsValidConfiguration(0, 1));
+	CHECK(!TestInbox::IsValidConfiguration(1, 0));
+	TestInbox inbox(1, 1);
+	const std::uint64_t generation = inbox.BeginConnection().Generation;
+	CHECK(AcceptEvent(inbox, generation, 0) == AcceptResult::InvalidSequence);
+	CHECK(inbox.Accept(generation, ReceiverMessageKind::LayerGraphState, 0, 0) ==
+		  AcceptResult::InvalidSequence);
+	CHECK(inbox.AcceptReplayComplete(generation, -1, 0) == AcceptResult::InvalidSequence);
+	CHECK(!inbox.RequestReplayFrom(0));
+	CHECK(inbox.Size() == 0);
+}
+
+static void TestReplayAppliesBeforeLiveFramesDrain()
+{
+	TestInbox inbox(1, 8);
+	const ConnectionStart connection = inbox.BeginConnection();
+	CHECK(connection.SyncFrom == 1);
+	CHECK(AcceptEvent(inbox, connection.Generation, 1) == AcceptResult::Accepted);
+	CHECK(inbox.AcceptReplayComplete(connection.Generation, 1, 7) == AcceptResult::Accepted);
+	CHECK(AcceptEvent(inbox, connection.Generation, 2) == AcceptResult::Accepted);
+
+	CHECK(!inbox.MarkReplayApplied());
+	CHECK(inbox.Drain(1) == std::vector<int>{1});
+	CHECK(inbox.MarkReplayApplied());
+	CHECK(inbox.ReplayHeadSequence() == 1);
+	CHECK(inbox.ReplayEpoch() == 7);
+	CHECK(inbox.Drain() == std::vector<int>{2});
+}
+
+static void TestStaleGenerationIsRejectedWithoutMutation()
+{
+	TestInbox inbox(4, 8);
+	const ConnectionStart first = inbox.BeginConnection();
+	const ConnectionStart second = inbox.BeginConnection();
+	CHECK(AcceptEvent(inbox, first.Generation, 4) == AcceptResult::StaleGeneration);
+	CHECK(inbox.Size() == 0);
+	CHECK(inbox.LastSequence() == 3);
+	CHECK(second.SyncFrom == 4);
+}
+
+static void TestOverflowIsBoundedAndReplayable()
+{
+	TestInbox inbox(1, 1);
+	const std::uint64_t generation = inbox.BeginConnection().Generation;
+	CHECK(AcceptEvent(inbox, generation, 1) == AcceptResult::Accepted);
+	CHECK(AcceptEvent(inbox, generation, 2) == AcceptResult::QueueFull);
+	CHECK(inbox.Overflowed());
+	CHECK(inbox.Drain() == std::vector<int>{1});
+
+	CHECK(inbox.RequestReplayFrom(2));
+	CHECK(inbox.BeginConnection().SyncFrom == 2);
+	CHECK(!inbox.Overflowed());
+}
+
+static void TestResetReconnectsFromOneWithoutDiscardingTheQueue(bool require_contiguous,
+																bool queued_prefix)
+{
+	TestInbox inbox(4, queued_prefix ? 2 : 1, require_contiguous);
+	ConnectionStart connection = inbox.BeginConnection();
+	CHECK(connection.SyncFrom == 4);
+	std::vector<int> expected;
+	if (queued_prefix)
+	{
+		CHECK(AcceptEvent(inbox, connection.Generation, 4) == AcceptResult::Accepted);
+		expected.push_back(4);
+	}
+	CHECK(AcceptReset(inbox, connection.Generation) == AcceptResult::Accepted);
+	expected.push_back(0);
+	CHECK(inbox.Size() == expected.size());
+	CHECK(inbox.LastSequence() == 0);
+	CHECK(AcceptEvent(inbox, connection.Generation, 1) == AcceptResult::QueueFull);
+	// Disconnects before the first new event keep the reset cursor and every
+	// queued frame, even before the consumer drains.
+	for (int attempt = 0; attempt < 2; ++attempt)
+	{
+		inbox.Disconnect(connection.Generation);
+		connection = inbox.BeginConnection();
+		CHECK(connection.SyncFrom == 1);
+		CHECK(inbox.Size() == expected.size());
+	}
+	CHECK(inbox.Drain() == expected);
+	inbox.ClearOverflow();
+	CHECK(AcceptEvent(inbox, connection.Generation, 1) == AcceptResult::Accepted);
+	inbox.Disconnect(connection.Generation);
+	CHECK(inbox.BeginConnection().SyncFrom == 2);
+	CHECK(inbox.Drain() == std::vector<int>{1});
+}
+
+static void TestFullReplayCursorSurvivesDisconnectBeforeAnyFrames()
+{
+	TestInbox inbox(4, 1);
+	CHECK(inbox.BeginConnection().SyncFrom == 4);
+	CHECK(inbox.RequestReplayFrom(1));
+	for (int attempt = 0; attempt < 2; ++attempt)
+	{
+		const ConnectionStart connection = inbox.BeginConnection();
+		CHECK(connection.SyncFrom == 1);
+		inbox.Disconnect(connection.Generation);
+	}
+}
+
+static void TestRejectedResetPreservesTheSnapshotCursorAndQueue()
+{
+	TestInbox inbox(4, 1);
+	const std::uint64_t generation = inbox.BeginConnection().Generation;
+	CHECK(AcceptEvent(inbox, generation, 4) == AcceptResult::Accepted);
+	CHECK(AcceptReset(inbox, generation) == AcceptResult::QueueFull);
+	CHECK(inbox.LastSequence() == 4);
+	inbox.Disconnect(generation);
+	CHECK(inbox.BeginConnection().SyncFrom == 5);
+	CHECK(inbox.Drain() == std::vector<int>{4});
+}
+
+static void TestContiguousDelivery()
+{
+	TestInbox inbox(1, 4, true);
+	const std::uint64_t generation = inbox.BeginConnection().Generation;
+	CHECK(AcceptEvent(inbox, generation, 2) == AcceptResult::SequenceGap);
+	CHECK(AcceptEvent(inbox, generation, 1) == AcceptResult::Accepted);
+	CHECK(AcceptEvent(inbox, generation, 1) == AcceptResult::Duplicate);
+	CHECK(inbox.Drain() == std::vector<int>{1});
+	CHECK(inbox.MarkAppliedThrough(generation, 1));
+	CHECK(inbox.LastAppliedSequence() == 1);
+}
+
+static void TestHighwaterAheadQuarantinesTheProducerSession()
+{
+	OrderedProducerSession<int> session(2);
+	const std::optional<ProducerConnectionStart> connection = session.BeginConnection();
+	CHECK(connection);
+	CHECK(session.AcceptHello(connection->Generation, 1) == ProducerResult::HighwaterAhead);
+	CHECK(session.Phase() == ProducerPhase::RecoveryRequired);
+	CHECK(session.RecoveryRequired());
+	CHECK(!session.BeginConnection());
+}
+
 int main()
 {
 	TestEachPhaseOutranksThePhasesAfterIt();
@@ -213,5 +365,20 @@ int main()
 	TestReplayRequestReleasesTheHold();
 	TestReplayMarkerRequiresItsRecords();
 	TestResetPendingUntilAppliedOrDiscarded();
+	TestInboxRejectsInvalidArguments();
+	TestReplayAppliesBeforeLiveFramesDrain();
+	TestStaleGenerationIsRejectedWithoutMutation();
+	TestOverflowIsBoundedAndReplayable();
+	for (const bool require_contiguous : {false, true})
+	{
+		for (const bool queued_prefix : {false, true})
+		{
+			TestResetReconnectsFromOneWithoutDiscardingTheQueue(require_contiguous, queued_prefix);
+		}
+	}
+	TestFullReplayCursorSurvivesDisconnectBeforeAnyFrames();
+	TestRejectedResetPreservesTheSnapshotCursorAndQueue();
+	TestContiguousDelivery();
+	TestHighwaterAheadQuarantinesTheProducerSession();
 	return 0;
 }
