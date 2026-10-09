@@ -78,16 +78,13 @@ Behavior:
   like `UsdPublisher.flush()`, instead of returning `False`.
 - `UsdReceiver.status` reports `CONNECTING` instead of `READY` while it
   reconnects, like the other clients.
-- `ReceiverThread` is renamed `EventReceiver` and is no longer a
-  `threading.Thread`. Its settings and state are read-only properties (`token`
-  and `reconnect` stay assignable), and the `sock` attribute is gone. Call
-  `close(timeout)` instead of `stop()` and `join()`; it returns whether the
-  thread exited. Read `running` instead of `is_alive()`; `ident` is gone.
-  `EventReceiver` and `EventSender` both have `close(timeout)` and are context
-  managers that close on exit. Collecting either one also stops its
-  connection as a backstop, so hosts keep the handle while it should run.
-- `EventSender` settings and state are read-only properties (`token` stays
-  assignable), and the `sock` attribute is gone; check `connected` instead.
+- `ReceiverThread` is `EventReceiver` and no longer a `threading.Thread`:
+  call `close(timeout)` instead of `stop()` and `join()`, and read `running`
+  instead of `is_alive()`. On it and on `EventSender`, settings and state are
+  read-only properties (`token`, and the receiver's `reconnect`, stay
+  assignable) and `sock` is gone; read `connected`. Both close on leaving a
+  `with` block, and a collected one stops its thread, so keep the handle
+  while it should run.
 
 The low-level `EventSender`, `EventReceiver`, and `EventDispatcher` keep their
 callable arguments and properties.
@@ -118,28 +115,26 @@ callable arguments and properties.
 
 - `EventDispatcher` starts its cursor at `receiver.sync_from - 1`, so
   integrations no longer seed `last_seq` for continuation.
-- `EventReceiver` runs its connection on a native thread in the client core
-  and keeps its constructor, callbacks, properties, and queue methods.
-  `close()` interrupts a pending connect or read at once. Building the
-  extension fetches the pinned FlatBuffers headers on first configure, which
-  needs network access unless `FETCHCONTENT_SOURCE_DIR_FLATBUFFERS` names a
-  local copy.
-- `EventSender` runs its connection on a native thread in the client core and
-  keeps its constructor, callbacks, properties, and methods. Transaction
-  writes no longer run on the calling thread or need the GIL. `connect()`
-  first waits for an attempt already in flight, the token provider and other
-  callbacks run on the connection thread, and a token provider that raises is
-  logged and fails that attempt instead of raising from `connect()`. While
-  recovery is required, `rejection_reason` names the failure.
+- `EventSender` and `EventReceiver` run their connections on native threads
+  in the client core: transaction writes leave the calling thread and need no
+  GIL, callbacks and the token provider run on the connection thread, and
+  `close()` interrupts a pending connect or read at once.
+- `EventSender.connect()` waits for an attempt already in flight before
+  making its own; a token provider that raises is logged and fails that
+  attempt instead of raising. While recovery is required, `rejection_reason`
+  names the failure.
+- Building the native extension fetches the pinned FlatBuffers headers on the
+  first configure, which needs network access unless
+  `FETCHCONTENT_SOURCE_DIR_FLATBUFFERS` names a local copy.
 
 ### Fixed
 
 - A receiver continuing from a live-open snapshot replayed the full history
   over it when the integration did not seed the dispatcher cursor.
 - MCP writes were confirmed before the mirror applied them.
-- `EventSender.send_events()` accepted a transaction above the 16 MiB frame
-  limit, which the server then dropped with the connection on every replay;
-  it now returns `False`.
+- `EventSender.send_events()` returns `False` for a transaction above the
+  16 MiB frame limit instead of queueing one that made the server close the
+  connection on every replay.
 - Replay completion markers were lost when a resync reset applied progress.
 - The emitter dropped property edits absorbed by a prim resync.
 - Bidirectional clients read the token file on every `update()` while their

@@ -163,8 +163,7 @@ instead of silently degrading to flat replay.
 
 Open the original base scene. A generated live-open snapshot already contains
 composed server state and is rejected because replaying the complete managed
-history over it would duplicate opinions. Snapshot continuation is a separate
-flat integration path used by the live-open host plugins.
+history over it would duplicate opinions.
 
 Use `rebind_stage(new_stage)` when a host replaces its stage. Passing `None`
 parks stage application (phase `PARKED`) while the network queue continues to
@@ -280,9 +279,8 @@ with ManagedClient(
 Construction creates `client.authoring_layer`, inserts it below the
 authoritative managed block, and makes it the edit target. Keep that target
 while the client is active. `update()` freezes local edits, applies the queued
-authoritative prefix, then submits the frozen local batch. The dispatcher
-suppresses and invalidates the emitter while applying server records, so
-authoritative echoes do not become new local submissions.
+authoritative prefix, then submits the frozen batch; applied server records are
+never republished as local edits.
 
 `publish_current_edit_target()` queues a snapshot of the authoring layer for
 the next `update()` that can publish; a zero return can mean it is still queued.
@@ -323,8 +321,8 @@ happens next depends on `DCCAdapter.targets_stage()`:
 
 Custom stage-backed adapters must override `targets_stage()` explicitly.
 
-Shader mapping interfaces live in `openusdconnect.shader_mapping`; existing
-imports from `openusdconnect.adapters` remain supported. Integrations that
+Shader mapping interfaces live in `openusdconnect.shader_mapping` and are also
+importable from `openusdconnect.adapters`. Integrations that
 author shader inputs directly can use `set_connectable_input_value` and
 `resolve_shader_port_type` from `openusdconnect.usd_authoring`. They operate
 under the stage's current edit target and do not send network events.
@@ -419,14 +417,10 @@ managed receiver, call `refresh_asset_dependency(path)` after an asset becomes
 available or its resolver mapping changes; omit the path to retry all pending
 dependencies.
 
-A context-only resolver remap is a special case for adapters targeting a
-non-USD native scene. It can recompose both the live and previous-state stages
-before projection observes the old topology. The dispatcher then sets
-`native_scene_rebuild_required` and stops incremental delivery. The high-level
-receiver reports it as `RECOVERY_REQUIRED` in `client.status`. Rebuild the
-native destination and call
-`client.acknowledge_native_scene_rebuilt()` before resuming. An ordinary
-reconnect does not clear this guard.
+For an adapter targeting a non-USD native scene, a context-only resolver remap
+can recompose both the live and previous-state stages before projection
+observes the old topology. That is the `RECOVERY_REQUIRED` case in
+[Observing the client](#observing-the-client); a reconnect does not clear it.
 
 ## Identity and authentication
 
@@ -441,7 +435,7 @@ store.
 
 ## Low-level APIs
 
-`NoticeEmitter`, `EventSender`, `EventReceiver`, and `EventDispatcher` remain
+`NoticeEmitter`, `EventSender`, `EventReceiver`, and `EventDispatcher` are
 public for integrations whose scheduling or continuation requirements cannot
 use the high-level clients. `EventReceiver` requests layered replay by default;
 passing `layered_replay=False` selects the single-layer flat contract. Ordinary
@@ -459,14 +453,11 @@ rejection/recovery status on subsequent ticks. `cancel_connect()` invalidates
 pending attempts and reports whether they have finished; `disconnect()` also
 closes an established connection. Neither discards the transaction outbox.
 
-An `EventSender` starts its native connection thread on the first connection
-request and an `EventReceiver` on `start()`; each runs its callbacks on that
-thread. Call `close(timeout=None)` when finished, or use the object in a
-`with` block. It stops the thread and the connection for good and returns
-whether the thread exited within `timeout` seconds; from a callback it
-returns `False` at once. Closing a sender does not flush; call `flush()`
-first if the outbox matters. A wrapper that is garbage collected also stops
-its thread, as a backstop for a missed `close()`.
+A sender's connection thread starts on the first connection request, a
+receiver's on `start()`; callbacks run on that thread. `close(timeout=None)`,
+or leaving a `with` block, stops the thread for good and returns whether it
+exited in time (`False` at once from a callback). Closing does not flush. Keep
+a reference while the object should run: a collected one stops its thread.
 
 ## Embed a server
 
