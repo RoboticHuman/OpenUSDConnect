@@ -1,7 +1,7 @@
 """Integration test for the Blender receiver's stage-first architecture.
 
 Verifies the full flow: server → receiver → stage commit (atomic) → adapter.
-Uses a real server (subprocess), real ReceiverThread, and MockAdapter.
+Uses a real server (subprocess), real EventReceiver, and MockAdapter.
 No Blender required headless, runs in CI.
 """
 
@@ -26,7 +26,7 @@ from openusdconnect.protocol_constants import (
     MSG_EVENT,
     MSG_RESYNC,
 )
-from openusdconnect.receiver import ReceiverThread
+from openusdconnect.receiver import EventReceiver
 from openusdconnect.transport import recv_msg, send_msg
 from tests.helpers import start_server, stop_server
 
@@ -85,7 +85,7 @@ def _receive_events(min_events=1, timeout=30.0):
     return as soon as the events land. Fails here, at the wait, rather
     than letting a short drain confuse downstream assertions.
     """
-    rt = ReceiverThread(
+    rt = EventReceiver(
         host="127.0.0.1", port=PORT, sync_from=1, client_id="test-receiver", origin="test-recv"
     )
     rt.start()
@@ -96,7 +96,7 @@ def _receive_events(min_events=1, timeout=30.0):
         if len(_parse_events_from_bufs(lines)) >= min_events:
             break
         time.sleep(0.05)
-    rt.stop()
+    rt.close()
     got = len(_parse_events_from_bufs(lines))
     assert got >= min_events, f"receiver drained {got}/{min_events} events within {timeout}s"
     return lines

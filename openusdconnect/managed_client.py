@@ -21,7 +21,7 @@ from .client_types import SyncUpdate
 from .defaults import DEFAULT_HOST, DEFAULT_SYNC_PORT
 from .dispatcher import AssetDependencyRefreshResult, EventDispatcher
 from .emitter import PrimChannel
-from .receiver import ReceiverThread
+from .receiver import EventReceiver
 from .recovery import RecoveryArtifact, RecoveryError
 from .sender import EventSender
 
@@ -89,7 +89,7 @@ class ManagedClient(EmitterClientBase):
             host, port, department=department,
             **identity, **credential,
         )
-        self._receiver = ReceiverThread(
+        self._receiver = EventReceiver(
             host=host, port=port, sync_from=1, reconnect=reconnect, layered_replay=True,
             **identity, **credential, **self._hooks.receiver_callbacks(),
         )
@@ -115,8 +115,8 @@ class ManagedClient(EmitterClientBase):
         return self._authoring_layer
 
     @property
-    def receiver(self) -> ReceiverThread:
-        """The underlying :class:`ReceiverThread`; a diagnostic handle."""
+    def receiver(self) -> EventReceiver:
+        """The underlying :class:`EventReceiver`; a diagnostic handle."""
         return self._receiver
 
     @property

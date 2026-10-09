@@ -11,7 +11,7 @@ from integrations.mcp.session import ConnectionSession
 from openusdconnect.codec import encode_message, message_to_dict
 from openusdconnect.framing import recv_framed, send_framed
 from openusdconnect.protocol import make_hello
-from openusdconnect.receiver import ReceiverThread
+from openusdconnect.receiver import EventReceiver
 from openusdconnect.sender import EventSender
 from openusdconnect.usd_client import UsdReceiver
 from tests.helpers import (
@@ -132,9 +132,8 @@ def test_initial_snapshot_cursor_is_preserved_without_claiming_prefix_proof(monk
             return receiver.mark_replay_applied()
 
         with serving(state) as port:
-            receiver = ReceiverThread(host="127.0.0.1", port=port, sync_from=2)
-            cleanup.callback(receiver.join, 5)
-            cleanup.callback(receiver.stop)
+            receiver = EventReceiver(host="127.0.0.1", port=port, sync_from=2)
+            cleanup.callback(receiver.close, 5)
             receiver.start()
             wait_until(drain_ready)
             assert not any(msg["type"] == "resync" for msg in received)

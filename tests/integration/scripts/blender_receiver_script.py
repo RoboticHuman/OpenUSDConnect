@@ -35,7 +35,7 @@ from openusdconnect.codec import message_to_dict
 from openusdconnect.protocol_constants import (
     MSG_EVENT,
 )
-from openusdconnect.receiver import ReceiverThread
+from openusdconnect.receiver import EventReceiver
 
 
 def main():
@@ -55,7 +55,7 @@ def main():
         sys.exit(1)
 
     print(f"[Receiver] Connecting to 127.0.0.1:{port}")
-    receiver = ReceiverThread(host="127.0.0.1", port=port, sync_from=1)
+    receiver = EventReceiver(host="127.0.0.1", port=port, sync_from=1)
     receiver.start()
 
     # Wait for connection + replay to complete
@@ -84,11 +84,7 @@ def main():
         except Exception as e:
             print(f"[Receiver] Error processing: {e}")
 
-    receiver.stop()
-    try:
-        receiver.join(timeout=2.0)
-    except Exception:
-        pass
+    receiver.close(timeout=2.0)
 
     # --- Verify results ---
     results = {}

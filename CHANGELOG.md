@@ -78,14 +78,18 @@ Behavior:
   like `UsdPublisher.flush()`, instead of returning `False`.
 - `UsdReceiver.status` reports `CONNECTING` instead of `READY` while it
   reconnects, like the other clients.
-- `ReceiverThread` is no longer a `threading.Thread`. Its settings and state
-  are read-only properties (`token` and `reconnect` stay assignable), and the
-  `sock` attribute is gone. A receiver or sender that is garbage collected
-  stops its connection, so hosts keep the handle while it should run.
+- `ReceiverThread` is renamed `EventReceiver` and is no longer a
+  `threading.Thread`. Its settings and state are read-only properties (`token`
+  and `reconnect` stay assignable), and the `sock` attribute is gone. Call
+  `close(timeout)` instead of `stop()` and `join()`; it returns whether the
+  thread exited. Read `running` instead of `is_alive()`; `ident` is gone.
+  `EventReceiver` and `EventSender` both have `close(timeout)` and are context
+  managers that close on exit. Collecting either one also stops its
+  connection as a backstop, so hosts keep the handle while it should run.
 - `EventSender` settings and state are read-only properties (`token` stays
   assignable), and the `sock` attribute is gone; check `connected` instead.
 
-The low-level `EventSender`, `ReceiverThread`, and `EventDispatcher` keep their
+The low-level `EventSender`, `EventReceiver`, and `EventDispatcher` keep their
 callable arguments and properties.
 
 ### Added
@@ -104,9 +108,9 @@ callable arguments and properties.
   `no_pending_recovery_stage`).
 - `claim_playback()` and `send_playback_control()` on `SharedStageClient` and
   `UsdPublisher`.
-- `token_provider=` on `EventSender` and `ReceiverThread` supplies the token
+- `token_provider=` on `EventSender` and `EventReceiver` supplies the token
   for each connection attempt.
-- `EventDispatcher.drained_message_count`, `ReceiverThread.stopped`, and
+- `EventDispatcher.drained_message_count`, `EventReceiver.stopped`, and
   `NoticeEmitter.has_local_changes`.
 - Receiver replay identity and optional post-commit transaction checkpoints.
 
@@ -114,13 +118,12 @@ callable arguments and properties.
 
 - `EventDispatcher` starts its cursor at `receiver.sync_from - 1`, so
   integrations no longer seed `last_seq` for continuation.
-- `ReceiverThread` runs its connection on a native thread in the client core
-  and keeps its constructor, callbacks, properties, and methods. `start()`,
-  `stop()`, `join()`, `is_alive()`, and `ident` keep their meaning; `stop()`
-  interrupts a pending connect or read at once, and `join()` before `start()`
-  returns at once. Building the extension fetches the pinned FlatBuffers
-  headers on first configure, which needs network access unless
-  `FETCHCONTENT_SOURCE_DIR_FLATBUFFERS` names a local copy.
+- `EventReceiver` runs its connection on a native thread in the client core
+  and keeps its constructor, callbacks, properties, and queue methods.
+  `close()` interrupts a pending connect or read at once. Building the
+  extension fetches the pinned FlatBuffers headers on first configure, which
+  needs network access unless `FETCHCONTENT_SOURCE_DIR_FLATBUFFERS` names a
+  local copy.
 - `EventSender` runs its connection on a native thread in the client core and
   keeps its constructor, callbacks, properties, and methods. Transaction
   writes no longer run on the calling thread or need the GIL. `connect()`

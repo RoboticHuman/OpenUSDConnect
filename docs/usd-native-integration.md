@@ -441,9 +441,9 @@ store.
 
 ## Low-level APIs
 
-`NoticeEmitter`, `EventSender`, `ReceiverThread`, and `EventDispatcher` remain
+`NoticeEmitter`, `EventSender`, `EventReceiver`, and `EventDispatcher` remain
 public for integrations whose scheduling or continuation requirements cannot
-use the high-level clients. `ReceiverThread` requests layered replay by default;
+use the high-level clients. `EventReceiver` requests layered replay by default;
 passing `layered_replay=False` selects the single-layer flat contract. Ordinary
 native-scene integrations should use `UsdReceiver(adapter=...)` instead of
 assembling these components.
@@ -458,10 +458,15 @@ was scheduled, not whether the connection succeeded; inspect `connected` and
 rejection/recovery status on subsequent ticks. `cancel_connect()` invalidates
 pending attempts and reports whether they have finished; `disconnect()` also
 closes an established connection. Neither discards the transaction outbox.
+
 An `EventSender` starts its native connection thread on the first connection
-request and a `ReceiverThread` on `start()`. Each runs its callbacks on that
-thread and stops it when the object is garbage collected or the interpreter
-exits, so keep the handle while the connection should run.
+request and an `EventReceiver` on `start()`; each runs its callbacks on that
+thread. Call `close(timeout=None)` when finished, or use the object in a
+`with` block. It stops the thread and the connection for good and returns
+whether the thread exited within `timeout` seconds; from a callback it
+returns `False` at once. Closing a sender does not flush; call `flush()`
+first if the outbox matters. A wrapper that is garbage collected also stops
+its thread, as a backstop for a missed `close()`.
 
 ## Embed a server
 

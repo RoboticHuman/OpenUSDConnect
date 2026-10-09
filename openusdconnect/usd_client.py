@@ -21,7 +21,7 @@ from .client_types import SyncUpdate
 from .defaults import DEFAULT_HOST, DEFAULT_SYNC_PORT
 from .dispatcher import AssetDependencyRefreshResult, EventDispatcher
 from .emitter import PrimChannel
-from .receiver import ReceiverThread
+from .receiver import EventReceiver
 from .sender import EventSender
 
 
@@ -60,7 +60,7 @@ class UsdReceiver(ClientBase):
         self._stage: Usd.Stage | None = stage
         self._owns_stage_adapter = adapter is None
         destination = adapter or UsdStageAdapter(stage)
-        self._receiver = ReceiverThread(
+        self._receiver = EventReceiver(
             host=host,
             port=port,
             sync_from=1,
@@ -89,8 +89,8 @@ class UsdReceiver(ClientBase):
         return self._stage
 
     @property
-    def receiver(self) -> ReceiverThread:
-        """The underlying :class:`ReceiverThread`; a diagnostic handle."""
+    def receiver(self) -> EventReceiver:
+        """The underlying :class:`EventReceiver`; a diagnostic handle."""
         return self._receiver
 
     @property

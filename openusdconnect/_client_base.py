@@ -16,11 +16,11 @@ from ._client_lifecycle import (
     DEFAULT_WAIT_TIMEOUT_S,
     ClientCallbackQueue,
     _pause_before_poll,
+    close_endpoint,
     compute_phase,
     deadline_after,
     raise_if_rejected,
     remaining_time,
-    stop_receiver,
     submit_and_wait,
     wait_until_ready,
 )
@@ -30,7 +30,7 @@ from .client_observer import ClientObserver, StageMetadata
 from .client_types import ClientStatus, SyncUpdate
 from .coalescing import TransformCoalescingWindow
 from .emitter import NoticeEmitter, PrimChannel
-from .receiver import ReceiverThread
+from .receiver import EventReceiver
 from .recovery import RecoveryArtifact, RecoveryError, RejectionDisposition, TransactionFailure
 from .sender import EventSender
 
@@ -44,7 +44,7 @@ class ClientBase:
     """
 
     _sender: EventSender | None = None
-    _receiver: ReceiverThread | None = None
+    _receiver: EventReceiver | None = None
     # Reconnection deliberately suspended by the host (UsdPublisher.disconnect).
     _paused = False
 
@@ -169,9 +169,9 @@ class ClientBase:
         self._closed = True
         try:
             if self._sender is not None:
-                self._sender.disconnect()
+                close_endpoint(self._sender)
             if self._receiver is not None:
-                stop_receiver(self._receiver)
+                close_endpoint(self._receiver)
             # A token issued by the last handshake must still reach the host.
             self._callbacks.close()
         finally:

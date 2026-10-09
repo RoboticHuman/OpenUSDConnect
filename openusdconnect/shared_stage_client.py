@@ -25,7 +25,7 @@ from .protocol_constants import (
     K_SET_SUBLAYERS,
     LayerMode,
 )
-from .receiver import ReceiverThread
+from .receiver import EventReceiver
 from .recovery import RecoveryArtifact, RecoveryError
 from .sdf_layer_tracker import SdfLayerChangeTracker
 from .sender import EventSender
@@ -147,7 +147,7 @@ class SharedStageClient(PublishingClientBase):
             "origin": origin or client_origin(app_name, "shared"),
         }
         credential = self._credential.endpoint_kwargs()
-        self._receiver = ReceiverThread(
+        self._receiver = EventReceiver(
             host=host, port=port, sync_from=1, reconnect=reconnect,
             layered_replay=False, layer_mode=LayerMode.SHARED_STAGE,
             **identity, **credential, **self._hooks.receiver_callbacks(),

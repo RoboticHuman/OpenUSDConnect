@@ -7,7 +7,7 @@ from pxr import Usd
 
 from openusdconnect.adapters import UsdStageAdapter
 from openusdconnect.dispatcher import EventDispatcher
-from openusdconnect.receiver import ReceiverThread
+from openusdconnect.receiver import EventReceiver
 from tests.helpers import ensure_prim_event, recorded_hellos, server_state, serving, wait_until
 
 # Covers a reconnect after the default base delay, including a refused attempt.
@@ -30,7 +30,7 @@ class _Replica:
 
     def __init__(self, state, port, hellos, *, stage=None, **options):
         self.stage = stage or Usd.Stage.CreateInMemory()
-        self.receiver = ReceiverThread(host="127.0.0.1", port=port, **options)
+        self.receiver = EventReceiver(host="127.0.0.1", port=port, **options)
         self.dispatcher = EventDispatcher(
             receiver=self.receiver, adapter=UsdStageAdapter(self.stage)
         )
@@ -39,13 +39,12 @@ class _Replica:
         self._next_hello = len(hellos)
 
     def close(self):
-        self.receiver.stop()
-        self.receiver.join(5)
+        self.receiver.close(timeout=5)
         self.dispatcher.close()
 
     def next_boundary(self, *, after_replay=None):
         """Wait for overflow or the replay's last record, then apply the queue."""
-        if self.receiver.ident is None:
+        if not (self.receiver.running or self.receiver.stopped):
             self.receiver.start()
         hello = self._next_hello
         completed = self._reach_boundary()

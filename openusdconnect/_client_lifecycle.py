@@ -14,7 +14,8 @@ from .client_types import ClientPhase, ClientStatus
 from .sender import TransactionRejectedError
 
 if TYPE_CHECKING:
-    from .receiver import ReceiverThread
+    from .receiver import EventReceiver
+    from .sender import EventSender
 
 LOG = logging.getLogger(__name__)
 
@@ -180,9 +181,6 @@ def raise_if_rejected(endpoint, role: str) -> None:
         raise ConnectionError(endpoint.rejection_reason or f"{role} connection rejected")
 
 
-def stop_receiver(receiver: ReceiverThread) -> None:
-    receiver.stop()
-    if receiver.is_alive() and receiver is not threading.current_thread():
-        receiver.join(timeout=2.0)
-        if receiver.is_alive():
-            LOG.warning("Receiver thread did not stop within 2 seconds")
+def close_endpoint(endpoint: EventReceiver | EventSender) -> None:
+    if not endpoint.close(timeout=2.0):
+        LOG.warning("%s did not stop within 2 seconds", type(endpoint).__name__)

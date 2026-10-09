@@ -148,7 +148,7 @@ class ConnectionSession:
             apply_events(self.mirror_stage, [{"k": K_SET_STAGE_METADATA, **payload}])
 
     def _teardown(self) -> None:
-        """Stop the receiver thread and sender, clearing all connection state."""
+        """Close the mirror receiver and disconnect the sender, clearing all connection state."""
         if self.receiver is not None:
             self.receiver.close()
         if self.sender is not None:

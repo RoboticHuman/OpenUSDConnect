@@ -39,7 +39,7 @@ if TYPE_CHECKING:
     from .codec import ReceivedEvent
     from .emitter import NoticeEmitter
     from .layer_key_router import LayerKeyRouter
-    from .receiver import ReceiverThread
+    from .receiver import EventReceiver
 
 LOG = logging.getLogger(__name__)
 
@@ -380,7 +380,7 @@ class EventDispatcher:
     def __init__(
         self,
         *,
-        receiver: ReceiverThread,
+        receiver: EventReceiver,
         adapter: DCCAdapter,
         mirror_stage: Usd.Stage | None = None,
         emitter: NoticeEmitter | None = None,

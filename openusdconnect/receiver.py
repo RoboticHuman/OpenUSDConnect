@@ -30,14 +30,14 @@ def _transport_error(failure) -> OSError:
     return OSError(failure.system_error, failure.description)
 
 
-class ReceiverThread:
+class EventReceiver:
     """Receive wire messages for a stage-owning consumer to drain.
 
-    A native thread runs the connection and queues scene messages as raw
-    FlatBuffers for the consumer thread to decode and apply. Handshake and
-    control messages, including their callbacks, are handled on that thread.
-    Overflow closes the connection and resumes by replay after the queue
-    drains or the drain wait expires.
+    A native thread runs the connection until :meth:`close` and queues scene
+    messages as raw FlatBuffers for the consumer thread to decode and apply.
+    Handshake and control messages, including their callbacks, are handled on
+    that thread. Overflow closes the connection and resumes by replay after
+    the queue drains or the drain wait expires.
     """
 
     def __init__(
@@ -166,6 +166,11 @@ class ReceiverThread:
         return self._endpoint.status().last_sequence
 
     @property
+    def running(self) -> bool:
+        """Whether the connection thread has started and not yet exited."""
+        return self._driver is not None and self._driver.running
+
+    @property
     def stopped(self) -> bool:
         """Whether the connection thread ran and exited, so it will not reconnect."""
         return self._driver is not None and self._driver.stopped
@@ -291,7 +296,7 @@ class ReceiverThread:
         return deque(self._endpoint.drain_frames(max_messages))
 
     def start(self) -> None:
-        """Start connecting on a native thread that runs until stopped or collected; once only."""
+        """Start connecting on a native thread that runs until closed or collected; once only."""
         if self._driver is not None:
             raise RuntimeError("a receiver can only be started once")
         self._driver = _client_backend.ReceiverDriver(
@@ -301,27 +306,27 @@ class ReceiverThread:
             **_client_backend.driver_callbacks(self, LOG),
         )
         if not self._driver.start():
-            raise RuntimeError("could not start the receiver thread")
+            raise RuntimeError("could not start the receiver's connection thread")
 
-    def stop(self) -> None:
-        """Request a clean shutdown without waiting; :meth:`join` waits."""
+    def close(self, timeout: float | None = None) -> bool:
+        """Stop the connection thread and close its connection; repeated calls are harmless.
+
+        Waits up to ``timeout`` seconds for the thread to exit, without limit
+        for ``None``, and returns whether it has exited: ``True`` before
+        :meth:`start`, ``False`` on timeout or from a callback, which runs on
+        that thread.
+        """
         if self._driver is None:
             self._endpoint.stop()
-        else:
-            self._driver.stop()
+            return True
+        self._driver.stop()
+        return self._driver.join(timeout)
 
-    def join(self, timeout: float | None = None) -> None:
-        """Wait until the connection thread exits; returns at once before :meth:`start`."""
-        if self._driver is not None:
-            self._driver.join(timeout)
+    def __enter__(self) -> EventReceiver:
+        return self
 
-    def is_alive(self) -> bool:
-        return self._driver is not None and self._driver.running
-
-    @property
-    def ident(self) -> int | None:
-        """Identifier of the connection thread, or ``None`` before :meth:`start`."""
-        return None if self._driver is None else self._driver.ident
+    def __exit__(self, exc_type, exc, traceback) -> None:
+        self.close()
 
     def _wake(self) -> None:
         if self._driver is not None:
@@ -334,7 +339,7 @@ class ReceiverThread:
             try:
                 self.token = self._token_provider()
             except Exception as exc:
-                LOG.exception("ReceiverThread: token provider failed")
+                LOG.exception("EventReceiver: token provider failed")
                 self._token_error = exc
                 return None
         return self.token or ""
@@ -380,4 +385,4 @@ class ReceiverThread:
         try:
             callback(value)
         except Exception:
-            LOG.exception("ReceiverThread: %s callback failed", name)
+            LOG.exception("EventReceiver: %s callback failed", name)

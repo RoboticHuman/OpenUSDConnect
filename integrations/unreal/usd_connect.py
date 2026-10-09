@@ -36,7 +36,7 @@ LOG = logging.getLogger("openusdconnect.unreal")
 
 # -- Module state --------------------------------------------------------
 
-_receiver = None  # ReceiverThread
+_receiver = None  # EventReceiver
 _emitter = None  # NoticeEmitter
 _sender = None  # EventSender
 _dispatcher = None  # EventDispatcher
@@ -339,9 +339,9 @@ def start(
 
     # -- Start receiver --------------------------------------------------
     if receive:
-        from openusdconnect.receiver import ReceiverThread
+        from openusdconnect.receiver import EventReceiver
 
-        _receiver = ReceiverThread(
+        _receiver = EventReceiver(
             host=host,
             port=port,
             sync_from=sync_from,
@@ -421,9 +421,9 @@ def stop():
         unreal.unregister_slate_post_tick_callback(_tick_handle)
         _tick_handle = None
 
-    # Stop receiver
+    # Close receiver
     if _receiver is not None:
-        _receiver.stop()
+        _receiver.close(timeout=2.0)
         _receiver = None
 
     # Drop dispatcher (no separate state to flush last_seq dies with it)

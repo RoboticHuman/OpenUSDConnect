@@ -9,7 +9,7 @@ import pytest
 
 from openusdconnect.codec import HelloRejectionCode, message_to_dict
 from openusdconnect.protocol_constants import MSG_RESYNC
-from openusdconnect.receiver import ReceiverThread
+from openusdconnect.receiver import EventReceiver
 from openusdconnect.sender import EventSender
 from openusdconnect.server import UsdSyncServer
 from openusdconnect.server.connection import ConnectionHandler, ThreadedTCPServer
@@ -68,7 +68,7 @@ def test_flat_receiver_is_admitted_only_for_single_layer(
     accepted,
 ):
     sync_server, port = server_factory(departments)
-    receiver = ReceiverThread(
+    receiver = EventReceiver(
         port=port,
         reconnect=False,
         client_id="flat-observer",
@@ -78,8 +78,7 @@ def test_flat_receiver_is_admitted_only_for_single_layer(
     receiver.start()
     try:
         if not accepted:
-            receiver.join(timeout=5)
-            assert not receiver.is_alive()
+            assert _wait_until(lambda: receiver.stopped)
             assert not receiver.connected
             assert receiver.hello_rejected
             assert receiver.rejection_code == HelloRejectionCode.LayeredReplayRequired
@@ -92,14 +91,13 @@ def test_flat_receiver_is_admitted_only_for_single_layer(
             assert not receiver.layered_replay_active
             assert sync_server._collaboration.flat_receiver_count == 1
     finally:
-        receiver.stop()
-        receiver.join(timeout=2)
+        receiver.close(timeout=2)
 
 
 @pytest.mark.parametrize("departments", [[], ["animation", "layout"]])
 def test_layered_receiver_is_admitted_for_both_server_modes(server_factory, departments):
     sync_server, port = server_factory(departments)
-    receiver = ReceiverThread(
+    receiver = EventReceiver(
         port=port,
         reconnect=False,
         client_id="layered-observer",
@@ -111,14 +109,13 @@ def test_layered_receiver_is_admitted_for_both_server_modes(server_factory, depa
         assert receiver.layered_replay_active
         assert sync_server._collaboration.flat_receiver_count == 0
     finally:
-        receiver.stop()
-        receiver.join(timeout=2)
+        receiver.close(timeout=2)
 
 
 def test_single_layer_flat_receiver_gets_live_and_replayed_records(server_factory):
     sync_server, port = server_factory([])
 
-    live = ReceiverThread(
+    live = EventReceiver(
         port=port,
         reconnect=False,
         client_id="live-flat",
@@ -142,11 +139,10 @@ def test_single_layer_flat_receiver_gets_live_and_replayed_records(server_factor
         live_records = [message_to_dict(raw) for raw in live.drain_queue()]
         assert [record["event"] for record in live_records] == [event]
 
-        live.stop()
-        live.join(timeout=2)
+        live.close(timeout=2)
         assert _wait_until(lambda: sync_server._collaboration.flat_receiver_count == 0)
 
-        late = ReceiverThread(
+        late = EventReceiver(
             port=port,
             reconnect=False,
             sync_from=1,
@@ -160,16 +156,14 @@ def test_single_layer_flat_receiver_gets_live_and_replayed_records(server_factor
         assert [record["event"] for record in replay_records] == [event]
     finally:
         sender.disconnect()
-        live.stop()
-        live.join(timeout=2)
+        live.close(timeout=2)
         if late is not None:
-            late.stop()
-            late.join(timeout=2)
+            late.close(timeout=2)
 
 
 def test_stale_cursor_resyncs_against_an_empty_log(server_factory):
     _sync_server, port = server_factory([])
-    receiver = ReceiverThread(
+    receiver = EventReceiver(
         port=port,
         reconnect=False,
         sync_from=5,
@@ -189,14 +183,13 @@ def test_stale_cursor_resyncs_against_an_empty_log(server_factory):
 
         assert _wait_until(_received_resync)
     finally:
-        receiver.stop()
-        receiver.join(timeout=2)
+        receiver.close(timeout=2)
 
 
 def test_flat_receiver_blocks_enabling_department_policy(server_factory):
     sync_server, port = server_factory([])
 
-    receiver = ReceiverThread(
+    receiver = EventReceiver(
         port=port,
         reconnect=False,
         client_id="flat-policy-guard",
@@ -208,8 +201,7 @@ def test_flat_receiver_blocks_enabling_department_policy(server_factory):
         with pytest.raises(ReplayModeConflictError, match="layer-stack changes"):
             sync_server.set_department_priority(["animation", "layout"])
     finally:
-        receiver.stop()
-        receiver.join(timeout=2)
+        receiver.close(timeout=2)
 
     assert _wait_until(lambda: sync_server._collaboration.flat_receiver_count == 0)
     sync_server.set_department_priority(["animation", "layout"])
@@ -223,26 +215,24 @@ def test_replay_failure_unregisters_layered_receiver(server_factory, monkeypatch
         raise OSError("injected replay failure")
 
     monkeypatch.setattr(sync_server, "replay_records", _fail_replay)
-    receiver = ReceiverThread(
+    receiver = EventReceiver(
         port=port,
         reconnect=False,
         client_id="failing-replay",
         origin="failing-replay-origin",
     )
     receiver.start()
-    receiver.join(timeout=5)
     try:
-        assert not receiver.is_alive()
+        assert _wait_until(lambda: receiver.stopped)
         assert _wait_until(lambda: not sync_server.receivers)
         assert _wait_until(lambda: not sync_server.clients)
     finally:
-        receiver.stop()
-        receiver.join(timeout=2)
+        receiver.close(timeout=2)
 
 
 def test_compaction_replay_failure_releases_flat_reservation(server_factory, monkeypatch):
     sync_server, port = server_factory([])
-    receiver = ReceiverThread(
+    receiver = EventReceiver(
         port=port,
         reconnect=False,
         client_id="failing-flat-compaction",
@@ -274,8 +264,7 @@ def test_compaction_replay_failure_releases_flat_reservation(server_factory, mon
         assert sync_server._collaboration.flat_receiver_count == 0
     finally:
         sender.disconnect()
-        receiver.stop()
-        receiver.join(timeout=2)
+        receiver.close(timeout=2)
 
 
 def test_realtime_receiver_boundary_waits_for_pending_persistence(
@@ -300,7 +289,7 @@ def test_realtime_receiver_boundary_waits_for_pending_persistence(
         client_id="realtime-author",
         origin="realtime-author-origin",
     )
-    receiver = ReceiverThread(
+    receiver = EventReceiver(
         port=port,
         reconnect=False,
         client_id="realtime-observer",
@@ -324,6 +313,4 @@ def test_realtime_receiver_boundary_waits_for_pending_persistence(
     finally:
         allow_persist.set()
         sender.disconnect()
-        receiver.stop()
-        if receiver.ident is not None:
-            receiver.join(timeout=2)
+        receiver.close(timeout=2)

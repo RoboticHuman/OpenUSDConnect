@@ -52,20 +52,13 @@ def _patch_net(monkeypatch, started, stopped):
             self.options = kwargs
             self.token = kwargs["token"]
             self.sync_from = kwargs["sync_from"]
-            self.joined = False
 
         def start(self):
             started.append(self)
 
-        def stop(self):
+        def close(self, timeout=None):
             stopped.append(self)
-
-        def is_alive(self):
-            return not self.joined
-
-        def join(self, timeout=None):
-            assert self in stopped
-            self.joined = True
+            return True
 
         def drain_queue(self, max_messages=None):
             return []
@@ -74,7 +67,7 @@ def _patch_net(monkeypatch, started, stopped):
             return False
 
     monkeypatch.setattr(session_mod, "EventSender", _FakeSender)
-    monkeypatch.setattr(usd_client, "ReceiverThread", _FakeReceiver)
+    monkeypatch.setattr(usd_client, "EventReceiver", _FakeReceiver)
     monkeypatch.setattr(session_mod.token_client, "load_token", lambda host, port: None)
 
 
@@ -95,7 +88,6 @@ def test_reconnect_stops_previous_receiver(monkeypatch):
 
     session.connect()
     assert first.receiver in stopped
-    assert first.receiver.joined
     assert session.receiver is not first  # replaced by a fresh one
     assert session.receiver.receiver in started
     session.disconnect()
@@ -146,7 +138,6 @@ def test_disconnect_stops_receiver(monkeypatch):
     receiver = session.receiver
     session.disconnect()
     assert receiver.receiver in stopped
-    assert receiver.receiver.joined
     assert session.receiver is None
     assert session.sender is None
     assert session.mirror_stage is None
@@ -437,13 +428,12 @@ def test_failed_mirror_start_closes_partial_connection(monkeypatch):
     with pytest.raises(RuntimeError, match="start failed"):
         session.connect()
     assert len(stopped) == 1
-    assert stopped[0].joined
     assert session.sender is None
     assert session.receiver is None
     assert session.mirror_stage is None
 
 
-def test_failed_send_closes_and_joins_mirror(monkeypatch):
+def test_failed_send_closes_the_mirror(monkeypatch):
     started, stopped = [], []
     _patch_net(monkeypatch, started, stopped)
     session = session_mod.ConnectionSession(McpConfig())
@@ -455,7 +445,6 @@ def test_failed_send_closes_and_joins_mirror(monkeypatch):
     assert error.value.code == "disconnected"
     assert not sender.is_connected
     assert stopped == started
-    assert stopped[0].joined
 
 
 def test_no_mirror_send_result_is_unchanged(monkeypatch):

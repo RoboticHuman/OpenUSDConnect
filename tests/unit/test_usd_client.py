@@ -92,6 +92,10 @@ class _SenderStub:
         self.connected = False
         self.disconnect_count += 1
 
+    def close(self, timeout=None) -> bool:
+        self.connected = False
+        return True
+
     def flush(self, timeout=None) -> bool:
         return True
 

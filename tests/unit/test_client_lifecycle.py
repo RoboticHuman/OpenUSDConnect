@@ -20,7 +20,13 @@ from openusdconnect import (
 from openusdconnect import sender as sender_module
 from openusdconnect.client_observer import StageMetadata
 from openusdconnect.protocol_constants import LayerMode
-from tests.helpers import RecordingObserver, connect_client, embedded_server, recorded_hellos
+from tests.helpers import (
+    RecordingObserver,
+    connect_client,
+    embedded_server,
+    recorded_hellos,
+    wait_until,
+)
 
 
 @pytest.fixture(scope="module")
@@ -118,7 +124,7 @@ def test_waits_raise_when_nothing_will_reconnect():
         publisher.start()
         publisher.disconnect()
         receiver.start()
-        receiver.receiver.join(timeout=5)
+        wait_until(lambda: receiver.receiver.stopped)
         for client in (publisher, receiver):
             assert client.status.phase is client_types.ClientPhase.OFFLINE
             with pytest.raises(ConnectionError, match="offline"):

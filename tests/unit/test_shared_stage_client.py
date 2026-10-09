@@ -52,8 +52,9 @@ class _RecoverySender:
         self.pending_transaction_count = 0
         return artifact
 
-    def disconnect(self):
+    def close(self, timeout=None):
         self.connected = False
+        return True
 
     def connect(self, timeout=None):
         self.connect_timeouts.append(timeout)
@@ -81,11 +82,8 @@ class _ReceiverStub:
     def start(self):
         pass
 
-    def stop(self):
-        pass
-
-    def is_alive(self):
-        return False
+    def close(self, timeout=None):
+        return True
 
     def freeze_marker(self):
         return 0

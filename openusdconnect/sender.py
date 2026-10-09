@@ -76,7 +76,8 @@ class EventSender:
     acknowledgement covers it, and replays the same bytes under the same
     Hello-bound producer identity after a reconnect, so an acknowledgement lost
     after commit cannot apply the USD edits twice. A native thread, started by
-    the first connection request, writes, reads, and runs the callbacks.
+    the first connection request, writes, reads, and runs the callbacks until
+    :meth:`close`.
     """
 
     def __init__(
@@ -321,6 +322,25 @@ class EventSender:
         self._endpoint.disconnect()
         self._driver.wake()
 
+    def close(self, timeout: float | None = None) -> bool:
+        """Stop the connection thread and close its connection; repeated calls are harmless.
+
+        Waits up to ``timeout`` seconds for the thread to exit, without limit
+        for ``None``, and returns whether it has exited: ``True`` before the
+        first connection request, ``False`` on timeout or from a callback,
+        which runs on that thread. Afterwards :meth:`connect` and
+        :meth:`request_connect` return ``False``. Closing does not flush; call
+        :meth:`flush` first if the outbox matters.
+        """
+        self._driver.stop()
+        return self._driver.join(timeout)
+
+    def __enter__(self) -> EventSender:
+        return self
+
+    def __exit__(self, exc_type, exc, traceback) -> None:
+        self.close()
+
     def send_events(self, events: list, *, layer_key: str = "") -> bool:
         """Submit a transaction without waiting for its durable result.
 
@@ -427,7 +447,7 @@ class EventSender:
         return self.send_message(make_playback_control(action, time=time, rate=rate))
 
     def _start(self) -> None:
-        """Start the connection thread once; it runs until this sender is collected."""
+        """Start the connection thread once; it runs until closed or collected."""
         if not self._started:
             self._driver.start()
             self._started = True

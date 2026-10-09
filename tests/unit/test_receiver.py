@@ -1,4 +1,4 @@
-"""ReceiverThread's wrapper contract, exercised against a live server."""
+"""EventReceiver's wrapper contract, exercised against a live server."""
 
 import gc
 import logging
@@ -19,7 +19,7 @@ from openusdconnect.protocol_constants import (
     MSG_PLAYBACK_STATE,
     LayerMode,
 )
-from openusdconnect.receiver import ReceiverThread
+from openusdconnect.receiver import EventReceiver
 from tests.helpers import embedded_server, ensure_prim_event, wait_until
 
 FAST = {"reconnect_base_delay": 0.01, "reconnect_max_delay": 0.04}
@@ -40,11 +40,11 @@ def server(tmp_path_factory):
 
 @pytest.fixture
 def receivers(server):
-    """Build receivers of the server that are stopped and joined when the test ends."""
+    """Build receivers of the server that are closed when the test ends."""
     created = []
 
     def make(**options):
-        receiver = ReceiverThread(
+        receiver = EventReceiver(
             **{
                 "host": "127.0.0.1",
                 "port": server.server_address[1],
@@ -58,9 +58,7 @@ def receivers(server):
 
     yield make
     for receiver in created:
-        receiver.stop()
-        receiver.join(5)
-        assert not receiver.is_alive()
+        assert receiver.close(5)
 
 
 def _commit(server, count):
@@ -79,11 +77,11 @@ def _messages(frames):
 )
 def test_invalid_settings_raise_value_error(max_queue, outcome):
     with outcome:
-        ReceiverThread(max_queue=max_queue)
+        EventReceiver(max_queue=max_queue)
 
 
 def test_consumer_calls_reject_invalid_arguments():
-    receiver = ReceiverThread()
+    receiver = EventReceiver()
     for limit in (0, -1, True, 1.5):
         with pytest.raises(ValueError, match="max_messages"):
             receiver.drain_queue(max_messages=limit)
@@ -92,7 +90,7 @@ def test_consumer_calls_reject_invalid_arguments():
 
 
 def test_settings_read_back_and_state_starts_empty():
-    receiver = ReceiverThread(
+    receiver = EventReceiver(
         host="127.0.0.1",
         port=7300,
         sync_from=5,
@@ -124,36 +122,70 @@ def test_settings_read_back_and_state_starts_empty():
     assert receiver.rejection_reason == "" and receiver.server_instance == ""
     assert receiver.connection_error is None
 
-    shared = ReceiverThread(layer_mode="shared_stage", layered_replay=False)
+    shared = EventReceiver(layer_mode="shared_stage", layered_replay=False)
     assert shared.layer_mode is LayerMode.SHARED_STAGE and not shared.layered_replay
 
 
-def test_thread_api_before_during_and_after_running(receivers):
-    receiver = receivers()
-    assert not receiver.is_alive() and not receiver.stopped and receiver.ident is None
+def test_close_stops_the_thread_and_reports_whether_it_exited(receivers):
+    assert EventReceiver().close(0), "a receiver that never started has no thread"
+    entered, release = threading.Event(), threading.Event()
+
+    def hold(_token):
+        entered.set()
+        assert release.wait(5)
+
+    receiver = receivers(on_token_issued=hold)
+    assert not receiver.running and not receiver.stopped
     started = time.monotonic()
     assert not receiver.wait_connected(5)
     assert not receiver.wait_synchronized(5)
-    receiver.join(5)
     assert time.monotonic() - started < 1, "a receiver that never started was waited on"
 
     receiver.start()
-    assert receiver.is_alive() and not receiver.stopped
-    assert isinstance(receiver.ident, int)
+    assert receiver.running and not receiver.stopped
     with pytest.raises(RuntimeError, match="started once"):
         receiver.start()
-    assert receiver.wait_connected(5)
+    # The callback holds the thread, so it cannot exit yet.
+    assert entered.wait(5)
+    assert receiver.connected
+    assert not receiver.close(timeout=0)
+    assert receiver.running
 
+    release.set()
     started = time.monotonic()
-    receiver.stop()
-    receiver.join(5)
-    assert time.monotonic() - started < 2, "stop waited for the read timeout"
-    assert receiver.stopped and not receiver.is_alive() and not receiver.connected
+    assert receiver.close()
+    assert time.monotonic() - started < 2, "close waited for the read timeout"
+    assert receiver.stopped and not receiver.running and not receiver.connected
+    assert receiver.close(0)
+    with pytest.raises(RuntimeError, match="started once"):
+        receiver.start()
+
+    with receivers() as receiver:
+        receiver.start()
+        assert receiver.wait_connected(5)
+    assert receiver.stopped and not receiver.connected
+
+
+def test_close_from_a_callback_returns_without_waiting_for_its_own_thread(receivers):
+    results = []
+
+    def close_on_token(_token):
+        started = time.monotonic()
+        results.append(receiver.close())
+        results.append(time.monotonic() - started)
+
+    receiver = receivers(on_token_issued=close_on_token)
+    receiver.start()
+    wait_until(lambda: len(results) == 2)
+    closed, waited = results
+    assert closed is False and waited < 1
+    assert receiver.close(5)
+    assert receiver.stopped
 
 
 def test_collecting_a_receiver_stops_its_connection(server):
     state = server.sync_server
-    receiver = ReceiverThread("127.0.0.1", server.server_address[1], client_id=uuid.uuid4().hex)
+    receiver = EventReceiver("127.0.0.1", server.server_address[1], client_id=uuid.uuid4().hex)
     client_id = receiver.client_id
     receiver.start()
     assert receiver.wait_connected(5)
@@ -168,12 +200,12 @@ def test_collecting_a_receiver_stops_its_connection(server):
     wait_until(lambda: not connected())
 
 
-def test_stop_before_start_ends_without_connecting(receivers, server):
+def test_close_before_start_ends_without_connecting(receivers, server):
     receiver = receivers()
-    receiver.stop()
+    assert receiver.close()
     receiver.start()
-    receiver.join(5)
-    assert receiver.stopped and not receiver.is_alive()
+    wait_until(lambda: receiver.stopped)
+    assert not receiver.running
     assert not server.sync_server.token_store.has_token(receiver.client_id)
 
 
@@ -231,10 +263,10 @@ def test_token_provider_failure_is_the_connection_error(receivers, caplog):
 
     receiver = receivers(token_provider=fail, reconnect=False)
     receiver.start()
-    receiver.join(5)
-    assert receiver.stopped and not receiver.connected
+    wait_until(lambda: receiver.stopped)
+    assert not receiver.connected
     assert isinstance(receiver.connection_error, RuntimeError)
-    assert "ReceiverThread: token provider failed" in caplog.text
+    assert "EventReceiver: token provider failed" in caplog.text
 
 
 def test_legacy_callbacks_receive_message_dicts_once_on_the_connection_thread(
@@ -280,7 +312,7 @@ def test_legacy_callbacks_receive_message_dicts_once_on_the_connection_thread(
         ("rejected", rejected),
     ]
     assert threading.get_ident() not in {thread for _name, _value, thread in calls}
-    assert "ReceiverThread: on_token_issued callback failed" in caplog.text
+    assert "EventReceiver: on_token_issued callback failed" in caplog.text
     assert receiver.connected
 
 
@@ -355,10 +387,9 @@ def test_refused_connection_is_the_connection_error(receivers, caplog):
     waited = []
     waiter = threading.Thread(target=lambda: waited.append(receiver.wait_connected(10)))
     waiter.start()
-    receiver.join(10)
+    wait_until(lambda: receiver.stopped, timeout=10)
     waiter.join(5)
     assert waited == [False]
-    assert receiver.stopped
     assert isinstance(receiver.connection_error, ConnectionRefusedError)
     assert any(
         name == "openusdconnect.receiver"
@@ -384,8 +415,8 @@ def test_rejection_is_reported_and_stops_reconnecting(receivers, server, rejecti
             "server uses 'managed' layer mode, client requested 'shared_stage'",
         )
     receiver.start()
-    receiver.join(5)
-    assert not receiver.is_alive() and receiver.stopped and not receiver.connected
+    wait_until(lambda: receiver.stopped)
+    assert not receiver.running and not receiver.connected
     assert (
         receiver.auth_rejected,
         receiver.hello_rejected,

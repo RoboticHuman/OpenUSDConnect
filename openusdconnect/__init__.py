@@ -55,7 +55,7 @@ from .plugin_environment import (
 )
 from .protocol import make_hello, make_quit, make_txn
 from .protocol_constants import LayerMode
-from .receiver import ReceiverThread
+from .receiver import EventReceiver
 from .recovery import (
     QuarantinedTransaction,
     RecoveryArtifact,
@@ -82,6 +82,7 @@ __all__ = [
     "ClientStatus",
     "DecodeResult",
     "Event",
+    "EventReceiver",
     "EventSender",
     "HelloRejectionCode",
     "LayerKeyRouter",
@@ -95,7 +96,6 @@ __all__ = [
     "PlaybackState",
     "PluginEnvironmentError",
     "PluginEnvironmentResult",
-    "ReceiverThread",
     "QuarantinedTransaction",
     "RecoveryArtifact",
     "RecoveryError",

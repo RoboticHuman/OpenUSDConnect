@@ -63,7 +63,7 @@ class ObserverHooks:
     on_playback_rejected: Callable[[dict], None] | None = None
 
     def receiver_callbacks(self) -> dict[str, Callable | None]:
-        """Keyword arguments for ``ReceiverThread``."""
+        """Keyword arguments for ``EventReceiver``."""
         return {
             "on_stage_metadata": self.on_stage_metadata,
             "on_playback_state": self.on_playback_state,

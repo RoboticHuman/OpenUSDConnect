@@ -54,7 +54,7 @@ def limited_server():
 
 @pytest.fixture
 def senders():
-    """Build senders with fresh identities that are disconnected when the test ends."""
+    """Build senders with fresh identities that are closed when the test ends."""
     created = []
 
     def make(port, **options):
@@ -64,7 +64,7 @@ def senders():
 
     yield make
     for sender in created:
-        sender.disconnect()
+        assert sender.close(5)
 
 
 @contextmanager
@@ -532,6 +532,31 @@ def test_playback_messages_follow_the_connection(senders, server):
     sender.disconnect()
     assert not sender.send_playback_control("pause")
     wait_until(lambda: state.get_playback_state()["leader_client_id"] != sender.client_id)
+
+
+def test_close_stops_the_thread_for_good(senders, server):
+    state = server.sync_server
+    assert senders(_port(server)).close(0), "a sender that never connected has no thread"
+
+    def registered(sender):
+        with state.clients_lock:
+            return any(info.client_id == sender.client_id for info in state.clients.values())
+
+    sender = senders(_port(server))
+    assert sender.connect(timeout=5)
+    wait_until(lambda: registered(sender))
+    assert sender.close()
+    assert not sender.connected
+    wait_until(lambda: not registered(sender))
+    assert not sender.connect(timeout=5)
+    assert not sender.request_connect()
+    assert sender.close(0)
+
+    with senders(_port(server)) as sender:
+        assert sender.connect(timeout=5)
+        wait_until(lambda: registered(sender))
+    assert sender.close(0) and not sender.connected
+    wait_until(lambda: not registered(sender))
 
 
 def test_collecting_a_sender_stops_its_connection(server):
