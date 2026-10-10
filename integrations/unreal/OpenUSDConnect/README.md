@@ -87,7 +87,7 @@ same but has not been validated.
 | Auto-start Receiver from Metadata | `true` | Start the receiver automatically when live metadata is detected. |
 | Auto-start Emitter from Metadata | `true` | Start the emitter automatically when live metadata is detected. |
 | Persist Auth Tokens | `true` | Save server-issued TOFU tokens in the user's Unreal config and reuse them on reconnect. |
-| Reconnect Delay (s) | `3.0` | Wait time between reconnect attempts |
+| Reconnect Delay (s) | `3.0` | Wait before the first reconnect attempt; later attempts back off exponentially |
 
 The plugin receives through flat replay. Use it with one
 unmuted collaboration layer and no server department policy. A department
@@ -176,10 +176,8 @@ The **Output Log** should contain:
 ```
 LogUSDConnectSubsystem:   Detected OpenUSDConnect live metadata on stage: 127.0.0.1:7200 snapshot_seq=...
 LogUSDConnectSubsystem:   Using USD live metadata; receiver will sync from seq=...
-LogUSDConnect:            Connected to OpenUSDConnect server at 127.0.0.1:7200 (receiver, sync_from=...)
-LogUSDConnect:            HELLO_OK received entering receive loop
-LogUSDEmit:               Emitter connected to 127.0.0.1:7200
-LogUSDEmit:               Emitter HELLO_OK ready to send
+LogUSDConnect:            Receiver: connected (sync_from=...)
+LogUSDConnect:            Emitter: connected to 127.0.0.1:7200 (session=..., pending=0)
 LogUSDConnectSubsystem:   Attached to AUsdStageActor (UsdStageActor_0)
 ```
 Per-event messages use the `Verbose` level. Enable them with
@@ -258,14 +256,13 @@ Live-open-specific checks:
 | Inline MaterialX materials render gray or black | UE 5.8 translates referenced `.mtlx` documents but not values from inline `ND_*` networks. The plugin materializes supported networks automatically; see [MaterialX rendering](#materialx-rendering-auto-materializer). Enable **Substrate Adaptive GBuffer** for fuller `standard_surface` support. UsdPreviewSurface uses the universal context and is unaffected. |
 | Generated meshes are named after a **container** prim instead of the individual objects (e.g. `SM_World1`, `SM_World2`, … for a root prim called `World`), every synced edit rebuilds them, and materials jump between objects on visibility changes | That container prim is being **collapsed**: it has no `kind`, and UE collapses kind-less subtrees by default (`USD.CollapsePrimsWithoutKind` is true), folding the whole subtree into **one** static mesh whose sections and material slots re-index on every rebuild. Author `kind = "group"` on scene-root Xforms (correct USD model hierarchy), or set `USD.CollapsePrimsWithoutKind 0`, or uncheck **Use Prim Kinds For Collapsing** on the stage actor. |
 | Generated assets churn constantly (new transient packages per edit); appearance drifts until a full stage reload | No persistent asset cache: each stage actor defaults to a throwaway transient cache. Create a **USD Asset Cache** asset and assign it on the stage actor (or Project Settings → USDCore → Default Asset Cache). Consider also disabling **Share Assets for Identical Prims**, so prims with identical geometry but different materials don't share one mesh asset. |
-| Edits in Unreal don't reach Blender | Confirm the **Emitter HELLO_OK** line appears in the log; if not, the emitter socket failed. Check the dashboard's *Clients* tab. |
+| Edits in Unreal don't reach Blender | Confirm the **Emitter: connected** line appears in the log; if not, the emitter socket failed. Check the dashboard's *Clients* tab. |
 | Plugin engine-version warning | The checked-in descriptor targets Unreal 5.8. Rebuild and deliberately port the plugin for another engine version rather than editing only the descriptor. |
 
 For deeper diagnostics, enable verbose logging in the editor console:
 ```
 Log LogUSDConnect Verbose
 Log LogUSDConnectSubsystem Verbose
-Log LogUSDEmit Verbose
 Log LogUSDEventApplier Verbose
 ```
 

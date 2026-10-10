@@ -1,12 +1,15 @@
-"""USD-native shared-stage client lifecycle without network transport."""
+"""USD-native shared-stage client lifecycle and recovery."""
 
 from __future__ import annotations
+
+from types import SimpleNamespace
 
 import pytest
 from pxr import Ar, Sdf, Usd
 
 from openusdconnect import ClientPhase, RecoveryError
 from openusdconnect.codec import ReceivedEvent, TransactionRejectionCode, encode_message
+from openusdconnect.protocol_constants import LayerMode
 from openusdconnect.recovery import (
     QuarantinedTransaction,
     RecoveryArtifact,
@@ -15,7 +18,7 @@ from openusdconnect.recovery import (
 )
 from openusdconnect.sdf_spec_delta import serialize_spec_fields
 from openusdconnect.shared_stage_client import SharedStageClient
-from tests.helpers import PeerTraffic
+from tests.helpers import PeerTraffic, connect_client, embedded_server
 
 
 def _create_root(path) -> Usd.Stage:
@@ -24,7 +27,18 @@ def _create_root(path) -> Usd.Stage:
     return Usd.Stage.Open(root)
 
 
+def _sender_snapshot(sender) -> SimpleNamespace:
+    return SimpleNamespace(
+        connected=sender.connected,
+        rejection=None,
+        pending_events=sender.pending_event_count,
+        acknowledged_events=sender.acknowledged_event_count,
+    )
+
+
 class _RecoverySender:
+    snapshot = _sender_snapshot
+
     def __init__(self, artifact: RecoveryArtifact):
         self.connected = False
         self.auth_rejected = False
@@ -51,13 +65,73 @@ class _RecoverySender:
         self.pending_transaction_count = 0
         return artifact
 
-    def disconnect(self):
+    def close(self, timeout=None):
         self.connected = False
+        return True
 
     def connect(self, timeout=None):
         self.connect_timeouts.append(timeout)
         self.connected = True
         return True
+
+
+class _ReceiverStub:
+    """A receiver whose handshake and replay the test completes; it queues nothing."""
+
+    stopped = False
+    auth_rejected = False
+    hello_rejected = False
+    rejection = None
+    rejection_reason = ""
+    reconnect = False
+    generation = 1
+
+    def __init__(self):
+        self.connected = False
+        self.synchronized = False
+
+    def complete_replay(self):
+        self.connected = self.synchronized = True
+
+    def snapshot(self):
+        return self
+
+    def start(self):
+        pass
+
+    def close(self, timeout=None):
+        return True
+
+    def freeze_marker(self):
+        return 0
+
+    def drained_through(self, _marker):
+        return True
+
+    def drain_queue(self, max_messages=None):
+        return []
+
+    def mark_replay_applied(self):
+        return self.synchronized
+
+    def mark_applied_through(self, _generation, _sequence):
+        return True
+
+    def reset_applied_progress(self):
+        pass
+
+    def request_replay_from(self, _seq_start):
+        pass
+
+
+def _start_with_receiver(client, *, replayed=True):
+    """Start *client* on a receiver stub, replayed unless a stubbed recovery replays it."""
+    receiver = _ReceiverStub()
+    if replayed:
+        receiver.complete_replay()
+    client._receiver = receiver
+    client.start()
+    return receiver
 
 
 def _stale_artifact(layer_key: str) -> RecoveryArtifact:
@@ -178,6 +252,7 @@ def test_status_exposes_shared_stage_partial_connection(tmp_path):
     original_sender = client._sender
 
     class _StatusSender:
+        snapshot = _sender_snapshot
         connected = False
         transaction_failure = None
         rejection_reason = ""
@@ -191,9 +266,7 @@ def test_status_exposes_shared_stage_partial_connection(tmp_path):
 
     sender = _StatusSender()
     client._sender = sender
-    client._started = True
-    client._receiver.connected = True
-    client._receiver._synchronized_event.set()
+    _start_with_receiver(client)
     try:
         assert client.status.phase is ClientPhase.CONNECTING
         assert client.status.receiver_connected is True
@@ -311,8 +384,7 @@ def test_unresolved_layer_events_apply_after_dependency_refresh(tmp_path):
         }
         assert not client._apply_record(ReceivedEvent(seq=2, event=event, layer_key=child_key))
         assert client.status.deferred_events == 1
-        client._receiver.connected = True
-        client._receiver._synchronized_event.set()
+        _start_with_receiver(client)
         assert client.status.synchronized
         assert client.status.deferred_events == 1
         assert client.status.deferred_layer_keys == (child_key,)
@@ -529,7 +601,7 @@ def test_shared_use_server_abandons_only_after_rejected_layer_detaches(
     Sdf.CreatePrimInLayer(child, "/Local/Rejected")
     sender = _RecoverySender(_stale_artifact("layer:child"))
     client._sender = sender
-    client._started = True
+    receiver = _start_with_receiver(client, replayed=False)
 
     def _detach(_timeout):
         client._graph.apply_sublayers(
@@ -544,8 +616,7 @@ def test_shared_use_server_abandons_only_after_rejected_layer_detaches(
         )
         client._tracker.sync_graph(force=True)
         client._last_seq = 2
-        client._receiver.connected = True
-        client._receiver._synchronized_event.set()
+        receiver.complete_replay()
 
     monkeypatch.setattr(client, "_replay_to_fresh_checkpoint", _detach)
     try:
@@ -841,9 +912,7 @@ def test_shared_external_recovery_completes_a_structured_reachable_assessment(
     _bind_child_graph(client)
     sender = _RecoverySender(_stale_artifact("layer:child"))
     client._sender = sender
-    client._started = True
-    client._receiver.connected = True
-    client._receiver._synchronized_event.set()
+    _start_with_receiver(client)
     monkeypatch.setattr(client, "_replay_to_fresh_checkpoint", lambda _timeout: None)
     try:
         assessment = client.refresh_recovery_assessment()
@@ -877,9 +946,7 @@ def test_shared_external_recovery_rejects_an_assessment_from_another_incident(
     _bind_child_graph(client)
     sender = _RecoverySender(_stale_artifact("layer:child"))
     client._sender = sender
-    client._started = True
-    client._receiver.connected = True
-    client._receiver._synchronized_event.set()
+    _start_with_receiver(client)
     monkeypatch.setattr(client, "_replay_to_fresh_checkpoint", lambda _timeout: None)
     try:
         assessment = client.refresh_recovery_assessment()
@@ -908,9 +975,7 @@ def test_shared_external_recovery_rejects_a_stale_graph_assessment(
     _bind_child_graph(client)
     sender = _RecoverySender(_stale_artifact("layer:child"))
     client._sender = sender
-    client._started = True
-    client._receiver.connected = True
-    client._receiver._synchronized_event.set()
+    _start_with_receiver(client)
     monkeypatch.setattr(client, "_replay_to_fresh_checkpoint", lambda _timeout: None)
     try:
         assessment = client.refresh_recovery_assessment()
@@ -941,7 +1006,7 @@ def test_shared_rebind_recovery_preserves_work_and_replays_clean_stage(
         _bind_child_graph(client)
     sender = _RecoverySender(_stale_artifact("layer:child"))
     client._sender = sender
-    client._started = True
+    receiver = _start_with_receiver(client, replayed=False)
 
     fresh_child = Sdf.Layer.CreateNew(str(tmp_path / "fresh-child.usda"))
     fresh_child.Save()
@@ -955,8 +1020,7 @@ def test_shared_rebind_recovery_preserves_work_and_replays_clean_stage(
             with client._tracker.suppressed():
                 _bind_child_graph(client)
             client._last_seq = 4
-        client._receiver.connected = True
-        client._receiver._synchronized_event.set()
+        receiver.complete_replay()
 
     monkeypatch.setattr(client, "_replay_to_fresh_checkpoint", _refresh)
     try:
@@ -1007,7 +1071,7 @@ def test_shared_rebind_recovery_resumes_after_replacement_replay_timeout(
     original_sender = client._sender
     sender = _RecoverySender(_stale_artifact("layer:child"))
     client._sender = sender
-    client._started = True
+    receiver = _start_with_receiver(client, replayed=False)
 
     fresh_stage = _create_root(tmp_path / "fresh-root.usda")
     fresh_child = Sdf.Layer.CreateNew(str(tmp_path / "fresh-child.usda"))
@@ -1017,8 +1081,7 @@ def test_shared_rebind_recovery_resumes_after_replacement_replay_timeout(
 
     def refresh(_timeout):
         checkpoints.append(client.stage)
-        client._receiver.connected = True
-        client._receiver._synchronized_event.set()
+        receiver.complete_replay()
         if len(checkpoints) == 2:
             with client._tracker.suppressed():
                 _bind_child_graph(client)
@@ -1116,9 +1179,7 @@ def test_shared_rebind_recovery_preflights_the_clean_stage(tmp_path, monkeypatch
     )
     sender = _RecoverySender(_stale_artifact("layer:root"))
     client._sender = sender
-    client._started = True
-    client._receiver.connected = True
-    client._receiver._synchronized_event.set()
+    _start_with_receiver(client)
     monkeypatch.setattr(client, "_replay_to_fresh_checkpoint", lambda _timeout: None)
 
     clean_stage = _create_root(tmp_path / "clean-root.usda")
@@ -1168,9 +1229,7 @@ def test_shared_rebind_recovery_rejects_a_detached_source_reused_by_clean_stage(
 
     sender = _RecoverySender(_stale_artifact("layer:child"))
     client._sender = sender
-    client._started = True
-    client._receiver.connected = True
-    client._receiver._synchronized_event.set()
+    _start_with_receiver(client)
     monkeypatch.setattr(client, "_replay_to_fresh_checkpoint", lambda _timeout: None)
 
     clean_stage = _create_root(tmp_path / "clean-root.usda")
@@ -1190,35 +1249,51 @@ def test_shared_rebind_recovery_rejects_a_detached_source_reused_by_clean_stage(
         client.close()
 
 
+def _prim_spec_event(path):
+    source = Sdf.Layer.CreateAnonymous()
+    Sdf.CreatePrimInLayer(source, path).specifier = Sdf.SpecifierDef
+    return {
+        "k": "set_sdf_spec_fields",
+        "prim": path,
+        "spec_path": path,
+        "spec_kind": "prim",
+        "fields": ["specifier"],
+        "fragment": serialize_spec_fields(
+            source, path, "prim", ["specifier"], stabilize_asset_paths=False,
+        ),
+        "removed": False,
+    }
+
+
 def test_shared_budget_releases_local_edits_under_sustained_traffic(tmp_path, monkeypatch):
+    base = tmp_path / "server-root.usda"
+    Sdf.Layer.CreateNew(str(base)).Save()
     stage = _create_root(tmp_path / "root.usda")
-    client = SharedStageClient(stage, app_name="shared-budget", persist_token=False)
-    traffic = PeerTraffic(client._receiver, monkeypatch, queued=3)
     sent = []
-
-    try:
-        client._started = True
-        client._graph.apply_state({
-            "type": "layer_graph_state", "seq": 1, "generation": "graph-1",
-            "revision": 1, "root_layer_key": "layer:root",
-            "layers": [{"layer_key": "layer:root", "revision": 1, "sublayers": []}],
-        })
-        client._tracker.sync_graph(force=True)
-        client._receiver.connected = True
-        client._receiver._synchronized_event.set()
-        monkeypatch.setattr(client._sender, "sock", object())
-        monkeypatch.setattr(
-            client._sender, "send_events",
-            lambda events, layer_key="": sent.append(events) or True,
+    with embedded_server(base_usd_path=str(base), layer_mode=LayerMode.SHARED_STAGE) as server:
+        state = server.sync_server
+        client = SharedStageClient(
+            stage, app_name="shared-budget", persist_token=False, port=server.server_address[1],
         )
-        stage.DefinePrim("/Shared", "Xform")
+        traffic = PeerTraffic(
+            state, client._receiver, _prim_spec_event,
+            layer_key=state.shared_layer_graph.root_layer_key,
+        )
+        try:
+            connect_client(client)
+            traffic.arrive(3)
+            assert client._sender.connect(timeout=5)
+            monkeypatch.setattr(
+                client._sender, "send_events",
+                lambda events, layer_key="": sent.append(events) or True,
+            )
+            stage.DefinePrim("/Shared", "Xform")
 
-        submitted = []
-        for _ in range(2):
-            submitted.append(client.update(max_messages=2).submitted_events)
-            traffic.arrive(2)
-        assert submitted[0] == 0 and submitted[1] > 0
-        assert sent
-    finally:
-        client._sender.sock = None
-        client.close()
+            submitted = []
+            for _ in range(2):
+                submitted.append(client.update(max_messages=2).submitted_events)
+                traffic.arrive(2)
+            assert submitted[0] == 0 and submitted[1] > 0
+            assert sent
+        finally:
+            client.close()

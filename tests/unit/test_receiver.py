@@ -1,1075 +1,411 @@
-"""Tests for ReceiverThread."""
+"""EventReceiver's wrapper contract, exercised against a live server."""
 
-import logging
+import gc
 import socket
+import threading
 import time
+import uuid
+from contextlib import nullcontext as does_not_raise
 
 import pytest
-from pxr import Usd
+from pxr import Usd, UsdGeom
 
 from openusdconnect import _client_backend
-from openusdconnect.adapters import UsdStageAdapter
-from openusdconnect.codec import HelloRejectionCode, encode_message, message_to_dict
-from openusdconnect.dispatcher import EventDispatcher
-from openusdconnect.framing import recv_framed, send_framed
-from openusdconnect.receiver import ReceiverThread
+from openusdconnect._client_utils import ClientCredential
+from openusdconnect.codec import HelloRejectionCode, message_to_dict
+from openusdconnect.protocol_constants import (
+    MSG_PLAYBACK_CLAIMED,
+    MSG_PLAYBACK_REJECTED,
+    MSG_PLAYBACK_STATE,
+    LayerMode,
+)
+from openusdconnect.receiver import EventReceiver
+from tests.helpers import client_registered, embedded_server, ensure_prim_event, wait_until
+
+FAST = {"reconnect_base_delay": 0.01, "reconnect_max_delay": 0.04}
+METADATA = {"timeCodesPerSecond": 24.0, "upAxis": "Z"}
 
 
-def _make_server():
-    """Create a listening socket on a random port, return (socket, port)."""
-    srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-    srv.bind(("127.0.0.1", 0))
-    srv.listen(1)
-    return srv, srv.getsockname()[1]
+@pytest.fixture(scope="module")
+def server(tmp_path_factory):
+    """A server that requires tokens and whose base authors stage metadata."""
+    base = tmp_path_factory.mktemp("receiver") / "base.usda"
+    stage = Usd.Stage.CreateNew(str(base))
+    stage.SetTimeCodesPerSecond(METADATA["timeCodesPerSecond"])
+    UsdGeom.SetStageUpAxis(stage, UsdGeom.Tokens.z)
+    stage.GetRootLayer().Save()
+    with embedded_server(base_usd_path=str(base), require_token=True) as runtime:
+        yield runtime
 
 
-def _accept_and_hello(srv, timeout=2, hello_ok=None):
-    """Accept one connection, consume hello, send hello_ok. Return conn."""
-    srv.settimeout(timeout)
-    conn, _ = srv.accept()
-    conn.settimeout(timeout)
-    recv_framed(conn)  # consume hello
-    if hello_ok is None:
-        hello_ok = {"type": "hello_ok", "layered_replay": True}
-    send_framed(conn, encode_message(hello_ok))
-    return conn
+@pytest.fixture
+def receivers(server):
+    """Build receivers of the server that are closed when the test ends."""
+    created = []
+
+    def make(**options):
+        receiver = EventReceiver(
+            **{
+                "host": "127.0.0.1",
+                "port": server.server_address[1],
+                "client_id": uuid.uuid4().hex,
+                **FAST,
+                **options,
+            }
+        )
+        created.append(receiver)
+        return receiver
+
+    yield make
+    for receiver in created:
+        assert receiver.close(5)
 
 
-def _accept(srv, timeout=2):
-    """Accept one connection (no handshake)."""
-    srv.settimeout(timeout)
-    conn, _ = srv.accept()
-    conn.settimeout(timeout)
-    return conn
+def _commit(server, count):
+    """Commit new prims, which receivers that connect later replay, and return the head."""
+    state = server.sync_server
+    state._commit_events([ensure_prim_event(f"/P{uuid.uuid4().hex}") for _ in range(count)])
+    return state.store.get_max_seq()
 
 
-def _recv_hello(conn):
-    """Read and decode a hello message from connection."""
-    buf = recv_framed(conn)
-    return message_to_dict(buf)
+def _messages(frames):
+    return [message_to_dict(frame) for frame in frames]
 
 
-def _send_event(conn, seq, event=None):
-    """Send a broadcast event message."""
-    if event is None:
-        event = {"k": "ensure_prim", "prim": "/World/X", "typeName": "Xform"}
-    msg = {"type": "event", "seq": seq, "event": event}
-    send_framed(conn, encode_message(msg))
+@pytest.mark.parametrize(
+    ("max_queue", "outcome"), [(0, pytest.raises(ValueError)), (1, does_not_raise())]
+)
+def test_invalid_settings_raise_value_error(max_queue, outcome):
+    with outcome:
+        EventReceiver(max_queue=max_queue)
 
 
-def _flood_events(conn, seqs):
-    """Send events, tolerating the receiver closing the socket mid-flood.
-
-    Overflowing the bounded queue makes the receiver disconnect by design, so
-    pushing past that point legitimately races with an RST from the peer the
-    sender just stops. The test's real assertion is the receiver's reaction.
-    """
-    for i in seqs:
-        try:
-            _send_event(conn, i)
-        except ConnectionError:
-            return
-
-
-def _send_ping(conn):
-    """Send a ping message."""
-    send_framed(conn, encode_message({"type": "ping"}))
-
-
-def _send_replay_complete(conn, head_seq, epoch=1):
-    send_framed(
-        conn,
-        encode_message(
-            {"type": "replay_complete", "head_seq": head_seq, "epoch": epoch}
-        ),
-    )
-
-
-def _poll_until(predicate, timeout=2, interval=0.02):
-    """Poll predicate() until truthy or timeout."""
-    deadline = time.monotonic() + timeout
-    while time.monotonic() < deadline:
-        result = predicate()
-        if result:
-            return result
-        time.sleep(interval)
-    return predicate()
-
-
-def _teardown(rt, conn, srv):
-    """Clean shutdown: close server-side socket first so recv unblocks."""
-    conn.close()
-    rt.stop()
-    rt.join(timeout=1)
-    srv.close()
-
-
-class TestReceiverThread:
-    def test_bounded_drain_preserves_suffix_and_replay_watermark(self):
-        rt = ReceiverThread(reconnect=False)
-        rt.connected = True
-        connection = rt._inbox.begin_connection()
-        for sequence, frame in enumerate((b"one", b"two", b"three"), start=1):
-            rt._inbox.accept(
-                connection.generation,
-                _client_backend.ReceiverMessageKind.EVENT,
-                sequence,
-                frame,
-            )
-        rt._inbox.accept_replay_complete(connection.generation, 3, 7)
-
-        assert list(rt.drain_queue(max_messages=2)) == [b"one", b"two"]
-        assert rt.queued_message_count == 1
-        assert rt._inbox.size == 1
-        assert not rt.mark_replay_applied()
-
-        assert list(rt.drain_queue(max_messages=2)) == [b"three"]
-        assert rt.mark_replay_applied()
-        assert rt.synchronized
-        assert rt.replay_head_seq == 3
-        assert rt.replay_epoch == 7
-
-    @pytest.mark.parametrize("limit", [0, -1, True, 1.5])
-    def test_bounded_drain_rejects_invalid_limit(self, limit):
+def test_consumer_calls_reject_invalid_arguments():
+    receiver = EventReceiver()
+    for limit in (0, True):
         with pytest.raises(ValueError, match="max_messages"):
-            ReceiverThread(reconnect=False).drain_queue(max_messages=limit)
+            receiver.drain_queue(max_messages=limit)
+    with pytest.raises(ValueError, match="at least 1"):
+        receiver.request_replay_from(0)
 
-    def test_replay_request_advances_past_discarded_queue_serials(self):
-        rt = ReceiverThread(reconnect=False)
-        connection = rt._inbox.begin_connection()
-        rt._inbox.accept(
-            connection.generation,
-            _client_backend.ReceiverMessageKind.EVENT,
-            1,
-            b"stale-one",
-        )
-        rt._inbox.accept(
-            connection.generation,
-            _client_backend.ReceiverMessageKind.EVENT,
-            2,
-            b"stale-two",
-        )
 
-        rt.request_replay_from(4)
-
-        assert rt._inbox.size == 0
-
-    def test_terminal_transport_failure_wakes_connection_waiter(self, monkeypatch):
-        def _fail_connect(*_args, **_kwargs):
-            raise OSError("injected connection failure")
-
-        monkeypatch.setattr(socket, "create_connection", _fail_connect)
-        rt = ReceiverThread(host="127.0.0.1", port=1, reconnect=False)
-        rt.start()
-        try:
-            assert not rt.wait_connected(timeout=1)
-            rt.join(timeout=1)
-            assert not rt.is_alive()
-            assert isinstance(rt.connection_error, OSError)
-        finally:
-            rt.stop()
-            rt.join(timeout=1)
-
-    def test_token_callback_failure_does_not_abort_handshake(self):
-        srv, port = _make_server()
-        rt = ReceiverThread(
-            host="127.0.0.1",
-            port=port,
-            reconnect=False,
-            on_token_issued=lambda _token: (_ for _ in ()).throw(
-                RuntimeError("injected callback failure")
-            ),
-        )
-        rt.start()
-        conn = _accept(srv)
-        try:
-            _recv_hello(conn)
-            send_framed(
-                conn,
-                encode_message(
-                    {
-                        "type": "hello_ok",
-                        "layered_replay": True,
-                        "token": "issued-token",
-                    }
-                ),
-            )
-            assert rt.wait_connected(timeout=1)
-            assert rt.connected
-            assert rt.token == "issued-token"
-        finally:
-            _teardown(rt, conn, srv)
-
-    def test_connects_and_sends_hello(self):
-        """ReceiverThread connects and sends a hello message."""
-        srv, port = _make_server()
-        rt = ReceiverThread(host="127.0.0.1", port=port, sync_from=5, reconnect=False)
-        rt.start()
-        conn = _accept(srv)
-        try:
-            hello = _recv_hello(conn)
-            assert hello["type"] == "hello"
-            assert hello["role"] == "receiver"
-            assert hello["sync_from"] == 5
-            assert hello["layered_replay"] is True
-        finally:
-            _teardown(rt, conn, srv)
-
-    def test_socket_has_nodelay(self):
-        """Small control frames must not sit in Nagle's buffer."""
-        srv, port = _make_server()
-        rt = ReceiverThread(host="127.0.0.1", port=port, reconnect=False)
-        rt.start()
-        conn = _accept_and_hello(srv)
-        try:
-            _poll_until(lambda: rt.connected)
-            assert rt.connected
-            assert rt.sock.getsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY) != 0
-        finally:
-            _teardown(rt, conn, srv)
-
-    def test_replay_ready_only_after_preceding_frames_are_drained_and_applied(self):
-        srv, port = _make_server()
-        rt = ReceiverThread(host="127.0.0.1", port=port, reconnect=False)
-        rt.start()
-        conn = _accept_and_hello(srv)
-        try:
-            _send_event(conn, 1)
-            _send_replay_complete(conn, 1, epoch=4)
-            _poll_until(lambda: rt.last_seq == 1)
-
-            assert not rt.synchronized
-            queued = rt.drain_queue()
-            assert len(queued) == 1
-            assert message_to_dict(queued[0])["type"] == "event"
-            assert _poll_until(rt.mark_replay_applied)
-            assert rt.synchronized
-            assert rt.replay_head_seq == 1
-            assert rt.replay_epoch == 4
-        finally:
-            _teardown(rt, conn, srv)
-
-    def test_reconnect_clears_ready_until_the_new_replay_marker_is_applied(self):
-        srv, port = _make_server()
-        rt = ReceiverThread(
-            host="127.0.0.1",
-            port=port,
-            reconnect=True,
-            reconnect_base_delay=0.02,
-            reconnect_max_delay=0.05,
-        )
-        rt.start()
-        conn1 = _accept_and_hello(srv)
-        conn2 = None
-        try:
-            _send_replay_complete(conn1, 0, epoch=1)
-            assert _poll_until(rt.mark_replay_applied)
-            assert rt.synchronized
-
-            conn1.close()
-            _poll_until(lambda: not rt.connected)
-            assert not rt.synchronized
-
-            conn2 = _accept_and_hello(srv, timeout=5)
-            _poll_until(lambda: rt.connected)
-            assert not rt.synchronized
-            _send_replay_complete(conn2, 0, epoch=1)
-            assert _poll_until(rt.mark_replay_applied)
-            assert rt.synchronized
-        finally:
-            _teardown(rt, conn2 or conn1, srv)
-
-    def test_negotiates_layered_replay(self):
-        srv, port = _make_server()
-        rt = ReceiverThread(
-            host="127.0.0.1",
-            port=port,
-            reconnect=False,
-            layered_replay=True,
-        )
-        rt.start()
-        conn = _accept(srv)
-        try:
-            hello = _recv_hello(conn)
-            assert hello["layered_replay"] is True
-            send_framed(
-                conn,
-                encode_message(
-                    {"type": "hello_ok", "layered_replay": True},
-                ),
-            )
-            assert _poll_until(lambda: rt.connected)
-            assert rt.layered_replay_active is True
-        finally:
-            _teardown(rt, conn, srv)
-
-    def test_sends_department(self):
-        srv, port = _make_server()
-        rt = ReceiverThread(
-            host="127.0.0.1",
-            port=port,
-            reconnect=False,
-            department="layout",
-        )
-        rt.start()
-        conn = _accept(srv)
-        try:
-            hello = _recv_hello(conn)
-            assert hello["department"] == "layout"
-            send_framed(
-                conn,
-                encode_message({"type": "hello_ok", "layered_replay": True}),
-            )
-            assert _poll_until(lambda: rt.connected)
-        finally:
-            _teardown(rt, conn, srv)
-
-    def test_unacknowledged_layered_replay_rejects_handshake(self):
-        srv, port = _make_server()
-        rt = ReceiverThread(
-            host="127.0.0.1",
-            port=port,
-            reconnect=False,
-            layered_replay=True,
-        )
-        rt.start()
-        conn = _accept_and_hello(srv, hello_ok={"type": "hello_ok"})
-        try:
-            rt.join(timeout=1)
-            assert not rt.is_alive()
-            assert not rt.connected
-            assert rt.hello_rejected
-            assert rt.layered_replay_active is False
-        finally:
-            _teardown(rt, conn, srv)
-
-    def test_explicit_flat_replay_accepts_unlayered_handshake(self):
-        srv, port = _make_server()
-        rt = ReceiverThread(
-            host="127.0.0.1",
-            port=port,
-            reconnect=False,
-            layered_replay=False,
-        )
-        rt.start()
-        conn = _accept_and_hello(srv, hello_ok={"type": "hello_ok"})
-        try:
-            assert _poll_until(lambda: rt.connected)
-            assert not rt.layered_replay_active
-            assert not rt.hello_rejected
-        finally:
-            _teardown(rt, conn, srv)
-
-    def test_hello_rejection_stops_reconnects(self):
-        srv, port = _make_server()
-        rt = ReceiverThread(
-            host="127.0.0.1",
-            port=port,
-            reconnect=True,
-            reconnect_base_delay=0.01,
-        )
-        rt.start()
-        conn = _accept(srv)
-        try:
-            _recv_hello(conn)
-            send_framed(
-                conn,
-                encode_message(
-                    {
-                        "type": "hello_rejected",
-                        "code": HelloRejectionCode.LayeredReplayRequired,
-                        "reason": "layered replay is required",
-                    }
-                ),
-            )
-            rt.join(timeout=1)
-            assert not rt.is_alive()
-            assert not rt.connected
-            assert not rt.auth_rejected
-            assert rt.hello_rejected
-            assert rt.rejection_code == HelloRejectionCode.LayeredReplayRequired
-            assert rt.rejection_reason == "layered replay is required"
-        finally:
-            _teardown(rt, conn, srv)
-
-    def test_auth_rejection_stores_reason(self):
-        srv, port = _make_server()
-        rt = ReceiverThread(host="127.0.0.1", port=port, reconnect=True)
-        rt.start()
-        conn = _accept(srv)
-        try:
-            _recv_hello(conn)
-            send_framed(
-                conn,
-                encode_message({"type": "auth_rejected", "reason": "invalid token"}),
-            )
-            rt.join(timeout=1)
-            assert not rt.is_alive()
-            assert rt.auth_rejected
-            assert not rt.hello_rejected
-            assert rt.rejection_reason == "invalid token"
-        finally:
-            _teardown(rt, conn, srv)
-
-    def test_receives_and_drains(self):
-        """ReceiverThread queues incoming FB messages for drain_queue."""
-        srv, port = _make_server()
-        rt = ReceiverThread(host="127.0.0.1", port=port, reconnect=False)
-        rt.start()
-        conn = _accept_and_hello(srv)
-        try:
-            _send_event(conn, 1)
-            _send_event(conn, 2)
-
-            collected = []
-
-            def _drain_all():
-                collected.extend(rt.drain_queue())
-                return len(collected) >= 2
-
-            _poll_until(_drain_all)
-            assert len(collected) == 2
-            assert rt.last_seq == 2
-            assert len(rt.drain_queue()) == 0
-        finally:
-            _teardown(rt, conn, srv)
-
-    def test_stop_on_server_close(self):
-        """ReceiverThread stops cleanly when server closes connection."""
-        srv, port = _make_server()
-        rt = ReceiverThread(
-            host="127.0.0.1",
-            port=port,
-            reconnect=False,
-            socket_timeout=0.1,
-        )
-        rt.start()
-        conn = _accept_and_hello(srv)
-        try:
-            _poll_until(lambda: rt.connected)
-            assert rt.connected
-            conn.close()
-            rt.join(timeout=1)
-            assert not rt.connected
-        finally:
-            if rt.is_alive():
-                rt.stop()
-                rt.join(timeout=1)
-            srv.close()
-
-    def test_drain_empty_before_connect(self):
-        """drain_queue returns empty deque before any data arrives."""
-        srv, port = _make_server()
-        rt = ReceiverThread(host="127.0.0.1", port=port, reconnect=False)
-        assert len(rt.drain_queue()) == 0
-        rt.start()
-        conn = _accept_and_hello(srv)
-        try:
-            assert len(rt.drain_queue()) == 0
-        finally:
-            _teardown(rt, conn, srv)
-
-
-class TestReconnection:
-    """ReceiverThread reconnects automatically after connection loss."""
-
-    def test_backoff_resets_after_successful_handshake(self, monkeypatch):
-        class StopAfterThreeWaits:
-            def __init__(self):
-                self.waits = []
-                self.stopped = False
-
-            def is_set(self):
-                return self.stopped
-
-            def wait(self, timeout):
-                self.waits.append(timeout)
-                if len(self.waits) == 3:
-                    self.stopped = True
-                    return True
-                return False
-
-        receiver = ReceiverThread(
-            reconnect=True,
-            reconnect_base_delay=1.0,
-            reconnect_max_delay=8.0,
-        )
-        stop_event = StopAfterThreeWaits()
-        receiver._stop_event = stop_event
-        attempts = 0
-
-        def connect():
-            nonlocal attempts
-            attempts += 1
-            if attempts < 3:
-                raise OSError("injected connection failure")
-            receiver.connected = True
-
-        monkeypatch.setattr(receiver, "_connect_and_recv", connect)
-
-        receiver.run()
-
-        assert stop_event.waits == [1.0, 2.0, 1.0]
-
-    def test_reconnects_after_server_close(self):
-        """After server closes, receiver reconnects to a new server."""
-        srv, port = _make_server()
-        rt = ReceiverThread(
-            host="127.0.0.1",
-            port=port,
-            reconnect=True,
-            reconnect_base_delay=0.05,
-            reconnect_max_delay=0.2,
-        )
-        rt.start()
-
-        # First connection
-        conn1 = _accept_and_hello(srv)
-        _poll_until(lambda: rt.connected)
-        assert rt.connected
-
-        # Server drops connection
-        conn1.close()
-        _poll_until(lambda: not rt.connected)
-
-        # Receiver should reconnect
-        conn2 = _accept_and_hello(srv)
-        _poll_until(lambda: rt.connected, timeout=2)
-        assert rt.connected
-
-        _teardown(rt, conn2, srv)
-
-    def test_reconnect_uses_last_seq(self):
-        """Reconnection sends sync_from based on last received seq."""
-        srv, port = _make_server()
-        rt = ReceiverThread(
-            host="127.0.0.1",
-            port=port,
-            reconnect=True,
-            reconnect_base_delay=0.05,
-            reconnect_max_delay=0.2,
-        )
-        rt.start()
-
-        # First connection send some events
-        conn1 = _accept_and_hello(srv)
-        _send_event(conn1, 10)
-        _poll_until(lambda: rt.last_seq == 10)
-
-        # Drop connection
-        conn1.close()
-        _poll_until(lambda: not rt.connected)
-
-        # Reconnect should request sync_from=11
-        conn2 = _accept(srv, timeout=2)
-        hello = _recv_hello(conn2)
-        assert hello["sync_from"] == 11
-
-        _teardown(rt, conn2, srv)
-
-    def test_resync_rewinds_the_reconnect_cursor(self):
-        srv, port = _make_server()
-        rt = ReceiverThread(
-            host="127.0.0.1",
-            port=port,
-            reconnect=True,
-            reconnect_base_delay=0.05,
-            reconnect_max_delay=0.2,
-        )
-        rt.start()
-        conn1 = _accept_and_hello(srv)
-        conn2 = None
-        try:
-            _send_event(conn1, 10)
-            assert _poll_until(lambda: rt.last_seq == 10)
-            send_framed(conn1, encode_message({"type": "resync"}))
-            _send_event(conn1, 1)
-            assert _poll_until(lambda: rt.last_seq == 1)
-
-            conn1.close()
-            assert _poll_until(lambda: not rt.connected)
-            conn2 = _accept(srv, timeout=2)
-            assert _recv_hello(conn2)["sync_from"] == 2
-        finally:
-            if conn2 is not None:
-                _teardown(rt, conn2, srv)
-            else:
-                rt.stop()
-                rt.join(timeout=1)
-                srv.close()
-
-    def test_in_place_resync_clears_ready_until_new_watermark_is_applied(self):
-        srv, port = _make_server()
-        rt = ReceiverThread(host="127.0.0.1", port=port, reconnect=False)
-        rt.start()
-        conn = _accept_and_hello(srv)
-        try:
-            _send_replay_complete(conn, 0, epoch=1)
-            assert _poll_until(rt.mark_replay_applied)
-            assert rt.synchronized
-
-            send_framed(conn, encode_message({"type": "resync"}))
-            _send_event(conn, 1)
-            _send_replay_complete(conn, 1, epoch=2)
-            assert _poll_until(lambda: rt.last_seq == 1)
-            assert not rt.synchronized
-
-            queued = rt.drain_queue()
-            assert [message_to_dict(raw)["type"] for raw in queued] == [
-                "resync",
-                "event",
-            ]
-            assert _poll_until(rt.mark_replay_applied)
-            assert rt.synchronized
-            assert rt.replay_head_seq == 1
-            assert rt.replay_epoch == 2
-        finally:
-            _teardown(rt, conn, srv)
-
-    def test_requested_replay_rewinds_sequence_and_clears_queue(self, caplog):
-        srv, port = _make_server()
-        rt = ReceiverThread(
-            host="127.0.0.1",
-            port=port,
-            reconnect=True,
-            reconnect_base_delay=0.05,
-            reconnect_max_delay=0.2,
-        )
-        rt.start()
-        conn1 = _accept_and_hello(srv)
-        conn2 = None
-        try:
-            _send_event(conn1, 1)
-            _send_event(conn1, 2)
-            assert _poll_until(lambda: rt.last_seq == 2)
-
-            caplog.set_level(logging.WARNING, logger="openusdconnect.receiver")
-            rt.request_replay_from(2)
-            assert rt.last_seq == 1
-            assert len(rt.drain_queue()) == 0
-
-            conn2 = _accept(srv, timeout=2)
-            hello = _recv_hello(conn2)
-            assert hello["sync_from"] == 2
-            send_framed(
-                conn2,
-                encode_message({"type": "hello_ok", "layered_replay": True}),
-            )
-            assert _poll_until(lambda: rt.connected)
-
-            _send_event(conn2, 2)
-            assert _poll_until(lambda: rt.last_seq == 2)
-            assert "socket error during read" not in caplog.text
-        finally:
-            conn1.close()
-            if conn2 is not None:
-                _teardown(rt, conn2, srv)
-            else:
-                rt.stop()
-                rt.join(timeout=1)
-                srv.close()
-
-    def test_requested_replay_closes_current_socket(self):
-        rt = ReceiverThread()
-        sock = socket.socket()
-        rt.sock = sock
-        try:
-            rt.request_replay_from(1)
-            assert sock.fileno() == -1
-            assert rt.sock is None
-        finally:
-            sock.close()
-
-    def test_close_socket_logs_cleanup_errors(self, caplog):
-        class BrokenSocket:
-            def shutdown(self, _how):
-                raise OSError("shutdown failed")
-
-            def close(self):
-                raise OSError("close failed")
-
-        rt = ReceiverThread()
-        sock = BrokenSocket()
-        rt.sock = sock
-
-        with caplog.at_level(logging.DEBUG, logger="openusdconnect.receiver"):
-            rt._close_socket()
-
-        assert rt.sock is None
-        assert "socket shutdown failed during close" in caplog.text
-        assert "socket close failed" in caplog.text
-
-    def test_no_reconnect_when_disabled(self):
-        """With reconnect=False, thread exits after connection loss."""
-        srv, port = _make_server()
-        rt = ReceiverThread(
-            host="127.0.0.1",
-            port=port,
-            reconnect=False,
-            socket_timeout=0.1,
-        )
-        rt.start()
-
-        conn = _accept_and_hello(srv)
-        _poll_until(lambda: rt.connected)
-        conn.close()
-
-        rt.join(timeout=1)
-        assert not rt.is_alive()
-        srv.close()
-
-
-class TestSocketTimeout:
-    """Socket timeout prevents hanging on unresponsive server."""
-
-    def test_timeout_does_not_kill_connection(self):
-        """Socket timeout triggers but connection stays alive if server responds later."""
-        srv, port = _make_server()
-        rt = ReceiverThread(
-            host="127.0.0.1",
-            port=port,
-            reconnect=False,
-            socket_timeout=0.05,
-        )
-        rt.start()
-        conn = _accept_and_hello(srv)
-        try:
-            _poll_until(lambda: rt.connected)
-
-            # Wait longer than socket timeout
-            time.sleep(0.1)
-
-            # Connection should still be alive timeout just means no data
-            assert rt.connected
-
-            # Send data after timeout should still be received
-            _send_event(conn, 1)
-            collected = []
-            _poll_until(lambda: collected.extend(rt.drain_queue()) or len(collected) >= 1)
-            assert len(collected) == 1
-        finally:
-            _teardown(rt, conn, srv)
-
-
-class TestBoundedQueue:
-    """Queue overflow triggers reconnect instead of unbounded growth."""
-
-    def test_queue_overflow_triggers_reconnect(self):
-        """When queue is full, receiver disconnects and reconnects for replay."""
-        srv, port = _make_server()
-        rt = ReceiverThread(
-            host="127.0.0.1",
-            port=port,
-            reconnect=True,
-            max_queue=3,
-            reconnect_base_delay=0.05,
-            reconnect_max_delay=0.2,
-        )
-        rt.start()
-
-        # First connection
-        conn1 = _accept_and_hello(srv)
-
-        # Send 5 events into a queue with max depth 3 overflow disconnects
-        # the receiver mid-flood, so tolerate the RST from its closed socket.
-        _flood_events(conn1, range(1, 6))
-
-        # Wait for overflow to trigger disconnect
-        _poll_until(lambda: not rt.connected, timeout=5)
-
-        # Queue should have the events it managed to buffer (up to 3)
-        msgs = rt.drain_queue()
-        assert len(msgs) <= 3
-
-        # Receiver should reconnect automatically
-        conn2 = _accept(srv, timeout=5)
-        hello = _recv_hello(conn2)
-        assert hello["type"] == "hello"
-        # Should request replay from where it left off
-        assert hello["sync_from"] > 0
-
-        _teardown(rt, conn2, srv)
-        conn1.close()
-
-    def test_queue_overflow_no_reconnect_when_disabled(self):
-        """With reconnect=False, overflow stops the thread."""
-        srv, port = _make_server()
-        rt = ReceiverThread(
-            host="127.0.0.1",
-            port=port,
-            reconnect=False,
-            max_queue=3,
-            socket_timeout=0.1,
-        )
-        rt.start()
-        conn = _accept_and_hello(srv)
-        try:
-            _flood_events(conn, range(1, 6))
-
-            rt.join(timeout=5)
-            assert not rt.is_alive()
-        finally:
-            conn.close()
-            srv.close()
-
-
-class TestPingHandling:
-    """Server pings are handled transparently by the receiver."""
-
-    def test_ping_not_queued(self):
-        """Ping messages from server are silently dropped, not queued."""
-        srv, port = _make_server()
-        rt = ReceiverThread(host="127.0.0.1", port=port, reconnect=False)
-        rt.start()
-        conn = _accept_and_hello(srv)
-        try:
-            _send_event(conn, 1)
-            _send_ping(conn)
-            _send_event(conn, 2)
-
-            collected = []
-            _poll_until(lambda: collected.extend(rt.drain_queue()) or len(collected) >= 2)
-            assert len(collected) == 2
-            assert rt.last_seq == 2
-        finally:
-            _teardown(rt, conn, srv)
-
-    def test_ping_resets_timeout_counter(self):
-        """Receiving a ping prevents consecutive timeout disconnect."""
-        srv, port = _make_server()
-        rt = ReceiverThread(
-            host="127.0.0.1",
-            port=port,
-            reconnect=False,
-            socket_timeout=0.05,
-        )
-        import openusdconnect.receiver as recv_mod
-
-        original = recv_mod._MAX_CONSECUTIVE_TIMEOUTS
-        recv_mod._MAX_CONSECUTIVE_TIMEOUTS = 4
-        try:
-            rt.start()
-            conn = _accept_and_hello(srv)
-            _poll_until(lambda: rt.connected)
-            # Each wait is below four timeouts, while their sum is above it.
-            time.sleep(0.12)
-            _send_ping(conn)
-            time.sleep(0.12)
-            # Should still be alive because ping reset the counter
-            assert rt.connected
-        finally:
-            recv_mod._MAX_CONSECUTIVE_TIMEOUTS = original
-            _teardown(rt, conn, srv)
-
-
-class TestConsecutiveTimeouts:
-    """Receiver disconnects after too many consecutive recv timeouts."""
-
-    def test_max_consecutive_timeouts(self):
-        srv, port = _make_server()
-        rt = ReceiverThread(
-            host="127.0.0.1",
-            port=port,
-            reconnect=False,
-            socket_timeout=0.02,
-        )
-        import openusdconnect.receiver as recv_mod
-
-        original = recv_mod._MAX_CONSECUTIVE_TIMEOUTS
-        recv_mod._MAX_CONSECUTIVE_TIMEOUTS = 3
-        try:
-            rt.start()
-            conn = _accept_and_hello(srv)
-            _poll_until(lambda: rt.connected)
-            # Don't send anything let timeouts accumulate
-            rt.join(timeout=2)
-            assert not rt.is_alive()
-        finally:
-            recv_mod._MAX_CONSECUTIVE_TIMEOUTS = original
-            conn.close()
-            srv.close()
-
-
-def _accept_identity_hello(receiver, *, instance="server", supported=True, sync_from=1):
-    return receiver._handle_handshake_message(
-        encode_message(
-            {
-                "type": "hello_ok",
-                "server_instance": instance,
-                "layered_replay": True,
-                "replay_identity": supported,
-            }
-        ),
-        sync_from,
+def test_settings_read_back_and_state_starts_empty():
+    receiver = EventReceiver(
+        port=7300, sync_from=5, reconnect=False, max_queue=7, socket_timeout=2.5
     )
+    assert (receiver.port, receiver.sync_from) == (7300, 5)
+    assert (receiver.max_queue, receiver.socket_timeout) == (7, 2.5)
+    assert receiver.layered_replay and receiver.layer_mode is LayerMode.MANAGED
+    assert not receiver.reconnect
+    receiver.reconnect = True
+    assert receiver.reconnect
+
+    assert not receiver.connected and not receiver.synchronized
+    assert receiver.last_seq == 4
+    assert receiver.queued_message_count == 0 and len(receiver.drain_queue()) == 0
+    assert receiver.stage_metadata == {}
+    assert not receiver.auth_rejected and not receiver.hello_rejected
+    assert receiver.rejection_code == HelloRejectionCode.Unspecified
+    assert receiver.connection_error is None
+
+    shared = EventReceiver(layer_mode="shared_stage", layered_replay=False)
+    assert shared.layer_mode is LayerMode.SHARED_STAGE and not shared.layered_replay
 
 
-def _receive_identity_message(receiver, generation, **message):
-    return receiver._handle_data_message(encode_message(message), generation)
+def test_close_stops_the_thread_and_reports_whether_it_exited(receivers):
+    assert EventReceiver().close(0), "a receiver that never started has no thread"
+    entered, release = threading.Event(), threading.Event()
+
+    def hold(_token):
+        entered.set()
+        assert release.wait(5)
+
+    receiver = receivers(on_token_issued=hold)
+    assert not receiver.running and not receiver.stopped
+    started = time.monotonic()
+    assert not receiver.wait_connected(5)
+    assert not receiver.wait_synchronized(5)
+    assert time.monotonic() - started < 1, "a receiver that never started was waited on"
+
+    receiver.start()
+    assert receiver.running and not receiver.stopped
+    with pytest.raises(RuntimeError, match="started once"):
+        receiver.start()
+    # The callback holds the thread, so it cannot exit yet.
+    assert entered.wait(5)
+    assert receiver.connected
+    assert not receiver.close(timeout=0)
+    assert receiver.running
+
+    release.set()
+    started = time.monotonic()
+    assert receiver.close()
+    assert time.monotonic() - started < 2, "close waited for the read timeout"
+    assert receiver.stopped and not receiver.running and not receiver.connected
+    assert receiver.close(0)
+    with pytest.raises(RuntimeError, match="started once"):
+        receiver.start()
+
+    with receivers() as receiver:
+        receiver.start()
+        assert receiver.wait_connected(5)
+    assert receiver.stopped and not receiver.connected
 
 
-def test_received_prefix_identity_is_not_published_until_applied():
-    receiver = ReceiverThread()
-    first = receiver._inbox.begin_connection()
-    assert _accept_identity_hello(receiver, instance="old")
-    assert _receive_identity_message(
-        receiver, first.generation, type="replay_complete", head_seq=0, epoch=2
-    )
-    assert receiver._received_replay_identity == ("old", 2)
-    assert receiver.server_instance == ""
-    assert receiver.mark_replay_applied()
-    assert receiver.server_instance == "old"
+def test_close_from_a_callback_returns_without_waiting_for_its_own_thread(receivers):
+    results = []
 
-    receiver.connected = False
-    second = receiver._inbox.begin_connection()
-    assert _accept_identity_hello(receiver, instance="new")
-    assert receiver.server_instance == "old"
-    assert not receiver.synchronized
-    assert _receive_identity_message(receiver, second.generation, type="resync")
-    assert receiver._received_replay_identity is None
-    assert _receive_identity_message(
-        receiver, second.generation, type="replay_complete", head_seq=0, epoch=0
-    )
-    assert not receiver.mark_replay_applied()
-    receiver.drain_queue()
-    assert receiver.mark_replay_applied()
-    assert receiver.server_instance == "new"
-    assert receiver.replay_epoch == 0
+    def close_on_token(_token):
+        started = time.monotonic()
+        results.append(receiver.close())
+        results.append(time.monotonic() - started)
+
+    receiver = receivers(on_token_issued=close_on_token)
+    receiver.start()
+    wait_until(lambda: len(results) == 2)
+    closed, waited = results
+    assert closed is False and waited < 1
+    assert receiver.close(5)
+    assert receiver.stopped
 
 
-def test_interrupted_reset_does_not_reuse_old_prefix_identity():
-    receiver = ReceiverThread()
-    first = receiver._inbox.begin_connection()
-    assert _accept_identity_hello(receiver)
-    assert _receive_identity_message(
-        receiver, first.generation, type="replay_complete", head_seq=0, epoch=3
-    )
-    assert receiver.mark_replay_applied()
-    assert _receive_identity_message(receiver, first.generation, type="resync")
-    assert receiver._received_replay_identity is None
-    assert not receiver.synchronized
-    receiver.connected = False
-    receiver._inbox.begin_connection()
-    assert receiver._received_replay_identity is None
-    assert not receiver.mark_replay_applied()
+def test_collecting_a_receiver_stops_its_connection(server):
+    receiver = EventReceiver("127.0.0.1", server.server_address[1], client_id=uuid.uuid4().hex)
+    client_id = receiver.client_id
+    receiver.start()
+    assert receiver.wait_connected(5)
+    wait_until(lambda: client_registered(server, client_id))
+    del receiver
+    gc.collect()
+    wait_until(lambda: not client_registered(server, client_id))
 
 
-def test_explicit_full_replay_queues_reset_before_colliding_events():
-    receiver = ReceiverThread()
-    stage = Usd.Stage.CreateInMemory()
-    dispatcher = EventDispatcher(receiver=receiver, adapter=UsdStageAdapter(stage))
-    first = receiver._inbox.begin_connection()
-    assert _accept_identity_hello(receiver)
-    stack = {"type": "layer_stack_state", "layers": [{"layer_key": "shared"}]}
-    assert _receive_identity_message(receiver, first.generation, **stack)
-    assert _receive_identity_message(
-        receiver,
-        first.generation,
-        type="event",
-        seq=1,
-        layer_key="shared",
-        event={"k": "ensure_prim", "prim": "/Old", "typeName": "Xform"},
-    )
-    dispatcher.drain_and_apply()
-    assert stage.GetPrimAtPath("/Old")
-    receiver.connected = False
-    second = receiver._inbox.begin_connection()
-    assert second.sync_from == 2
+def test_close_before_start_ends_without_connecting(receivers, server):
+    receiver = receivers()
+    assert receiver.close()
+    receiver.start()
+    wait_until(lambda: receiver.stopped)
+    assert not receiver.running
+    assert not server.sync_server.token_store.has_token(receiver.client_id)
+
+
+def test_handshake_state_reads_through_after_connecting(receivers, server):
+    state = server.sync_server
+    head = _commit(server, 2)
+    receiver = receivers(origin="origin", department="layout")
+    receiver.start()
+    assert receiver.wait_connected(5)
+
+    assert receiver.layered_replay_active
+    assert receiver.layer_mode_active is LayerMode.MANAGED
+    assert receiver.stage_metadata == METADATA
+    with state.clients_lock:
+        clients = [
+            (info.role, info.client_id, info.origin, info.department)
+            for info in state.clients.values()
+        ]
+    assert ("receiver", receiver.client_id, "origin", "layout") in clients
+    wait_until(lambda: receiver.last_seq == head)
+    assert not receiver.synchronized and receiver.server_instance == ""
+
+
+def test_token_provider_supplies_each_attempt_and_the_issued_token_is_presented(receivers):
+    credential = ClientCredential("127.0.0.1", 0, None, persist=False)
+    presented = []
+
+    def provide():
+        presented.append(credential.current())
+        return presented[-1]
+
+    receiver = receivers(token_provider=provide, on_token_issued=credential.issued)
+    receiver.start()
+    assert receiver.wait_connected(5)
+    issued = credential.token
+    assert issued and receiver.token == issued
+
     receiver.request_replay_from(1)
-    third = receiver._inbox.begin_connection()
-    assert third.sync_from == 1
-    assert _accept_identity_hello(receiver, sync_from=1)
-    assert _receive_identity_message(receiver, third.generation, **stack)
-    assert _receive_identity_message(
-        receiver,
-        third.generation,
-        type="event",
-        seq=1,
-        layer_key="shared",
-        event={"k": "ensure_prim", "prim": "/Own", "typeName": "Xform"},
-    )
-    assert _receive_identity_message(
-        receiver, third.generation, type="replay_complete", head_seq=1, epoch=0
-    )
-    dispatcher.drain_and_apply()
-    assert stage.GetPrimAtPath("/Own")
-    assert not stage.GetPrimAtPath("/Old")
-    assert dispatcher.last_seq == 1
-    assert receiver.synchronized
-    dispatcher.close()
+    assert receiver.wait_connected(5), "the server rejected the issued token"
+    assert not receiver.auth_rejected
+    assert presented == [None, issued]
 
 
-@pytest.mark.parametrize("instance", ["server", "replacement"])
-@pytest.mark.parametrize("queue_full", [False, True])
-def test_changed_hello_identity_waits_for_accepted_reset(instance, queue_full):
-    receiver = ReceiverThread(max_queue=1)
-    first = receiver._inbox.begin_connection()
-    receiver._received_replay_identity = ("server", 0)
-    assert receiver._handle_data_message(
-        encode_message(
-            {
-                "type": "event",
-                "seq": 1,
-                "event": {"k": "ensure_prim", "prim": "/Old", "typeName": "Xform"},
-            }
-        ),
-        first.generation,
-    )
-    receiver.drain_queue()
-    receiver.connected = False
-    second = receiver._inbox.begin_connection()
-    receiver._prefix_validation_requested = True
-    assert second.sync_from == 2
-    assert receiver._handle_handshake_message(
-        encode_message(
-            {
-                "type": "hello_ok",
-                "server_instance": instance,
-                "replay_identity": True,
-                "layered_replay": True,
-                "replay_epoch": 1,
-            }
-        ),
-        second.sync_from,
-        second.generation,
-    )
-    assert receiver._received_replay_identity == ("server", 0)
-    assert receiver.last_seq == 1
-    assert receiver.server_instance == ""
-    assert not receiver.synchronized
-    if queue_full:
-        assert receiver._handle_data_message(
-            encode_message({"type": "layer_stack_state", "layers": []}),
-            second.generation,
-        )
-    accepted = receiver._handle_data_message(
-        encode_message({"type": "resync"}),
-        second.generation,
-    )
-    assert accepted is not queue_full
-    assert receiver.last_seq == (1 if queue_full else 0)
-    assert receiver._received_replay_identity == (("server", 0) if queue_full else (instance, 1))
-    assert receiver.server_instance == ""
-    assert not receiver.synchronized
+def test_token_provider_failure_is_the_connection_error(receivers, caplog):
+    def fail():
+        raise RuntimeError("injected provider failure")
 
-
-def test_replay_request_during_hello_does_not_publish_stale_identity():
-    receiver = ReceiverThread(on_token_issued=lambda _token: receiver.request_replay_from(2))
-    connection = receiver._inbox.begin_connection()
-    assert not receiver._handle_handshake_message(
-        encode_message(
-            {
-                "type": "hello_ok",
-                "token": "issued",
-                "server_instance": "server",
-                "replay_identity": True,
-                "layered_replay": True,
-                "replay_epoch": 0,
-            }
-        ),
-        connection.sync_from,
-        connection.generation,
-    )
-    assert receiver._received_replay_identity is None
+    receiver = receivers(token_provider=fail, reconnect=False)
+    receiver.start()
+    wait_until(lambda: receiver.stopped)
     assert not receiver.connected
+    assert isinstance(receiver.connection_error, RuntimeError)
+    assert "EventReceiver: token provider failed" in caplog.text
+
+
+def test_legacy_callbacks_receive_message_dicts_once_on_the_connection_thread(
+    receivers, server, caplog
+):
+    state = server.sync_server
+    calls = []
+
+    def record(name):
+        def callback(value):
+            calls.append((name, value, threading.get_ident()))
+            if name == "token":
+                raise RuntimeError("injected callback failure")
+
+        return callback
+
+    receiver = receivers(
+        on_token_issued=record("token"),
+        on_stage_metadata=record("metadata"),
+        on_playback_state=record("state"),
+        on_playback_claimed=record("claimed"),
+        on_playback_rejected=record("rejected"),
+    )
+    receiver.start()
+    assert receiver.wait_connected(5)
+    # The server sends its playback state after every accepted hello.
+    wait_until(lambda: len(calls) == 3)
+    claimed = {"type": MSG_PLAYBACK_CLAIMED, "leader_client_id": "leader"}
+    rejected = {
+        "type": MSG_PLAYBACK_REJECTED,
+        "reason": "already led",
+        "current_leader_client_id": "leader",
+    }
+    state.broadcast_message(claimed)
+    state.broadcast_message(rejected)
+    wait_until(lambda: len(calls) == 5)
+
+    assert [(name, value) for name, value, _thread in calls] == [
+        ("token", receiver.token),
+        ("metadata", METADATA),
+        ("state", {"type": MSG_PLAYBACK_STATE, **state.get_playback_state()}),
+        ("claimed", claimed),
+        ("rejected", rejected),
+    ]
+    assert threading.get_ident() not in {thread for _name, _value, thread in calls}
+    assert "EventReceiver: on_token_issued callback failed" in caplog.text
+    assert receiver.connected
+
+
+def test_a_given_queue_takes_the_notifications_and_snapshot_reads_the_status(receivers, server):
+    with pytest.raises(ValueError, match="on_playback_state"):
+        EventReceiver(notifications=_client_backend.NotificationQueue(), on_playback_state=print)
+    head = _commit(server, 1)
+    notifications = _client_backend.NotificationQueue()
+    issued = []
+    receiver = receivers(
+        notifications=notifications,
+        on_token_issued=lambda token: issued.append((token, threading.get_ident())),
+    )
+    receiver.start()
+    wait_until(lambda: issued and receiver.last_seq == head)
+    [(token, thread)] = issued
+    assert token == receiver.token and thread != threading.get_ident()
+    kinds = [type(notification).__name__ for notification in notifications.drain()]
+    assert kinds[:3] == ["TokenIssued", "StageMetadata", "Connected"]
+
+    snapshot = receiver.snapshot()
+    assert (snapshot.connected, snapshot.last_sequence, snapshot.layered_replay_active) == (
+        receiver.connected,
+        receiver.last_seq,
+        receiver.layered_replay_active,
+    )
+
+
+def test_replay_drains_in_batches_and_is_ready_once_marked_applied(receivers, server):
+    state = server.sync_server
+    head = _commit(server, 3)
+    receiver = receivers()
+    receiver.start()
+    wait_until(lambda: receiver.last_seq == head)
+    waited = []
+    waiter = threading.Thread(target=lambda: waited.append(receiver.wait_synchronized(5)))
+    waiter.start()
+
+    generation = receiver.generation
+    frames = list(receiver.drain_queue(max_messages=2))
+    assert len(frames) == 2 and receiver.queued_message_count == head - 1
+    assert not receiver.mark_replay_applied()
+    frames.extend(receiver.drain_queue())
+    messages = _messages(frames)
+    assert [message["type"] for message in messages] == ["layer_stack_state"] + ["event"] * head
+    assert [message["seq"] for message in messages[1:]] == list(range(1, head + 1))
+    assert receiver.mark_applied_through(generation, head)
+    # The completion marker follows the last replayed event.
+    wait_until(receiver.mark_replay_applied)
+
+    waiter.join(5)
+    assert waited == [True]
+    assert receiver.synchronized and receiver.wait_synchronized(0)
+    assert receiver.replay_head_seq == head
+    assert receiver.replay_epoch == state.get_replay_token()[0]
+    assert receiver.server_instance == state.server_instance
+
+
+def test_replay_request_reconnects_and_replays_from_the_requested_sequence(receivers, server):
+    head = _commit(server, 2)
+    receiver = receivers(reconnect=False)
+    receiver.start()
+    wait_until(lambda: receiver.last_seq == head)
+    marker = receiver.freeze_marker()
+    assert not receiver.drained_through(marker)
+
+    # Reconnecting after the request shows the setting reached the connection.
+    receiver.reconnect = True
+    receiver.request_replay_from(1)
+    assert receiver.drained_through(marker)
+    assert receiver.queued_message_count == 0 and receiver.last_seq == 0
+    assert receiver.wait_connected(5)
+    wait_until(lambda: receiver.last_seq == head)
+
+    generation = receiver.generation
+    messages = _messages(receiver.drain_queue())
+    assert [message["type"] for message in messages] == (
+        ["resync", "layer_stack_state"] + ["event"] * head
+    )
+    receiver.reset_applied_progress()
+    assert receiver.mark_applied_through(generation, head)
+    wait_until(receiver.mark_replay_applied)
+    assert receiver.synchronized
+
+
+def test_refused_connection_is_the_connection_error(receivers):
+    with socket.socket() as probe:
+        probe.bind(("127.0.0.1", 0))
+        port = probe.getsockname()[1]
+    receiver = receivers(port=port, reconnect=False)
+    receiver.start()
+    waited = []
+    waiter = threading.Thread(target=lambda: waited.append(receiver.wait_connected(10)))
+    waiter.start()
+    wait_until(lambda: receiver.stopped, timeout=10)
+    waiter.join(5)
+    assert waited == [False]
+    assert isinstance(receiver.connection_error, ConnectionRefusedError)
+
+
+@pytest.mark.parametrize("rejection", ["auth", "hello"])
+def test_rejection_is_reported_and_stops_reconnecting(receivers, server, rejection):
+    if rejection == "auth":
+        client_id = uuid.uuid4().hex
+        server.sync_server.token_store.issue(client_id)
+        receiver = receivers(client_id=client_id, token="not-issued")
+        expected = (True, False, HelloRejectionCode.Unspecified, "invalid or missing token")
+    else:
+        receiver = receivers(layered_replay=False, layer_mode=LayerMode.SHARED_STAGE)
+        expected = (
+            False,
+            True,
+            HelloRejectionCode.LayerModeMismatch,
+            "server uses 'managed' layer mode, client requested 'shared_stage'",
+        )
+    receiver.start()
+    wait_until(lambda: receiver.stopped)
+    assert not receiver.running and not receiver.connected
+    assert (
+        receiver.auth_rejected,
+        receiver.hello_rejected,
+        receiver.rejection_code,
+        receiver.rejection_reason,
+    ) == expected

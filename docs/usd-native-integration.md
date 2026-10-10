@@ -1,9 +1,9 @@
 # Python client and host-integration API
 
 These APIs attach OpenUSDConnect to an application-owned `pxr.Usd.Stage`.
-Call `update()` from the stage-owning thread. Socket reads and reconnects run
-on background threads; encoding, USD work, and (by default) transaction writes
-run on the calling thread.
+Call `update()` from the stage-owning thread. Socket reads, transaction
+writes, and reconnects run on native threads that do not need the GIL;
+encoding and USD work run on the calling thread.
 
 ## Choose an API
 
@@ -82,7 +82,7 @@ Pass one `ClientObserver` subclass as `observer=` and override only what the
 host needs. Methods never run on a network thread: notifications arrive in
 `update()` or `close()`, and delivery methods run wherever the client applies
 authoritative state (`update()`, `refresh_asset_dependency()`, recovery). The
-client wires only overridden methods, so unused notifications cost nothing:
+client calls only overridden methods:
 
 ```python
 class HostObserver(ClientObserver):
@@ -132,11 +132,6 @@ Receiving pauses while a `ManagedClient` edit target is foreign, because its
 accepts any edit target (session-layer edits stay local), so its loop calls
 `update()` unconditionally.
 
-`background_send=True` moves transaction writes to a worker so a full socket
-buffer cannot block the UI thread. The worker needs the GIL: while the host's
-main thread runs Python, each write waits for Python's thread switch interval
-(about 5 ms), so keep the default for latency-sensitive editing on fast links.
-
 Before closing, stop authoring and call `submit_and_wait()`. Success means the
 edits are durable, not that their echo has been applied locally.
 
@@ -168,8 +163,7 @@ instead of silently degrading to flat replay.
 
 Open the original base scene. A generated live-open snapshot already contains
 composed server state and is rejected because replaying the complete managed
-history over it would duplicate opinions. Snapshot continuation is a separate
-flat integration path used by the live-open host plugins.
+history over it would duplicate opinions.
 
 Use `rebind_stage(new_stage)` when a host replaces its stage. Passing `None`
 parks stage application (phase `PARKED`) while the network queue continues to
@@ -285,9 +279,8 @@ with ManagedClient(
 Construction creates `client.authoring_layer`, inserts it below the
 authoritative managed block, and makes it the edit target. Keep that target
 while the client is active. `update()` freezes local edits, applies the queued
-authoritative prefix, then submits the frozen local batch. The dispatcher
-suppresses and invalidates the emitter while applying server records, so
-authoritative echoes do not become new local submissions.
+authoritative prefix, then submits the frozen batch; applied server records are
+never republished as local edits.
 
 `publish_current_edit_target()` queues a snapshot of the authoring layer for
 the next `update()` that can publish; a zero return can mean it is still queued.
@@ -328,8 +321,8 @@ happens next depends on `DCCAdapter.targets_stage()`:
 
 Custom stage-backed adapters must override `targets_stage()` explicitly.
 
-Shader mapping interfaces live in `openusdconnect.shader_mapping`; existing
-imports from `openusdconnect.adapters` remain supported. Integrations that
+Shader mapping interfaces live in `openusdconnect.shader_mapping` and are also
+importable from `openusdconnect.adapters`. Integrations that
 author shader inputs directly can use `set_connectable_input_value` and
 `resolve_shader_port_type` from `openusdconnect.usd_authoring`. They operate
 under the stage's current edit target and do not send network events.
@@ -424,14 +417,10 @@ managed receiver, call `refresh_asset_dependency(path)` after an asset becomes
 available or its resolver mapping changes; omit the path to retry all pending
 dependencies.
 
-A context-only resolver remap is a special case for adapters targeting a
-non-USD native scene. It can recompose both the live and previous-state stages
-before projection observes the old topology. The dispatcher then sets
-`native_scene_rebuild_required` and stops incremental delivery. The high-level
-receiver reports it as `RECOVERY_REQUIRED` in `client.status`. Rebuild the
-native destination and call
-`client.acknowledge_native_scene_rebuilt()` before resuming. An ordinary
-reconnect does not clear this guard.
+For an adapter targeting a non-USD native scene, a context-only resolver remap
+can recompose both the live and previous-state stages before projection
+observes the old topology. That is the `RECOVERY_REQUIRED` case in
+[Observing the client](#observing-the-client); a reconnect does not clear it.
 
 ## Identity and authentication
 
@@ -446,9 +435,9 @@ store.
 
 ## Low-level APIs
 
-`NoticeEmitter`, `EventSender`, `ReceiverThread`, and `EventDispatcher` remain
+`NoticeEmitter`, `EventSender`, `EventReceiver`, and `EventDispatcher` are
 public for integrations whose scheduling or continuation requirements cannot
-use the high-level clients. `ReceiverThread` requests layered replay by default;
+use the high-level clients. `EventReceiver` requests layered replay by default;
 passing `layered_replay=False` selects the single-layer flat contract. Ordinary
 native-scene integrations should use `UsdReceiver(adapter=...)` instead of
 assembling these components.
@@ -463,6 +452,17 @@ was scheduled, not whether the connection succeeded; inspect `connected` and
 rejection/recovery status on subsequent ticks. `cancel_connect()` invalidates
 pending attempts and reports whether they have finished; `disconnect()` also
 closes an established connection. Neither discards the transaction outbox.
+
+A sender's connection thread starts on the first connection request, a
+receiver's on `start()`; callbacks run on that thread. `close(timeout=None)`,
+or leaving a `with` block, stops the thread, which cannot be restarted, and
+returns whether it exited in time (`False` at once from a callback). A sender
+first writes the transactions already queued and the Quit message; closing does
+not wait for acknowledgements, which `flush()` does. Keep a reference while the
+object should run: a collected one closes.
+Either object also takes `notifications=`, a `NotificationQueue` its owner
+drains instead of every callback but `on_token_issued` (combining them raises
+`ValueError`), and offers `snapshot()`, its native status read in one call.
 
 ## Embed a server
 

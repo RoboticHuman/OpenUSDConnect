@@ -4,6 +4,7 @@
 #include "openusdconnect/client/replay_identity.h"
 #include "openusdconnect/client/schema/messages_generated.h"
 
+#include <algorithm>
 #include <cstddef>
 #include <cstdint>
 #include <string_view>
@@ -210,10 +211,27 @@ struct HelloParameters final
 	ReplayPrefixClaim ReplayPrefix;
 };
 
+inline constexpr std::size_t kMaxProducerSessionIdLength = 128;
+
+// Counts code points, as the server does.
+[[nodiscard]] inline bool IsValidProducerSessionId(std::string_view session_id) noexcept
+{
+	const auto code_points =
+		std::count_if(session_id.begin(), session_id.end(),
+					  [](char byte)
+					  {
+						  return (static_cast<unsigned char>(byte) & 0xC0U) != 0x80U;
+					  });
+	return code_points != 0 && static_cast<std::size_t>(code_points) <= kMaxProducerSessionIdLength;
+}
+
+// The server requires an emitter's client and producer session ids. Every other
+// identity field is optional, and the server decodes empty strings as absent.
 [[nodiscard]] inline bool IsValidHelloParameters(const HelloParameters& parameters) noexcept
 {
-	return (parameters.Role == "receiver" || parameters.Role == "emitter") &&
-		   parameters.SyncFrom >= 0 && !parameters.ClientId.empty() && !parameters.Origin.empty();
+	const bool identified_emitter = parameters.Role == "emitter" && !parameters.ClientId.empty() &&
+									IsValidProducerSessionId(parameters.ProducerSessionId);
+	return (parameters.Role == "receiver" || identified_emitter) && parameters.SyncFrom >= 0;
 }
 
 [[nodiscard]] inline flatbuffers::Offset<flatbuffers::String>
@@ -255,22 +273,20 @@ BuildHelloFrame(flatbuffers::FlatBufferBuilder& builder, const HelloParameters& 
 	{
 		return ProtocolResult::InvalidArgument;
 	}
-	const auto replay_server_instance = parameters.ReplayPrefix
-		? CreateString(builder, parameters.ReplayPrefix->ServerInstance())
-		: flatbuffers::Offset<flatbuffers::String>();
+	const auto replay_server_instance =
+		parameters.ReplayPrefix ? CreateString(builder, parameters.ReplayPrefix->ServerInstance())
+								: flatbuffers::Offset<flatbuffers::String>();
 	const std::optional<std::uint64_t> claimed_epoch =
 		parameters.ReplayPrefix ? parameters.ReplayPrefix->Epoch() : std::nullopt;
-	const auto replay_epoch = claimed_epoch
-		? flatbuffers::Optional<std::uint64_t>(*claimed_epoch)
-		: flatbuffers::nullopt;
+	const auto replay_epoch =
+		claimed_epoch ? flatbuffers::Optional<std::uint64_t>(*claimed_epoch) : flatbuffers::nullopt;
 
 	const auto hello = OpenUSDConnect::CreateHello(
 		builder, CreateString(builder, parameters.Role), kProtocolVersion, parameters.SyncFrom,
 		CreateString(builder, parameters.ClientId), CreateString(builder, parameters.Origin),
 		CreateString(builder, parameters.Department), CreateString(builder, parameters.Token),
 		parameters.LayeredReplay, parameters.LayerMode,
-		CreateString(builder, parameters.ProducerSessionId), replay_server_instance,
-		replay_epoch);
+		CreateString(builder, parameters.ProducerSessionId), replay_server_instance, replay_epoch);
 	const auto envelope = OpenUSDConnect::CreateEnvelope(builder, OpenUSDConnect::Payload::Hello,
 														 hello.Union(), kSchemaVersion);
 	return FinishEnvelopeFrame(builder, envelope, max_frame_size);

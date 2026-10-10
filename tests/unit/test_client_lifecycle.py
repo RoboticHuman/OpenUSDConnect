@@ -1,10 +1,11 @@
 """Host-facing lifecycle guarantees shared by the high-level clients."""
 
 import threading
+import uuid
 from types import SimpleNamespace
 
 import pytest
-from pxr import Usd
+from pxr import Sdf, Usd, UsdGeom
 
 from openusdconnect import (
     ManagedClient,
@@ -19,7 +20,59 @@ from openusdconnect import (
 )
 from openusdconnect import sender as sender_module
 from openusdconnect.client_observer import StageMetadata
-from tests.helpers import RecordingObserver, force_handshake
+from openusdconnect.protocol_constants import LayerMode
+from tests.helpers import (
+    RecordingObserver,
+    connect_client,
+    embedded_server,
+    recorded_hellos,
+    wait_until,
+)
+
+
+@pytest.fixture(scope="module")
+def managed_server():
+    with embedded_server() as runtime:
+        yield runtime
+
+
+@pytest.fixture(scope="module")
+def shared_server(tmp_path_factory):
+    root = tmp_path_factory.mktemp("shared") / "root.usda"
+    Sdf.Layer.CreateNew(str(root)).Save()
+    with embedded_server(base_usd_path=str(root), layer_mode=LayerMode.SHARED_STAGE) as runtime:
+        yield runtime
+
+
+@pytest.fixture(scope="module")
+def token_servers(tmp_path_factory):
+    """Servers by client kind that issue tokens and author an up axis."""
+    root = tmp_path_factory.mktemp("tokens") / "root.usda"
+    stage = Usd.Stage.CreateNew(str(root))
+    UsdGeom.SetStageUpAxis(stage, UsdGeom.Tokens.z)
+    stage.GetRootLayer().Save()
+    with (
+        embedded_server(base_usd_path=str(root), require_token=True) as managed,
+        embedded_server(
+            base_usd_path=str(root), require_token=True, layer_mode=LayerMode.SHARED_STAGE,
+        ) as shared,
+    ):
+        yield {
+            ManagedClient: managed,
+            SharedStageClient: shared,
+            UsdReceiver: managed,
+            UsdPublisher: managed,
+        }
+
+
+@pytest.fixture
+def ports(managed_server, shared_server):
+    """Live server ports by client kind; publishers connect nowhere in these tests."""
+    return {
+        ManagedClient: managed_server.server_address[1],
+        SharedStageClient: shared_server.server_address[1],
+        UsdPublisher: 1,
+    }
 
 
 def test_wait_until_ready_returns_false_only_when_startup_expires():
@@ -54,17 +107,6 @@ def test_blocked_states_raise_instead_of_timing_out(phase, auth_rejected, failur
         _client_lifecycle.raise_if_blocked(SimpleNamespace(), status)
 
 
-def test_each_phase_outranks_the_phases_after_it():
-    flags = [
-        "closed", "recovery_required", "rejected", "parked", "replaying", "ready", "connecting",
-    ]
-    for index, flag in enumerate(flags):
-        state = {name: position >= index for position, name in enumerate(flags)}
-        assert _client_lifecycle.compute_phase(**state) is client_types.ClientPhase(flag)
-    offline = _client_lifecycle.compute_phase(**dict.fromkeys(flags, False))
-    assert offline is client_types.ClientPhase.OFFLINE
-
-
 @pytest.mark.parametrize("kind", [ManagedClient, SharedStageClient, UsdReceiver, UsdPublisher])
 def test_every_client_reports_the_same_lifecycle_phases(kind, tmp_path):
     stage = Usd.Stage.CreateNew(str(tmp_path / "scene.usda"))
@@ -93,7 +135,7 @@ def test_waits_raise_when_nothing_will_reconnect():
         publisher.start()
         publisher.disconnect()
         receiver.start()
-        receiver.receiver.join(timeout=5)
+        wait_until(lambda: receiver.receiver.stopped)
         for client in (publisher, receiver):
             assert client.status.phase is client_types.ClientPhase.OFFLINE
             with pytest.raises(ConnectionError, match="offline"):
@@ -103,60 +145,6 @@ def test_waits_raise_when_nothing_will_reconnect():
     finally:
         publisher.close()
         receiver.close()
-
-
-def test_backlog_hold_counts_only_messages_queued_before_the_batch():
-    hold = _client_lifecycle.BacklogHold()
-    hold.freeze(3)
-    hold.drained(2, queued=5)
-    assert hold.holding
-    hold.drained(2, queued=5)
-    assert not hold.holding
-    hold.freeze(4)
-    hold.drained(0, queued=0)
-    assert not hold.holding, "a discarded queue has nothing left ahead of the batch"
-
-
-def test_queued_notifications_run_on_update_thread_and_bound_each_drain():
-    notifications = _client_lifecycle.ClientCallbackQueue()
-    received = []
-
-    def observe(value):
-        received.append((value, threading.get_ident()))
-        if value == "first":
-            callback("next-tick")
-
-    callback = notifications.wrap(observe)
-    worker = threading.Thread(target=lambda: callback("first"))
-    worker.start()
-    worker.join(timeout=1)
-    assert not worker.is_alive()
-    assert received == []
-    notifications.drain()
-    assert received == [("first", threading.get_ident())]
-    notifications.drain()
-    assert received == [("first", threading.get_ident()), ("next-tick", threading.get_ident())]
-    callback("queued")
-    notifications.close()
-    callback("late")
-    notifications.drain()
-    assert [value for value, _thread in received] == ["first", "next-tick", "queued"]
-
-
-def test_queued_notification_failure_propagates_and_keeps_later_notifications():
-    notifications = _client_lifecycle.ClientCallbackQueue()
-    received = []
-
-    def fail(value):
-        raise RuntimeError("observer failed")
-
-    notifications.wrap(fail)(None)
-    notifications.wrap(received.append)("next")
-    with pytest.raises(RuntimeError, match="observer failed"):
-        notifications.drain()
-    assert received == []
-    notifications.drain()
-    assert received == ["next"]
 
 
 def test_public_status_types_keep_compatibility_identity():
@@ -213,69 +201,57 @@ def test_credential_keeps_a_token_issued_while_storage_loads(monkeypatch):
     assert credential.current() == "issued-during-load"
 
 
-def test_sender_takes_its_token_from_the_provider_on_every_attempt(monkeypatch):
-    tokens = iter(["first", "second"])
-    presented = []
-
-    def refuse(*args, **kwargs):
-        presented.append(sender.token)
-        raise OSError("refused")
-
-    monkeypatch.setattr(sender_module.socket, "create_connection", refuse)
-    sender = sender_module.EventSender(
-        "localhost", 1, client_id="token-attempts", token="stale",
-        token_provider=lambda: next(tokens),
-    )
-    assert not sender.connect(timeout=0.5)
-    assert not sender.connect(timeout=0.5)
-    assert presented == ["first", "second"]
-
-
 @pytest.mark.parametrize("failure", [None, "persistence", "observer"])
 def test_issued_token_is_persisted_before_notifying_and_used_by_both_roles(
-    failure, tmp_path, monkeypatch,
+    failure, tmp_path, monkeypatch, token_servers,
 ):
     calls = []
 
     def record(name, token):
-        calls.append((name, token))
+        calls.append((name, token, threading.get_ident()))
         if failure == name:
             raise RuntimeError(f"injected {name} failure")
 
+    monkeypatch.setattr(_client_utils, "load_token", lambda host, port: None)
     monkeypatch.setattr(
         _client_utils, "save_token", lambda host, port, token: record("persistence", token),
     )
-    stage = Usd.Stage.CreateNew(str(tmp_path / "scene.usda"))
-    observer = RecordingObserver(on_call=lambda name, token: record("observer", token))
+    hellos = recorded_hellos(monkeypatch)
+    observer = RecordingObserver(
+        on_call=lambda name, token: name == "token_issued" and record("observer", token),
+    )
     client = ManagedClient(
-        stage, app_name="shared-credentials", token="configured", persist_token=True,
-        observer=observer,
+        Usd.Stage.CreateNew(str(tmp_path / "scene.usda")), app_name="shared-credentials",
+        client_id=uuid.uuid4().hex, port=token_servers[ManagedClient].server_address[1],
+        persist_token=True, observer=observer,
     )
     try:
-        callback = client._sender._on_token_issued
-        if failure == "persistence":
-            with pytest.raises(RuntimeError, match="injected persistence failure"):
-                callback("replacement")
+        client.start()
+        wait_until(lambda: calls)
+        # The connection thread adopted and persisted the token; the host hears it in update().
+        [(name, issued, thread)] = calls
+        assert name == "persistence" and thread != threading.get_ident()
+        if failure == "observer":
+            with pytest.raises(RuntimeError, match="injected observer failure"):
+                client.update()
+            # Later notifications wait for the next call.
+            assert [call[0] for call in observer.calls] == ["token_issued"]
         else:
-            callback("replacement")
-        # The host observer is queued; the token is adopted and persisted first.
-        assert calls == [("persistence", "replacement")]
-        for endpoint in (client._sender, client._receiver):
-            assert endpoint._token_provider() == "replacement"
-
-        if failure != "persistence":
-            if failure == "observer":
-                with pytest.raises(RuntimeError, match="injected observer failure"):
-                    client._callbacks.drain()
-            else:
-                client._callbacks.drain()
-            assert calls[-1] == ("observer", "replacement")
+            client.update()
+        assert calls[-1] == ("observer", issued, threading.get_ident())
+        assert client.wait_until_ready(5)
+        client.update()
+        # Both roles' handshakes carried the same metadata.
+        assert [call[0] for call in observer.calls].count("stage_metadata") == 1
+        assert [(hello["role"], hello.get("token")) for hello in hellos] == [
+            ("receiver", None), ("emitter", issued),
+        ]
     finally:
         client.close()
 
 
 @pytest.mark.parametrize("kind", [ManagedClient, SharedStageClient, UsdPublisher])
-def test_disconnected_update_does_no_token_io(kind, tmp_path, monkeypatch):
+def test_disconnected_update_does_no_token_io(kind, tmp_path, monkeypatch, ports):
     reads = []
     monkeypatch.setattr(_client_utils, "load_token", lambda host, port: reads.append(1))
     requests = []
@@ -284,9 +260,12 @@ def test_disconnected_update_does_no_token_io(kind, tmp_path, monkeypatch):
         lambda self, timeout=2.0: requests.append(True) or True,
     )
     stage = Usd.Stage.CreateNew(str(tmp_path / "scene.usda"))
-    client = kind(stage, app_name="token-io", port=1, persist_token=True)
+    client = kind(stage, app_name="token-io", port=ports[kind], persist_token=True)
     try:
-        force_handshake(client)
+        if kind is UsdPublisher:
+            client.start()
+        else:
+            connect_client(client)
         reads.clear()
         for _ in range(20):
             client.update()
@@ -298,17 +277,20 @@ def test_disconnected_update_does_no_token_io(kind, tmp_path, monkeypatch):
 
 @pytest.mark.parametrize("kind", [ManagedClient, SharedStageClient])
 def test_update_schedules_handshake_without_waiting_or_touching_stage_in_worker(
-    kind, tmp_path, monkeypatch
+    kind, tmp_path, monkeypatch, ports
 ):
     stage = Usd.Stage.CreateNew(str(tmp_path / "scene.usda"))
-    client = kind(stage, app_name="background-connect-test", persist_token=False)
+    client = kind(
+        stage, app_name="background-connect-test", port=ports[kind], persist_token=False,
+    )
     entered = threading.Event()
     release = threading.Event()
     finished = threading.Event()
     owner = threading.get_ident()
     threads = []
 
-    def connect(*args, **kwargs):
+    def provide():
+        # The handshake waits here, after the connection opened.
         threads.append(threading.get_ident())
         entered.set()
         try:
@@ -317,9 +299,9 @@ def test_update_schedules_handshake_without_waiting_or_touching_stage_in_worker(
         finally:
             finished.set()
 
-    monkeypatch.setattr(sender_module.socket, "create_connection", connect)
-    force_handshake(client)
     try:
+        connect_client(client)
+        monkeypatch.setattr(client._sender, "_token_provider", provide)
         result = client.update()
         assert entered.wait(2)
         assert not finished.is_set()
@@ -336,10 +318,8 @@ def test_update_schedules_handshake_without_waiting_or_touching_stage_in_worker(
 
 
 @pytest.mark.parametrize("kind", [ManagedClient, UsdPublisher])
-def test_flush_shares_timeout_between_reconnect_and_acknowledgement(kind, monkeypatch):
+def test_flush_shares_timeout_between_reconnect_and_acknowledgement(kind, monkeypatch, ports):
     clock = [10.0]
-    monkeypatch.setattr(_client_lifecycle.time, "monotonic", lambda: clock[0])
-    client = kind(Usd.Stage.CreateInMemory(), app_name="flush-budget", persist_token=False)
     calls = []
 
     def connect(timeout=None):
@@ -351,15 +331,19 @@ def test_flush_shares_timeout_between_reconnect_and_acknowledgement(kind, monkey
         calls.append(("flush", timeout))
         return True
 
-    monkeypatch.setattr(client._sender, "connect", connect)
-    monkeypatch.setattr(client._sender, "flush", flush)
-    client._transform_coalescing = SimpleNamespace(buffering=True, force=lambda emitter: [])
-    if isinstance(client, ManagedClient):
-        client._receiver.connected = True
-        client._receiver._synchronized_event.set()
-    else:
-        monkeypatch.setattr(client, "_is_synchronized", lambda: True)
+    client = kind(
+        Usd.Stage.CreateInMemory(), app_name="flush-budget", port=ports[kind],
+        persist_token=False,
+    )
     try:
+        if isinstance(client, ManagedClient):
+            connect_client(client)
+        else:
+            monkeypatch.setattr(client, "_is_synchronized", lambda: True)
+        monkeypatch.setattr(_client_lifecycle.time, "monotonic", lambda: clock[0])
+        monkeypatch.setattr(client._sender, "connect", connect)
+        monkeypatch.setattr(client._sender, "flush", flush)
+        client._transform_coalescing = SimpleNamespace(buffering=True, force=lambda emitter: [])
         assert client.flush(timeout=1.0)
         assert calls == [("connect", 1.0), ("flush", 0.25)]
     finally:
@@ -389,23 +373,25 @@ def test_can_author_combines_readiness_role_and_edit_target(
 
 
 @pytest.mark.parametrize("kind", [ManagedClient, SharedStageClient, UsdReceiver, UsdPublisher])
-def test_close_delivers_notifications_queued_by_network_threads(kind, tmp_path):
+def test_close_delivers_notifications_queued_by_network_threads(kind, tmp_path, token_servers):
     observer = RecordingObserver()
     stage = Usd.Stage.CreateNew(str(tmp_path / "scene.usda"))
-    client = kind(stage, app_name="notifications", persist_token=False, observer=observer)
-    endpoint = client._sender if kind is UsdPublisher else client._receiver
+    client = kind(
+        stage, app_name="notifications", client_id=uuid.uuid4().hex,
+        port=token_servers[kind].server_address[1], persist_token=False, observer=observer,
+    )
     try:
-        worker = threading.Thread(target=lambda: (
-            endpoint._on_token_issued("issued"),
-            endpoint._on_stage_metadata({"upAxis": "Y"}),
-        ))
-        worker.start()
-        worker.join(timeout=1)
-        assert observer.calls == []
+        if kind is UsdPublisher:
+            assert client.connect(timeout=5)
+        else:
+            client.start()
+            assert client._receiver.wait_connected(5)
+        token = client._endpoints[0].token
+        assert token and observer.calls == []
     finally:
         client.close()
     # A host that stores tokens itself must receive one issued just before close.
-    assert observer.calls == [
-        ("token_issued", "issued", threading.get_ident()),
-        ("stage_metadata", StageMetadata(up_axis="Y"), threading.get_ident()),
+    assert [call for call in observer.calls if call[0] != "playback_state"] == [
+        ("token_issued", token, threading.get_ident()),
+        ("stage_metadata", StageMetadata(up_axis="Z"), threading.get_ident()),
     ]

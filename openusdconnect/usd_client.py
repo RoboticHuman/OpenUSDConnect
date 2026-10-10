@@ -21,7 +21,7 @@ from .client_types import SyncUpdate
 from .defaults import DEFAULT_HOST, DEFAULT_SYNC_PORT
 from .dispatcher import AssetDependencyRefreshResult, EventDispatcher
 from .emitter import PrimChannel
-from .receiver import ReceiverThread
+from .receiver import EventReceiver
 from .sender import EventSender
 
 
@@ -60,7 +60,7 @@ class UsdReceiver(ClientBase):
         self._stage: Usd.Stage | None = stage
         self._owns_stage_adapter = adapter is None
         destination = adapter or UsdStageAdapter(stage)
-        self._receiver = ReceiverThread(
+        self._receiver = EventReceiver(
             host=host,
             port=port,
             sync_from=1,
@@ -68,16 +68,15 @@ class UsdReceiver(ClientBase):
             client_id=client_id or make_stable_client_id(app_name),
             origin=origin or client_origin(app_name, "recv"),
             layered_replay=True,
+            notifications=self._notifications,
             **self._credential.endpoint_kwargs(),
-            **self._hooks.receiver_callbacks(),
         )
         self._dispatcher = EventDispatcher(
             receiver=self._receiver,
             adapter=destination,
             mirror_stage=None if destination.targets_stage() is stage else stage,
-            on_resync=self._hooks.on_resync,
         )
-        self._dispatcher.on_applied_events = self._hooks.applied_events_for(self._dispatcher)
+        self._observe_dispatcher(self._dispatcher)
 
     @property
     def stage(self) -> Usd.Stage | None:
@@ -89,8 +88,8 @@ class UsdReceiver(ClientBase):
         return self._stage
 
     @property
-    def receiver(self) -> ReceiverThread:
-        """The underlying :class:`ReceiverThread`; a diagnostic handle."""
+    def receiver(self) -> EventReceiver:
+        """The underlying :class:`EventReceiver`; a diagnostic handle."""
         return self._receiver
 
     @property
@@ -166,8 +165,8 @@ class UsdReceiver(ClientBase):
         self._require_open()
         self._dispatcher.acknowledge_native_scene_rebuilt()
 
-    def _is_synchronized(self) -> bool:
-        return self._stage is not None and self._receiver.synchronized
+    def _synchronized(self, replayed: bool) -> bool:
+        return replayed and self._stage is not None
 
     def _is_parked(self) -> bool:
         return self._stage is None
@@ -201,7 +200,6 @@ class UsdPublisher(EmitterClientBase):
         replicated_api_schemas: set[str] | None = None,
         extra_channels: Sequence[PrimChannel] | None = None,
         transform_coalesce_seconds: float = 0.0,
-        background_send: bool = False,
     ):
         app_name = require_app_name(app_name)
         if not isinstance(stage, Usd.Stage):
@@ -223,8 +221,7 @@ class UsdPublisher(EmitterClientBase):
             client_id=client_id or make_stable_client_id(app_name),
             origin=origin or client_origin(app_name, "emit"),
             department=department,
-            on_stage_metadata=self._hooks.on_stage_metadata,
-            background_send=background_send,
+            notifications=self._notifications,
             **self._credential.endpoint_kwargs(),
         )
 
@@ -253,9 +250,6 @@ class UsdPublisher(EmitterClientBase):
         elif not self._paused:
             self._sender.request_connect()
         return self._progress(submitted=sent)
-
-    def _is_synchronized(self) -> bool:
-        return self._sender.connected
 
     def _connect_sender(self, timeout: float | None = None) -> bool:
         self._paused = False

@@ -64,7 +64,8 @@ Return values and defaults:
 Behavior:
 
 - Token, metadata, and playback notifications run during `update()` or
-  `close()` on the calling thread instead of on network threads.
+  `close()` on the calling thread instead of on network threads; stage
+  metadata is delivered when it changes.
 - Stage edits made in `on_resync` are no longer published, matching
   `on_applied`.
 - `UsdPublisher.update()` raises before `start()`. While disconnected it
@@ -78,8 +79,17 @@ Behavior:
   like `UsdPublisher.flush()`, instead of returning `False`.
 - `UsdReceiver.status` reports `CONNECTING` instead of `READY` while it
   reconnects, like the other clients.
+- `ReceiverThread` is `EventReceiver` and no longer a `threading.Thread`:
+  call `close(timeout)` instead of `stop()` and `join()`, and read `running`
+  instead of `is_alive()`. On it and on `EventSender`, settings and state are
+  read-only properties (`token`, and the receiver's `reconnect`, stay
+  assignable) and `sock` is gone; read `connected`. Both close on leaving a
+  `with` block, and a collected one closes too, so keep the handle while it
+  should run. `EventSender.close()` writes the transactions already queued
+  and the Quit message, and does not wait for acknowledgements; call
+  `flush()` first for those.
 
-The low-level `EventSender`, `ReceiverThread`, and `EventDispatcher` keep their
+The low-level `EventSender`, `EventReceiver`, and `EventDispatcher` keep their
 callable arguments and properties.
 
 ### Added
@@ -98,12 +108,12 @@ callable arguments and properties.
   `no_pending_recovery_stage`).
 - `claim_playback()` and `send_playback_control()` on `SharedStageClient` and
   `UsdPublisher`.
-- Opt-in `background_send=True` moves transaction writes to a worker thread.
-  The worker needs the GIL, adding about 5 ms per write while the host's main
-  thread runs Python.
-- `token_provider=` on `EventSender` and `ReceiverThread` supplies the token
+- `token_provider=` on `EventSender` and `EventReceiver` supplies the token
   for each connection attempt.
-- `EventDispatcher.drained_message_count`, `ReceiverThread.stopped`, and
+- `notifications=` on `EventSender` and `EventReceiver` pushes their
+  notifications into a queue the owner drains, and `snapshot()` returns the
+  native status in one call.
+- `EventDispatcher.drained_message_count`, `EventReceiver.stopped`, and
   `NoticeEmitter.has_local_changes`.
 - Receiver replay identity and optional post-commit transaction checkpoints.
 
@@ -111,12 +121,30 @@ callable arguments and properties.
 
 - `EventDispatcher` starts its cursor at `receiver.sync_from - 1`, so
   integrations no longer seed `last_seq` for continuation.
+- `EventSender` and `EventReceiver` run their connections on native threads
+  in the client core: transaction writes leave the calling thread and need no
+  GIL, callbacks and the token provider run on the connection thread, and
+  `close()` interrupts a pending connect or read at once.
+- `EventSender.connect()` waits for an attempt already in flight before
+  making its own; a token provider that raises is logged and fails that
+  attempt instead of raising. While recovery is required, `rejection_reason`
+  names the failure.
+- Building the native extension fetches the pinned FlatBuffers headers on the
+  first configure, which needs network access unless
+  `FETCHCONTENT_SOURCE_DIR_FLATBUFFERS` names a local copy.
+- The Unreal plugin runs on the native client engine: its receiver and emitter
+  threads drive the client core's `ReceiverEndpoint` and `ProducerEndpoint`,
+  built as the plugin's `OpenUSDConnectClientCore` module. Auth tokens stay in
+  the user's Unreal config under the same keys.
 
 ### Fixed
 
 - A receiver continuing from a live-open snapshot replayed the full history
   over it when the integration did not seed the dispatcher cursor.
 - MCP writes were confirmed before the mirror applied them.
+- `EventSender.send_events()` returns `False` for a transaction above the
+  16 MiB frame limit instead of queueing one that made the server close the
+  connection on every replay.
 - Replay completion markers were lost when a resync reset applied progress.
 - The emitter dropped property edits absorbed by a prim resync.
 - Bidirectional clients read the token file on every `update()` while their

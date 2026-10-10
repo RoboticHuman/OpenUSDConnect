@@ -7,8 +7,9 @@ import pytest
 from integrations.mcp import session as session_mod
 from integrations.mcp.config import McpConfig
 from integrations.mcp.errors import ToolError
-from openusdconnect import usd_client
+from openusdconnect import _client_backend, usd_client
 from openusdconnect.checkpoints import MirrorCheckpoint
+from openusdconnect.client_observer import PlaybackState
 from openusdconnect.client_types import SyncUpdate
 
 
@@ -35,6 +36,13 @@ def _applied(count: int) -> SyncUpdate:
     return SyncUpdate(applied_events=count, submitted_events=0)
 
 
+def _deliver_playback(session, playing, time, rate, leader_client_id):
+    """Deliver a playback state to the mirror's observer as update() does."""
+    methods = session.receiver._notification_methods
+    on_playback_state, _convert = methods[_client_backend.PlaybackState]
+    on_playback_state(PlaybackState(playing, time, rate, leader_client_id))
+
+
 def _patch_net(monkeypatch, started, stopped):
     class _FakeReceiver:
         synchronized = True
@@ -46,25 +54,23 @@ def _patch_net(monkeypatch, started, stopped):
         server_instance = "test-server"
         replay_epoch = 0
         stopped = False
+        rejection = None
+        generation = 0
 
         def __init__(self, **kwargs):
             self.options = kwargs
             self.token = kwargs["token"]
             self.sync_from = kwargs["sync_from"]
-            self.joined = False
 
         def start(self):
             started.append(self)
 
-        def stop(self):
+        def snapshot(self):
+            return self
+
+        def close(self, timeout=None):
             stopped.append(self)
-
-        def is_alive(self):
-            return not self.joined
-
-        def join(self, timeout=None):
-            assert self in stopped
-            self.joined = True
+            return True
 
         def drain_queue(self, max_messages=None):
             return []
@@ -73,7 +79,7 @@ def _patch_net(monkeypatch, started, stopped):
             return False
 
     monkeypatch.setattr(session_mod, "EventSender", _FakeSender)
-    monkeypatch.setattr(usd_client, "ReceiverThread", _FakeReceiver)
+    monkeypatch.setattr(usd_client, "EventReceiver", _FakeReceiver)
     monkeypatch.setattr(session_mod.token_client, "load_token", lambda host, port: None)
 
 
@@ -94,7 +100,6 @@ def test_reconnect_stops_previous_receiver(monkeypatch):
 
     session.connect()
     assert first.receiver in stopped
-    assert first.receiver.joined
     assert session.receiver is not first  # replaced by a fresh one
     assert session.receiver.receiver in started
     session.disconnect()
@@ -122,14 +127,13 @@ def test_playback_status_reflects_broadcast(monkeypatch):
 
     assert session.playback_status()["observed"] is False  # nothing broadcast yet
 
-    notify = session.receiver.receiver.options["on_playback_state"]
-    notify({"playing": True, "time": 12.0, "rate": 2.0, "leader_client_id": "mcp-x"})
+    _deliver_playback(session, True, 12.0, 2.0, "mcp-x")
     st = session.playback_status()
     assert st["observed"] and st["playing"] is True
     assert st["time"] == 12.0 and st["rate"] == 2.0
     assert st["has_leader"] is True and st["is_leader"] is True
 
-    notify({"playing": False, "time": 0.0, "rate": 1.0, "leader_client_id": "someone-else"})
+    _deliver_playback(session, False, 0.0, 1.0, "someone-else")
     st2 = session.playback_status()
     assert st2["is_leader"] is False
     assert st2["leader_client_id"] == "someone-else"
@@ -145,7 +149,6 @@ def test_disconnect_stops_receiver(monkeypatch):
     receiver = session.receiver
     session.disconnect()
     assert receiver.receiver in stopped
-    assert receiver.receiver.joined
     assert session.receiver is None
     assert session.sender is None
     assert session.mirror_stage is None
@@ -390,9 +393,7 @@ def test_mirror_preserves_identity_token_and_callbacks(monkeypatch, saved_token)
         assert options["client_id"] == "mcp-identity"
         assert options["origin"] == f"{session._origin_base}-recv"
         assert options["layered_replay"] is True
-        options["on_playback_state"](
-            {"playing": True, "time": 1.0, "rate": 1.0, "leader_client_id": ""}
-        )
+        _deliver_playback(session, True, 1.0, 1.0, "")
         assert session.playback_status()["playing"] is True
         dispatcher = session.receiver.dispatcher
         dispatcher.last_seq = 3
@@ -436,13 +437,12 @@ def test_failed_mirror_start_closes_partial_connection(monkeypatch):
     with pytest.raises(RuntimeError, match="start failed"):
         session.connect()
     assert len(stopped) == 1
-    assert stopped[0].joined
     assert session.sender is None
     assert session.receiver is None
     assert session.mirror_stage is None
 
 
-def test_failed_send_closes_and_joins_mirror(monkeypatch):
+def test_failed_send_closes_the_mirror(monkeypatch):
     started, stopped = [], []
     _patch_net(monkeypatch, started, stopped)
     session = session_mod.ConnectionSession(McpConfig())
@@ -454,7 +454,6 @@ def test_failed_send_closes_and_joins_mirror(monkeypatch):
     assert error.value.code == "disconnected"
     assert not sender.is_connected
     assert stopped == started
-    assert stopped[0].joined
 
 
 def test_no_mirror_send_result_is_unchanged(monkeypatch):

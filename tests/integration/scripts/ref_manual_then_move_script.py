@@ -66,7 +66,7 @@ def main():
         K_SET_XFORM_TRS,
         MSG_EVENT,
     )
-    from openusdconnect.receiver import ReceiverThread
+    from openusdconnect.receiver import EventReceiver
     from openusdconnect.transport import send_line
 
     # ==================================================================
@@ -108,7 +108,7 @@ def main():
     # ==================================================================
     print("[ManualThenMove] Starting receiver...")
     adapter = BlenderAdapter()
-    receiver = ReceiverThread(host="127.0.0.1", port=port, sync_from=1)
+    receiver = EventReceiver(host="127.0.0.1", port=port, sync_from=1)
     receiver.start()
     time.sleep(1.5)
 
@@ -198,11 +198,7 @@ def main():
 
         adapter.apply_event(ev)
 
-    receiver.stop()
-    try:
-        receiver.join(timeout=2.0)
-    except Exception:
-        pass
+    receiver.close(timeout=2.0)
 
     # ==================================================================
     # Check for duplicates

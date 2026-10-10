@@ -12,25 +12,68 @@ endif()
 
 add_subdirectory(../../native/client_core client_core)
 
-set(OPENUSDCONNECT_FLATBUFFERS_INCLUDE_DIR
-    "${CMAKE_CURRENT_SOURCE_DIR}/../../integrations/unreal/OpenUSDConnect/Source/OpenUSDConnectPXR/ThirdParty/flatbuffers/include"
-    CACHE PATH "Directory containing the pinned FlatBuffers C++ headers"
-)
-if(NOT EXISTS "${OPENUSDCONNECT_FLATBUFFERS_INCLUDE_DIR}/flatbuffers/flatbuffers.h")
-    message(FATAL_ERROR
-        "FlatBuffers headers are missing. Run "
-        "integrations/unreal/OpenUSDConnect/setup_flatbuffers.py before configuring native tests, "
-        "or set OPENUSDCONNECT_FLATBUFFERS_INCLUDE_DIR."
-    )
-endif()
-
 add_executable(OpenUSDConnectProtocolTests test_protocol_codec.cpp)
 target_link_libraries(OpenUSDConnectProtocolTests PRIVATE OpenUSDConnect::ClientProtocol)
-target_include_directories(OpenUSDConnectProtocolTests PRIVATE
-    "${OPENUSDCONNECT_FLATBUFFERS_INCLUDE_DIR}"
-)
 add_test(NAME OpenUSDConnectProtocolTests COMMAND OpenUSDConnectProtocolTests)
 
-add_executable(OpenUSDConnectReplayIdentityTests test_replay_identity.cpp)
-target_link_libraries(OpenUSDConnectReplayIdentityTests PRIVATE OpenUSDConnect::ClientCore)
-add_test(NAME OpenUSDConnectReplayIdentityTests COMMAND OpenUSDConnectReplayIdentityTests)
+add_executable(OpenUSDConnectClientEngineTests test_client_engine.cpp)
+target_link_libraries(OpenUSDConnectClientEngineTests PRIVATE OpenUSDConnect::ClientProtocol)
+add_test(NAME OpenUSDConnectClientEngineTests COMMAND OpenUSDConnectClientEngineTests)
+
+add_executable(OpenUSDConnectReceiverEndpointTests test_receiver_endpoint.cpp)
+target_link_libraries(OpenUSDConnectReceiverEndpointTests PRIVATE OpenUSDConnect::ClientEngine)
+if(MSVC)
+    target_compile_options(OpenUSDConnectReceiverEndpointTests PRIVATE /W4 /permissive-)
+else()
+    target_compile_options(OpenUSDConnectReceiverEndpointTests PRIVATE -Wall -Wextra -Wpedantic)
+endif()
+add_test(NAME OpenUSDConnectReceiverEndpointTests COMMAND OpenUSDConnectReceiverEndpointTests)
+
+find_package(Threads REQUIRED)
+add_executable(OpenUSDConnectProducerEndpointTests test_producer_endpoint.cpp)
+target_link_libraries(OpenUSDConnectProducerEndpointTests
+    PRIVATE OpenUSDConnect::ClientEngine Threads::Threads
+)
+if(MSVC)
+    target_compile_options(OpenUSDConnectProducerEndpointTests PRIVATE /W4 /permissive-)
+else()
+    target_compile_options(OpenUSDConnectProducerEndpointTests PRIVATE -Wall -Wextra -Wpedantic)
+endif()
+add_test(NAME OpenUSDConnectProducerEndpointTests COMMAND OpenUSDConnectProducerEndpointTests)
+
+add_executable(OpenUSDConnectThreadedReceiverDriverTests test_threaded_receiver_driver.cpp)
+target_link_libraries(OpenUSDConnectThreadedReceiverDriverTests
+    PRIVATE OpenUSDConnect::ClientDriver OpenUSDConnect::ClientDriverTesting
+)
+if(MSVC)
+    target_compile_options(OpenUSDConnectThreadedReceiverDriverTests PRIVATE /W4 /permissive-)
+else()
+    target_compile_options(OpenUSDConnectThreadedReceiverDriverTests PRIVATE -Wall -Wextra -Wpedantic)
+endif()
+add_test(NAME OpenUSDConnectThreadedReceiverDriverTests
+    COMMAND OpenUSDConnectThreadedReceiverDriverTests
+)
+
+add_executable(OpenUSDConnectThreadedProducerDriverTests test_threaded_producer_driver.cpp)
+target_link_libraries(OpenUSDConnectThreadedProducerDriverTests
+    PRIVATE OpenUSDConnect::ClientDriver OpenUSDConnect::ClientDriverTesting
+)
+if(MSVC)
+    target_compile_options(OpenUSDConnectThreadedProducerDriverTests PRIVATE /W4 /permissive-)
+else()
+    target_compile_options(OpenUSDConnectThreadedProducerDriverTests PRIVATE -Wall -Wextra -Wpedantic)
+endif()
+add_test(NAME OpenUSDConnectThreadedProducerDriverTests
+    COMMAND OpenUSDConnectThreadedProducerDriverTests
+)
+
+add_executable(OpenUSDConnectTcpSocketTests test_tcp_socket.cpp)
+target_link_libraries(OpenUSDConnectTcpSocketTests
+    PRIVATE OpenUSDConnect::ClientDriver $<$<PLATFORM_ID:Windows>:ws2_32>
+)
+if(MSVC)
+    target_compile_options(OpenUSDConnectTcpSocketTests PRIVATE /W4 /permissive-)
+else()
+    target_compile_options(OpenUSDConnectTcpSocketTests PRIVATE -Wall -Wextra -Wpedantic)
+endif()
+add_test(NAME OpenUSDConnectTcpSocketTests COMMAND OpenUSDConnectTcpSocketTests)

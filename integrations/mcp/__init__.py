@@ -6,7 +6,7 @@ and UsdShade.ConnectableAPI shader networks (UsdPreviewSurface + MaterialX))
 and stream them to the sync server, which fans them out to every connected DCC.
 
 The server is a network client built on the core library (``EventSender`` +
-``ReceiverThread`` + ``EventDispatcher`` + ``UsdStageAdapter``), the same shape
+``EventReceiver`` + ``EventDispatcher`` + ``UsdStageAdapter``), the same shape
 as the ``usdview`` integration. It introduces no protocol changes.
 
 Launch with ``uv run python -m integrations.mcp`` (stdio transport).

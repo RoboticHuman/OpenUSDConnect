@@ -143,7 +143,7 @@ def run_dance(args: argparse.Namespace) -> int:
     print(f"sending setup events ({args.instances} instances)...")
     if not sender.send_events(setup_events(asset, args.instances)):
         print("setup send failed")
-        sender.disconnect()
+        sender.close()
         return 1
     print("setup complete.")
 
@@ -173,7 +173,8 @@ def run_dance(args: argparse.Namespace) -> int:
     except KeyboardInterrupt:
         print("\nstopping.")
     finally:
-        sender.disconnect()
+        sender.flush(timeout=5.0)
+        sender.close()
     return 0
 
 

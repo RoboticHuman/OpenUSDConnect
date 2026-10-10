@@ -1129,7 +1129,7 @@ def test_blender_emitter_releases_batch_only_after_send_succeeds(monkeypatch):
     emitter = MagicMock()
     emitter.prepare_events_for_send.return_value = events
     sender = MagicMock()
-    sender.sock = object()
+    sender.connected = True
     sender.send_events.side_effect = [False, True]
     monkeypatch.setattr(capture._state, "notice_emitter", emitter)
     monkeypatch.setattr(capture._state, "sender", sender)
@@ -1137,7 +1137,7 @@ def test_blender_emitter_releases_batch_only_after_send_succeeds(monkeypatch):
     capture._try_send_dirty_events()
     emitter.mark_prepared_events_sent.assert_not_called()
 
-    sender.sock = object()
+    sender.connected = True
     capture._try_send_dirty_events()
 
     assert sender.send_events.call_count == 2
@@ -1317,7 +1317,7 @@ def test_blender_connect_reuses_sender_with_unacknowledged_outbox(monkeypatch):
     from integrations.blender import capture
 
     sender = MagicMock()
-    sender.sock = None
+    sender.connected = False
     sender.host = "127.0.0.1"
     sender.port = 7200
     sender.department = "animation"
@@ -1448,18 +1448,6 @@ def test_receiver_discards_retained_replay_state(monkeypatch):
     assert receiver_addon._pending_import_seed_paths == set()
     assert receiver_addon._pending_object_baseline_paths == set()
     assert receiver_addon._pending_shader_baseline_paths == set()
-
-
-def test_receiver_thread_cleanup_tolerates_unstarted_thread():
-    from integrations.blender import receiver_addon
-
-    receiver = MagicMock()
-    receiver.join.side_effect = RuntimeError("cannot join thread before it is started")
-
-    receiver_addon._stop_receiver_thread(receiver)
-
-    receiver.stop.assert_called_once_with()
-    receiver.join.assert_called_once_with(timeout=2.0)
 
 
 def test_receiver_sequence_persistence_tolerates_released_scene():

@@ -1,0 +1,154 @@
+#include "driver_bindings.h"
+
+#include "openusdconnect/client/driver/socket.h"
+#include "openusdconnect/client/driver/threaded_receiver_driver.h"
+#include "openusdconnect/client/engine/receiver_endpoint.h"
+
+#include <nanobind/nanobind.h>
+#include <nanobind/stl/optional.h>
+#include <nanobind/stl/shared_ptr.h>
+#include <nanobind/stl/string.h>
+
+#include <cstddef>
+#include <cstdint>
+#include <memory>
+#include <new>
+#include <optional>
+#include <utility>
+#include <vector>
+
+namespace nb = nanobind;
+using namespace nb::literals;
+using namespace openusdconnect::client;
+using openusdconnect::python::DurationProperty;
+using openusdconnect::python::Timeout;
+
+namespace
+{
+
+using PythonReceiverDriver = openusdconnect::python::PythonDriver<ThreadedReceiverDriver>;
+
+[[nodiscard]] nb::list ToPythonBytes(const std::vector<std::vector<std::uint8_t>>& frames)
+{
+	nb::list result;
+	for (const std::vector<std::uint8_t>& frame : frames)
+	{
+		result.append(nb::bytes(frame.data(), frame.size()));
+	}
+	return result;
+}
+
+void BindEndpoint(nb::module_& module)
+{
+	nb::class_<ReceiverConfig> config_class(module, "ReceiverConfig");
+	config_class.def(nb::init<>())
+		.def_rw("host", &ReceiverConfig::Host)
+		.def_rw("port", &ReceiverConfig::Port)
+		.def_rw("client_id", &ReceiverConfig::ClientId)
+		.def_rw("origin", &ReceiverConfig::Origin)
+		.def_rw("department", &ReceiverConfig::Department)
+		.def_rw("layered_replay", &ReceiverConfig::LayeredReplay)
+		.def_rw("layer_mode", &ReceiverConfig::LayerMode)
+		.def_rw("sync_from", &ReceiverConfig::SyncFrom)
+		.def_rw("max_queue", &ReceiverConfig::MaxQueue)
+		.def_rw("max_consecutive_timeouts", &ReceiverConfig::MaxConsecutiveTimeouts)
+		.def_rw("reconnect", &ReceiverConfig::Reconnect);
+	DurationProperty(config_class, "socket_timeout", &ReceiverConfig::SocketTimeout);
+	DurationProperty(config_class, "reconnect_base_delay", &ReceiverConfig::ReconnectBaseDelay);
+	DurationProperty(config_class, "reconnect_max_delay", &ReceiverConfig::ReconnectMaxDelay);
+
+	nb::class_<ReceiverStatus>(module, "ReceiverStatus")
+		.def_ro("connected", &ReceiverStatus::Connected)
+		.def_ro("synchronized", &ReceiverStatus::Synchronized)
+		.def_ro("stopped", &ReceiverStatus::Stopped)
+		.def_ro("replay_head_sequence", &ReceiverStatus::ReplayHeadSequence)
+		.def_ro("replay_epoch", &ReceiverStatus::ReplayEpoch)
+		.def_ro("server_instance", &ReceiverStatus::ServerInstance)
+		.def_ro("layered_replay_active", &ReceiverStatus::LayeredReplayActive)
+		.def_ro("layer_mode_active", &ReceiverStatus::LayerModeActive)
+		.def_ro("rejection", &ReceiverStatus::Rejection)
+		.def_ro("metadata", &ReceiverStatus::Metadata)
+		.def_ro("queued_frames", &ReceiverStatus::QueuedFrames)
+		.def_ro("last_sequence", &ReceiverStatus::LastSequence)
+		.def_ro("last_applied_sequence", &ReceiverStatus::LastAppliedSequence);
+
+	nb::class_<ReceiverEndpoint>(module, "ReceiverEndpoint")
+		.def(
+			"__init__",
+			[](ReceiverEndpoint* endpoint, const ReceiverConfig& config,
+			   NotificationQueue& notifications)
+			{
+				if (!ReceiverEndpoint::IsValidConfiguration(config))
+				{
+					throw nb::value_error("invalid receiver configuration");
+				}
+				new (endpoint) ReceiverEndpoint(config, notifications);
+			},
+			"config"_a, "notifications"_a, nb::keep_alive<1, 3>())
+		.def("status", &ReceiverEndpoint::Status)
+		.def("stop", &ReceiverEndpoint::Stop)
+		.def("set_reconnect", &ReceiverEndpoint::SetReconnect, "enabled"_a)
+		.def(
+			"drain_frames",
+			[](ReceiverEndpoint& endpoint, std::optional<std::size_t> max_frames)
+			{
+				if (max_frames && *max_frames == 0)
+				{
+					throw nb::value_error("max_frames must be non-zero when specified");
+				}
+				return ToPythonBytes(endpoint.DrainFrames(max_frames));
+			},
+			"max_frames"_a = nb::none())
+		.def_prop_ro("generation", &ReceiverEndpoint::Generation)
+		.def("mark_applied_through", &ReceiverEndpoint::MarkAppliedThrough, "generation"_a,
+			 "sequence"_a)
+		.def("reset_applied_progress", &ReceiverEndpoint::ResetAppliedProgress)
+		.def("mark_replay_applied", &ReceiverEndpoint::MarkReplayApplied)
+		.def("request_replay_from", &ReceiverEndpoint::RequestReplayFrom, "sequence"_a)
+		.def("freeze_marker", &ReceiverEndpoint::FreezeMarker)
+		.def("drained_through", &ReceiverEndpoint::DrainedThrough, "marker"_a);
+}
+
+void BindDriver(nb::module_& module)
+{
+	nb::class_<PythonReceiverDriver> cls(module, "ReceiverDriver");
+	cls.def(
+		   "__init__",
+		   [](PythonReceiverDriver* driver, ReceiverEndpoint& endpoint,
+			  NotificationQueue& notifications, std::shared_ptr<SocketFactory> sockets,
+			  nb::object token_provider, nb::object token_issued, nb::object notification_sink,
+			  nb::object log)
+		   {
+			   new (driver)
+				   PythonReceiverDriver("receiver", endpoint, notifications, std::move(sockets),
+										std::move(token_provider), std::move(token_issued),
+										std::move(notification_sink), std::move(log));
+		   },
+		   "endpoint"_a, "notifications"_a, "sockets"_a, nb::kw_only(),
+		   "token_provider"_a = nb::none(), "token_issued"_a = nb::none(),
+		   "notification_sink"_a = nb::none(), "log"_a = nb::none(), nb::keep_alive<1, 2>(),
+		   nb::keep_alive<1, 3>())
+		.def(
+			"wait_connected",
+			[](PythonReceiverDriver& driver, std::optional<double> timeout)
+			{
+				return driver.Get().WaitConnected(Timeout(timeout));
+			},
+			"timeout"_a = nb::none(), nb::call_guard<nb::gil_scoped_release>())
+		.def(
+			"wait_synchronized",
+			[](PythonReceiverDriver& driver, std::optional<double> timeout)
+			{
+				return driver.Get().WaitSynchronized(Timeout(timeout));
+			},
+			"timeout"_a = nb::none(), nb::call_guard<nb::gil_scoped_release>());
+	openusdconnect::python::BindThreadedDriver(cls);
+}
+
+} // namespace
+
+void BindReceiver(nb::module_& module)
+{
+	BindEndpoint(module);
+	BindDriver(module);
+}

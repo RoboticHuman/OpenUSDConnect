@@ -102,7 +102,7 @@ def main(argv: list[str] | None = None):
                 sys.exit(1)
             print(f"Sent {msg.get('type', '?')} message")
     finally:
-        sender.disconnect()
+        sender.close()
 
 
 if __name__ == "__main__":

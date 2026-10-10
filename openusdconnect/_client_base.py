@@ -8,43 +8,88 @@ capture through a ``NoticeEmitter`` with optional transform coalescing.
 
 from __future__ import annotations
 
+import logging
+from collections import deque
 from collections.abc import Callable, Sequence
+from dataclasses import fields
 
 from pxr import Usd
 
+from . import _client_backend
 from ._client_lifecycle import (
     DEFAULT_WAIT_TIMEOUT_S,
-    ClientCallbackQueue,
     _pause_before_poll,
+    close_endpoint,
     compute_phase,
     deadline_after,
     raise_if_rejected,
     remaining_time,
-    stop_receiver,
     submit_and_wait,
     wait_until_ready,
 )
 from ._client_utils import ClientCredential
-from ._observer_hooks import observer_hooks, stage_metadata_from_message
-from .client_observer import ClientObserver, StageMetadata
+from .client_observer import (
+    AppliedBatch,
+    ClientObserver,
+    PlaybackClaim,
+    PlaybackState,
+    StageMetadata,
+)
 from .client_types import ClientStatus, SyncUpdate
 from .coalescing import TransformCoalescingWindow
+from .dispatcher import EventDispatcher
 from .emitter import NoticeEmitter, PrimChannel
-from .receiver import ReceiverThread
+from .receiver import EventReceiver
 from .recovery import RecoveryArtifact, RecoveryError, RejectionDisposition, TransactionFailure
 from .sender import EventSender
 
+LOG = logging.getLogger(__name__)
+
+
+def _stage_metadata(native) -> StageMetadata:
+    """Native stage metadata, whose attributes share the dataclass field names."""
+    names = (field.name for field in fields(StageMetadata))
+    return StageMetadata(**{name: getattr(native, name) for name in names})
+
+
+# The observer method each native notification reaches, and its argument.
+_NOTIFICATIONS = {
+    _client_backend.TokenIssued: ("on_token_issued", lambda native: native.token),
+    _client_backend.StageMetadata: ("on_stage_metadata", _stage_metadata),
+    _client_backend.PlaybackState: (
+        "on_playback_state",
+        lambda native: PlaybackState(
+            native.playing, native.time, native.rate, native.leader_client_id,
+        ),
+    ),
+    _client_backend.PlaybackClaimed: (
+        "on_playback_claim",
+        lambda native: PlaybackClaim(True, native.leader_client_id),
+    ),
+    _client_backend.PlaybackRejected: (
+        "on_playback_claim",
+        lambda native: PlaybackClaim(False, native.current_leader_client_id, native.reason),
+    ),
+}
+
+
+def _overridden(observer: ClientObserver | None, name: str) -> Callable | None:
+    """The observer's method *name* when its class overrides it, else ``None``."""
+    if observer is None or getattr(type(observer), name) is getattr(ClientObserver, name):
+        return None
+    return getattr(observer, name)
+
 
 class ClientBase:
-    """Lifecycle, status, observer hooks, and credential shared by every client.
+    """Lifecycle, status, observer, and credential shared by every client.
 
     A subclass builds ``_sender`` and/or ``_receiver`` from ``_credential`` and
-    ``_hooks``, implements ``_is_synchronized``, and overrides the other status
-    hooks it needs. Call every method from the stage-owning thread.
+    ``_notifications`` and overrides the status hooks it needs. Call every
+    method from the stage-owning thread.
     """
 
     _sender: EventSender | None = None
-    _receiver: ReceiverThread | None = None
+    _receiver: EventReceiver | None = None
     # Reconnection deliberately suspended by the host (UsdPublisher.disconnect).
     _paused = False
 
@@ -63,11 +108,21 @@ class ClientBase:
         self._closed = False
         self._apply_depth = 0
         self._close_requested = False
-        self._callbacks = ClientCallbackQueue()
-        self._hooks = observer_hooks(observer, self._callbacks.wrap)
-        self._credential = ClientCredential(
-            host, port, token, persist_token, self._hooks.on_token_issued,
-        )
+        if observer is not None and not isinstance(observer, ClientObserver):
+            raise TypeError("observer must be a ClientObserver")
+        self._on_applied = _overridden(observer, "on_applied")
+        self._on_resync = _overridden(observer, "on_resync")
+        self._notification_methods = {
+            kind: (method, convert)
+            for kind, (name, convert) in _NOTIFICATIONS.items()
+            if (method := _overridden(observer, name)) is not None
+        }
+        # Both roles push here; update() and close() deliver to the observer.
+        self._notifications = _client_backend.NotificationQueue()
+        self._undelivered = deque()
+        # Both roles' handshakes carry the stage metadata.
+        self._delivered_metadata: StageMetadata | None = None
+        self._credential = ClientCredential(host, port, token, persist_token)
 
     @property
     def client_id(self) -> str:
@@ -76,50 +131,53 @@ class ClientBase:
 
     @property
     def stage_metadata(self) -> StageMetadata:
-        return stage_metadata_from_message(self._endpoints[0].stage_metadata)
+        return _stage_metadata(self._endpoints[0].snapshot().metadata)
 
     @property
     def status(self) -> ClientStatus:
         """Current state as one immutable value; read it on the stage-owning thread."""
         receiver, sender = self._receiver, self._sender
-        endpoints = self._endpoints
+        received = None if receiver is None else receiver.snapshot()
+        sent = None if sender is None else sender.snapshot()
+        snapshots = [state for state in (sent, received) if state is not None]
         failure = None if sender is None else sender.transaction_failure
         rebuild_reason = self._rebuild_reason()
-        auth_rejected = any(endpoint.auth_rejected for endpoint in endpoints)
-        rejected = auth_rejected or any(endpoint.hello_rejected for endpoint in endpoints)
-        connected = not self._closed and all(endpoint.connected for endpoint in endpoints)
-        synchronized = not self._closed and self._is_synchronized()
+        rejections = [state.rejection for state in snapshots if state.rejection is not None]
+        connected = not self._closed and all(state.connected for state in snapshots)
+        synchronized = not self._closed and self._synchronized(
+            sent.connected if received is None else received.synchronized
+        )
         phase = compute_phase(
             closed=self._closed,
             recovery_required=failure is not None or bool(rebuild_reason),
-            rejected=rejected,
+            rejected=bool(rejections),
             parked=self._is_parked(),
-            replaying=receiver is not None and receiver.connected and not receiver.synchronized,
+            replaying=received is not None and received.connected and not received.synchronized,
             ready=connected and synchronized,
             connecting=(
                 self._started
                 and not self._paused
-                and not (receiver is not None and receiver.stopped)
+                and not (received is not None and received.stopped)
             ),
         )
         if failure is not None:
             reason = str(failure)
         else:
-            reasons = [e.rejection_reason for e in (sender, receiver) if e is not None]
+            reasons = map(_client_backend.rejection_reason, rejections)
             reason = rebuild_reason or next((text for text in reasons if text), "")
         return ClientStatus(
             phase=phase,
             connected=connected,
             synchronized=synchronized,
-            receiver_connected=None if receiver is None else receiver.connected,
-            sender_connected=None if sender is None else sender.connected,
+            receiver_connected=None if received is None else received.connected,
+            sender_connected=None if sent is None else sent.connected,
             prepared_events=self._prepared_events(),
-            pending_events=0 if sender is None else sender.pending_event_count,
-            acknowledged_events_total=0 if sender is None else sender.acknowledged_event_count,
+            pending_events=0 if sent is None else sent.pending_events,
+            acknowledged_events_total=0 if sent is None else sent.acknowledged_events,
             failure=failure,
-            recovery=None if sender is None else sender.recovery_incident,
+            recovery=None if failure is None else sender.recovery_incident,
             reason=reason,
-            auth_rejected=auth_rejected,
+            auth_rejected=any(rejection.authentication for rejection in rejections),
             has_unsent_changes=not self._closed and self._has_unsent_changes(),
             **self._role_status(),
         )
@@ -169,11 +227,11 @@ class ClientBase:
         self._closed = True
         try:
             if self._sender is not None:
-                self._sender.disconnect()
+                close_endpoint(self._sender)
             if self._receiver is not None:
-                stop_receiver(self._receiver)
+                close_endpoint(self._receiver)
             # A token issued by the last handshake must still reach the host.
-            self._callbacks.close()
+            self._notify_observer(closing=True)
         finally:
             self._release()
 
@@ -189,8 +247,18 @@ class ClientBase:
         return tuple(endpoint for endpoint in (self._receiver, self._sender) if endpoint)
 
     def _is_synchronized(self) -> bool:
-        """Status hook: the local state has applied the server's replay."""
-        raise NotImplementedError
+        """Whether the local state has applied the server's replay."""
+        receiver = self._receiver
+        return self._synchronized(
+            self._sender.connected if receiver is None else receiver.synchronized
+        )
+
+    def _synchronized(self, replayed: bool) -> bool:
+        """Status hook: synchronization, given whether the receiver applied the replay.
+
+        Without a receiver, *replayed* is whether the sender is connected.
+        """
+        return replayed
 
     def _is_parked(self) -> bool:
         """Status hook: no stage is bound."""
@@ -235,8 +303,50 @@ class ClientBase:
     def _begin_update(self) -> bool:
         """Deliver queued notifications; ``False`` when one of them closed the client."""
         self._require_started()
-        self._callbacks.drain()
+        self._notify_observer()
         return not self._closed
+
+    def _observe_dispatcher(self, dispatcher: EventDispatcher) -> None:
+        """Report *dispatcher*'s deliveries to the observer."""
+        on_applied = self._on_applied
+        if on_applied is not None:
+            dispatcher.on_applied_events = lambda events: on_applied(
+                AppliedBatch(dispatcher.applying_seq, events)
+            )
+        dispatcher.on_resync = self._on_resync
+
+    def _notify_observer(self, *, closing: bool = False) -> None:
+        """Deliver the notifications queued so far.
+
+        A failure propagates and the rest wait for the next call; while
+        closing, every one runs and the first failure is re-raised after them.
+        """
+        undelivered = self._undelivered
+        undelivered.extend(self._notifications.drain())
+        error = None
+        while undelivered:
+            try:
+                self._deliver(undelivered.popleft())
+            except Exception as exc:
+                if not closing:
+                    raise
+                if error is not None:
+                    LOG.exception("Observer notification failed while closing")
+                error = error or exc
+        if error is not None:
+            raise error
+
+    def _deliver(self, notification) -> None:
+        delivery = self._notification_methods.get(type(notification))
+        if delivery is None:
+            return
+        method, convert = delivery
+        value = convert(notification)
+        if isinstance(value, StageMetadata):
+            if value == self._delivered_metadata:
+                return
+            self._delivered_metadata = value
+        method(value)
 
     def _connect_sender(self, timeout: float | None = None) -> bool:
         if self._sender.connected:

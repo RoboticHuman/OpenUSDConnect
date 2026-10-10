@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import threading
 import uuid
-from collections.abc import Callable
 
 from .client_types import ClientPhase, ClientStatus, SyncUpdate
 from .token_client import load_token, save_token
@@ -53,18 +52,10 @@ def resolve_client_token(
 class ClientCredential:
     """The one token both roles of a client present, persisted when enabled."""
 
-    def __init__(
-        self,
-        host: str,
-        port: int,
-        token: str | None,
-        persist: bool,
-        on_issued: Callable[[str], None] | None = None,
-    ):
+    def __init__(self, host: str, port: int, token: str | None, persist: bool):
         self._host = host
         self._port = port
         self._persist = persist
-        self._on_issued = on_issued
         # Both connection threads read and replace the token.
         self._lock = threading.Lock()
         self.token = resolve_client_token(host, port, token, persist)
@@ -77,13 +68,11 @@ class ClientCredential:
             return self.token
 
     def issued(self, token: str) -> None:
-        """Adopt a server-issued token, persist it, then notify the host."""
+        """Adopt a server-issued token and persist it."""
         with self._lock:
             self.token = token
             if self._persist:
                 save_token(self._host, self._port, token)
-        if self._on_issued is not None:
-            self._on_issued(token)
 
     def endpoint_kwargs(self) -> dict:
         """Keyword arguments that make an endpoint present and report this token."""

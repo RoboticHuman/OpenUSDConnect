@@ -89,7 +89,7 @@ class ClientObserver:
         """Delivery (ManagedClient, UsdReceiver): the stream restarted; reset host state."""
 
     def on_stage_metadata(self, metadata: StageMetadata) -> None:
-        """Notification: stage settings received with a handshake."""
+        """Notification: the server's stage metadata, delivered when it changes."""
 
     def on_playback_state(self, state: PlaybackState) -> None:
         """Notification (receiving clients): the shared playhead changed."""

@@ -7,48 +7,45 @@ import pytest
 from pxr import Usd
 
 from openusdconnect.checkpoints import MirrorCheckpoint
-from openusdconnect.codec import PayloadType, encode_message, message_to_dict
+from openusdconnect.codec import encode_message, message_to_dict
 from openusdconnect.framing import recv_framed, send_framed
 from openusdconnect.protocol import make_hello
 from openusdconnect.sender import EventSender
 from openusdconnect.server import connection as connection_mod
-from tests.helpers import (
-    ReceiverStub,
-    ensure_prim_event,
-    in_process_server,
-    mcp_session_with_receiver,
-    receiver_connection,
-)
+from tests.helpers import ReceiverStub, ensure_prim_event, in_process_server
 
 
-def test_snapshot_replacement_after_capture_cannot_confirm_unapplied_write(monkeypatch):
+def _receive_replay(sock):
+    """Messages through the next replay completion marker."""
+    messages = []
+    while not messages or messages[-1]["type"] != "replay_complete":
+        messages.append(message_to_dict(recv_framed(sock)))
+    return messages
+
+
+def test_snapshot_replacement_after_capture_follows_the_captured_replay(monkeypatch):
     with in_process_server() as (state, port):
-        session = mcp_session_with_receiver(port)
-        session.config.read_after_write_timeout_s = 0.1
-        session.sender = EventSender("127.0.0.1", port, client_id="own")
-        replay_complete = threading.Event()
-        resume_receiver = threading.Event()
+        sender = EventSender("127.0.0.1", port, client_id="own")
         replacement_done = threading.Event()
         replacement_errors = []
         replacement_worker = None
         try:
-            assert session.sender.connect()
-            assert session.sender.send_events([ensure_prim_event("/Own")])
-            assert session.sender.flush(5)
-            assert session.sender.acknowledged_checkpoint == MirrorCheckpoint(
-                state.server_instance, 0, 1
-            )
+            assert sender.connect()
+            assert sender.send_events([ensure_prim_event("/Own")])
+            assert sender.flush(5)
+            assert sender.acknowledged_checkpoint == MirrorCheckpoint(state.server_instance, 0, 1)
             state._broadcast_queue.join()
             replacement = Usd.Stage.CreateInMemory()
             replacement.DefinePrim("/Replacement", "Xform")
             epoch, head = state.get_snapshot_token()
             replacement.GetRootLayer().customLayerData = {
                 "openusdconnect": {
-                    "scene_id": state.scene_id, "epoch": epoch, "snapshot_seq": head,
+                    "scene_id": state.scene_id,
+                    "epoch": epoch,
+                    "snapshot_seq": head,
                 },
             }
             send = connection_mod.send_msg
-            control = session.receiver.receiver._handle_control_message
 
             def replace_snapshot():
                 try:
@@ -70,32 +67,29 @@ def test_snapshot_replacement_after_capture_cannot_confirm_unapplied_write(monke
                     assert state.get_replay_token()[0] == 1
                 send(sock, message)
 
-            def pause_after_initial_complete(payload_type, buf, generation):
-                result = control(payload_type, buf, generation)
-                if payload_type == PayloadType.ReplayComplete and not replay_complete.is_set():
-                    replay_complete.set()
-                    assert resume_receiver.wait(5)
-                return result
-
             monkeypatch.setattr(connection_mod, "send_msg", replace_before_hello)
-            monkeypatch.setattr(
-                session.receiver.receiver,
-                "_handle_control_message",
-                pause_after_initial_complete,
-            )
-            with receiver_connection(session.receiver.receiver):
-                try:
-                    assert replay_complete.wait(5)
-                    assert session._drain_after_write()
-                    assert session.mirror_stage.GetPrimAtPath("/Own")
-                    assert not session.mirror_stage.GetPrimAtPath("/Replacement")
-                    assert session.receiver.last_seq == 1
-                    assert session.receiver.replay_epoch == 0
-                finally:
-                    resume_receiver.set()
+            with socket.create_connection(("127.0.0.1", port), timeout=5) as sock:
+                send_framed(sock, encode_message(make_hello("receiver", layered_replay=True)))
+                captured = _receive_replay(sock)
+                replaced = _receive_replay(sock)
+            assert replacement_done.is_set()
+
+            # The captured epoch replays its own write, so a mirror can confirm
+            # it before the replacement that follows resets the stream.
+            assert captured[0]["type"] == "hello_ok" and captured[0]["replay_epoch"] == 0
+            assert [
+                (message["seq"], message["event"]["prim"])
+                for message in captured
+                if message["type"] == "event"
+            ] == [(1, "/Own")]
+            assert (captured[-1]["head_seq"], captured[-1]["epoch"]) == (1, 0)
+            assert replaced[0]["type"] == "resync"
+            assert "/Replacement" in {
+                message["event"]["prim"] for message in replaced if message["type"] == "event"
+            }
+            assert replaced[-1]["epoch"] == 1
         finally:
-            resume_receiver.set()
-            session.disconnect()
+            sender.disconnect()
             if replacement_worker is not None:
                 replacement_worker.join(5)
                 assert not replacement_worker.is_alive()
