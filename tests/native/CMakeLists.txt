@@ -16,10 +16,6 @@ add_executable(OpenUSDConnectProtocolTests test_protocol_codec.cpp)
 target_link_libraries(OpenUSDConnectProtocolTests PRIVATE OpenUSDConnect::ClientProtocol)
 add_test(NAME OpenUSDConnectProtocolTests COMMAND OpenUSDConnectProtocolTests)
 
-add_executable(OpenUSDConnectReplayIdentityTests test_replay_identity.cpp)
-target_link_libraries(OpenUSDConnectReplayIdentityTests PRIVATE OpenUSDConnect::ClientCore)
-add_test(NAME OpenUSDConnectReplayIdentityTests COMMAND OpenUSDConnectReplayIdentityTests)
-
 add_executable(OpenUSDConnectClientEngineTests test_client_engine.cpp)
 target_link_libraries(OpenUSDConnectClientEngineTests PRIVATE OpenUSDConnect::ClientProtocol)
 add_test(NAME OpenUSDConnectClientEngineTests COMMAND OpenUSDConnectClientEngineTests)

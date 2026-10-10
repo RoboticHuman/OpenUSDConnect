@@ -5,14 +5,22 @@
 #include "HAL/CriticalSection.h"
 #include "Containers/Set.h"
 #include "Delegates/IDelegateInstance.h"
+#include "Templates/Function.h"
 #include "USDConnectRecovery.h"
 #include <atomic>
+#include <vector>
 #include "USDConnectSubsystem.generated.h"
 
-class FSyncClient;
-class FEmitClient;
-class FProducerEndpointState;
 class AUsdStageActor;
+template <typename Endpoint>
+class FEndpointRunner;
+
+namespace openusdconnect::client
+{
+class NotificationQueue;
+class ProducerEndpoint;
+class ReceiverEndpoint;
+} // namespace openusdconnect::client
 
 USTRUCT(BlueprintType)
 struct OPENUSDCONNECT_API FUSDConnectStatus
@@ -72,17 +80,18 @@ struct OPENUSDCONNECT_API FUSDConnectStatus
  * World subsystem that manages the OpenUSD Connect two-way sync.
  *
  * Receiver side (server → Unreal):
- *   FSyncClient background thread receives BroadcastEvent frames and
- *   pushes raw bytes to the event queue. Tick() drains the queue and
- *   applies each event to the open AUsdStageActor stage via FUSDEventApplier.
+ *   A runner thread drives the client core's ReceiverEndpoint, which queues
+ *   BroadcastEvent frames. Tick() drains them and applies each event to the
+ *   open AUsdStageActor stage via FUSDEventApplier.
  *
  * Emitter side (Unreal → server):
  *   The stage listener fires whenever the USD stage changes locally (viewport
  *   transforms, USD Stage panel property edits). The subsystem reads the
  *   current TRS, visibility, and changed shader inputs from the pxr stage and
- *   sends SetXformTrs/SetVisibility/SetConnectableInput events via
- *   FEmitClient. A feedback loop guard (bSuppressEmit) prevents echoing
- *   events received from the server back out.
+ *   appends SetXformTrs/SetVisibility/SetConnectableInput transactions to the
+ *   client core's ProducerEndpoint, which a second runner thread sends. A
+ *   feedback loop guard (bSuppressEmit) prevents echoing events received from
+ *   the server back out.
  *
  * Usage:
  *  1. Place an AUsdStageActor in the level; set its RootLayer to the USD file
@@ -141,37 +150,27 @@ public:
 	UFUNCTION(BlueprintPure, Category = "OpenUSD Connect")
 	FUSDConnectStatus GetStatus() const;
 
-	/** Called from client background threads when the server issues a TOFU token. */
-	void OnClientTokenIssued(const FString& Token);
-
-	/** Called from client background threads after HELLO_OK. */
-	void OnClientHelloOk(const FString& Role);
-
-	/** Select a receiver replay generation and discard queued frames from older streams. */
-	void OnReceiverReplayGenerationChanged(uint64 ReplayGeneration);
-
-	/** Called when the server deterministically rejects a producer transaction. */
-	void OnEmitterTransactionRejected(uint64 TxnId, const FString& Reason);
-
-	/** Called from client background threads when auth is rejected. */
-	void OnClientAuthRejected(const FString& Role);
-
-	/** Called from client background threads when the requested mode is rejected. */
-	void OnClientHelloRejected(const FString& Role, const FString& Code, const FString& Reason);
-
 private:
 	AUsdStageActor* FindStageActor() const;
 	void AttachToStageActor(AUsdStageActor* Actor);
 	void DetachFromStageActor();
 	void StopClients();
+	void ReleaseReceiver();
+	void ReleaseProducer();
 	void ConnectResolved(bool bRespectLiveMetadataAutoStart);
 	void RefreshLiveMetadataFromStage(AUsdStageActor* Actor);
-	void TryStartDeferredEmitter();
 	void QueueInitialMaterializations(AUsdStageActor* Actor);
 	FString LoadAuthToken(const FString& Host, int32 Port, const FString& Department) const;
 	void SaveAuthToken(const FString& Host, int32 Port, const FString& Department,
 					   const FString& Token) const;
+	/** The token the runner threads present at their next handshake. */
+	FString ReadAuthToken() const;
+	void SetAuthToken(const FString& Token);
 	void SetStatusMessage(const FString& AuthState, const FString& Message);
+	/** Reacts on the game thread to what both endpoints reported since the last call. */
+	void DeliverNotifications();
+	/** Starts a producer connection attempt unless one is in flight or backing off. */
+	void RequestProducerConnect() const;
 	void RequestReceiverReplay(const FString& Reason);
 
 	void DrainAndApply();
@@ -182,6 +181,13 @@ private:
 	/** Build and send a Txn event for a changed prim (emitter side) */
 	void EmitPrimChange(AUsdStageActor* StageActor, const FString& PrimPath);
 
+	/**
+	 * Pairs the next transaction ID with the frame BuildFrame encodes for it and
+	 * appends the frame to the producer outbox.
+	 */
+	bool SubmitTransaction(const FString& PrimPath, const TCHAR* Kind, int32 EventCount,
+						   TFunctionRef<bool(uint64, std::vector<uint8>&)> BuildFrame);
+
 	/** Build and send a SetConnectableInput Txn for changed shader inputs on one prim */
 	void EmitConnectableInputs(AUsdStageActor* StageActor, const FString& PrimPath,
 							   const TSet<FString>& InputAttrNames);
@@ -189,19 +195,29 @@ private:
 	/** Refresh local .mtlx documents for materials dirtied this tick */
 	void ProcessPendingMaterializations();
 
+	/** One queue per endpoint, so a notification names its role; Tick drains both. */
+	TSharedPtr<openusdconnect::client::NotificationQueue> ReceiverNotifications;
+	TSharedPtr<openusdconnect::client::NotificationQueue> ProducerNotifications;
+
 	// --- Receiver ---
-	TSharedPtr<FSyncClient> SyncClient;
+	TSharedPtr<openusdconnect::client::ReceiverEndpoint> Receiver;
+	TSharedPtr<FEndpointRunner<openusdconnect::client::ReceiverEndpoint>> ReceiverRunner;
 
 	// --- Emitter ---
-	TSharedPtr<FEmitClient> EmitClient;
-	TSharedPtr<FProducerEndpointState> ProducerState;
+	/**
+	 * Endpoint-scoped producer identity and outbox. It outlives Disconnect()
+	 * and is replaced only when the endpoint changes, so a reconnect to the
+	 * same endpoint keeps transaction identity and unacknowledged frames.
+	 */
+	TSharedPtr<openusdconnect::client::ProducerEndpoint> Producer;
+	TSharedPtr<FEndpointRunner<openusdconnect::client::ProducerEndpoint>> ProducerRunner;
+	FCriticalSection SubmitCS;
 
 	/**
 	 * Transform prims whose structural xform-op prerequisite has been sent on
 	 * the current emitter connection. Game-thread only.
 	 */
 	TSet<FString> EmittedXformPrims;
-	uint64 LastEmitConnectionGeneration = 0;
 
 	/** Stable client ID shared by both receiver and emitter connections */
 	FString ClientId;
@@ -216,19 +232,8 @@ private:
 	/**
 	 * Set to true while DrainAndApply() is applying received events.
 	 * Prevents OnPrimChanged from echoing those changes back to the server.
-	 *
-	 * Uses default seq_cst ordering. The other socket-thread atomics in this
-	 * module use relaxed because they only flag a state for polling; this one
-	 * fences a code region around stage mutation, so the stronger barrier is
-	 * the safer default and not on a hot path.
 	 */
 	std::atomic<bool> bSuppressEmit;
-
-	/** New native transactions remain gated until replay is applied on the game thread. */
-	std::atomic<bool> bReplaySynchronized;
-	std::atomic<uint64> ActiveReplayGeneration;
-	int32 ReplayHeadSeq = 0;
-	uint64 ReplayEpoch = 0;
 
 	/** Cached weak reference to the currently attached stage actor */
 	TWeakObjectPtr<AUsdStageActor> CachedStageActor;
@@ -264,6 +269,7 @@ private:
 	bool bActiveUsingLiveMetadata = false;
 	bool bDeferredEmitterForToken = false;
 	int32 ActiveSnapshotSeq = 0;
+	mutable FCriticalSection AuthTokenCS;
 	FString ActiveAuthToken;
 
 	/** Last live metadata key seen on the attached stage root layer. */

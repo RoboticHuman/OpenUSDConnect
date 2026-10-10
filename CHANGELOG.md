@@ -130,6 +130,10 @@ callable arguments and properties.
 - Building the native extension fetches the pinned FlatBuffers headers on the
   first configure, which needs network access unless
   `FETCHCONTENT_SOURCE_DIR_FLATBUFFERS` names a local copy.
+- The Unreal plugin runs on the native client engine: its receiver and emitter
+  threads drive the client core's `ReceiverEndpoint` and `ProducerEndpoint`,
+  built as the plugin's `OpenUSDConnectClientCore` module. Auth tokens stay in
+  the user's Unreal config under the same keys.
 
 ### Fixed
 

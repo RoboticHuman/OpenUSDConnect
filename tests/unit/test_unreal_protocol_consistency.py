@@ -28,103 +28,78 @@ def test_native_wire_versions_match_python_core():
     assert protocol and int(protocol.group(1)) == PROTOCOL_VERSION
 
 
-def test_native_unreal_reliability_architecture_stays_explicit():
+def test_native_unreal_plugin_runs_on_the_client_engine():
     root = Path(__file__).resolve().parents[2]
     plugin = root / "integrations" / "unreal" / "OpenUSDConnect" / "Source"
-    emitter = (plugin / "OpenUSDConnect" / "Private" / "EmitClient.h").read_text(encoding="utf-8")
-    emitter_source = (plugin / "OpenUSDConnect" / "Private" / "EmitClient.cpp").read_text(
-        encoding="utf-8"
-    )
-    framing = (plugin / "OpenUSDConnect" / "Private" / "USDWireFraming.h").read_text(
-        encoding="utf-8"
-    )
-    receiver_source = (plugin / "OpenUSDConnect" / "Private" / "SyncClient.cpp").read_text(
-        encoding="utf-8"
-    )
-    transaction_builder = (plugin / "OpenUSDConnect" / "Private" / "TxnBuilder.cpp").read_text(
-        encoding="utf-8"
-    )
-    core = (
-        root
-        / "native"
-        / "client_core"
-        / "include"
-        / "openusdconnect"
-        / "client"
-        / "producer_session.h"
-    )
-    protocol = (
-        root
-        / "native"
-        / "client_core"
-        / "include"
-        / "openusdconnect"
-        / "client"
-        / "protocol_codec.h"
-    )
-    protocol_source = protocol.read_text(encoding="utf-8")
-    receiver = (plugin / "OpenUSDConnect" / "Private" / "SyncClient.h").read_text(encoding="utf-8")
-    subsystem = (plugin / "OpenUSDConnect" / "Private" / "USDConnectSubsystem.cpp").read_text(
-        encoding="utf-8"
-    )
+    private = plugin / "OpenUSDConnect" / "Private"
+    client = root / "native" / "client_core" / "include" / "openusdconnect" / "client"
+    runner = (private / "EndpointRunner.h").read_text(encoding="utf-8")
+    subsystem = (private / "USDConnectSubsystem.cpp").read_text(encoding="utf-8")
     subsystem_header = (plugin / "OpenUSDConnect" / "Public" / "USDConnectSubsystem.h").read_text(
         encoding="utf-8"
     )
+    transaction_builder = (private / "TxnBuilder.cpp").read_text(encoding="utf-8")
+    protocol_source = (client / "protocol_codec.h").read_text(encoding="utf-8")
     applier = (plugin / "OpenUSDConnectPXR" / "Public" / "USDEventApplier.h").read_text(
         encoding="utf-8"
     )
+    plugin_sources = "\n".join(
+        path.read_text(encoding="utf-8")
+        for module in ("OpenUSDConnect", "OpenUSDConnectPXR")
+        for path in (plugin / module).rglob("*")
+        if path.suffix in {".h", ".cpp"}
+    )
 
-    assert "class FProducerEndpointState" in emitter
-    assert "OrderedProducerSession<FProducerFrame>" in emitter
-    assert "TSharedPtr<const OUC::FWireFrame, ESPMode::ThreadSafe>" in emitter
-    assert "std::vector<uint8>" not in emitter
-    assert "std::shared_ptr" not in emitter
-    assert "PendingTxns" not in emitter
-    assert "Session.AcknowledgeThrough" in emitter_source
-    assert "Session.ClaimNextUnsent" in emitter_source
-    assert "MakeShared<FWireFrame, ESPMode::ThreadSafe>(MoveTemp(Frame))" in emitter_source
-    assert "FinishEnvelopeFrame(Builder, RootOffset)" in framing
-    assert "Builder.Release()" in framing
-    assert "FinishEnvelopeBuffer(builder, envelope)" in protocol_source
-    assert "FinishSizePrefixedEnvelopeBuffer(builder, envelope)" not in protocol_source
-    assert "builder.PushBytes(header, kFrameHeaderSize)" in protocol_source
-    assert "WriteFrameHeader(payload_size, header, max_frame_size)" in protocol_source
-    assert "EncodeFrameInto" not in framing
-    assert core.is_file()
-    assert protocol.is_file()
-    assert "BuildHelloFrame(Builder, Parameters)" in framing
-    assert "ReplayPrefixClaim ReplayPrefix" in framing
-    assert "ReplayPrefixClaim ReplayPrefix" in protocol_source
+    # The connection protocol lives in the client core's endpoints; the plugin
+    # only moves bytes, keeps no replay or outbox state, and builds no handshake.
+    assert "template <typename Endpoint>\nclass FEndpointRunner final : public FRunnable" in runner
+    assert "Target.TakeActions()" in runner
+    assert "Target.OnReadTimeout()" in runner
+    for retired in (
+        "ReceiverReplayIdentity",
+        "OrderedReceiverSession",
+        "OrderedProducerSession",
+        "BuildHelloFrame",
+        "HandshakeResponseView",
+        "AsyncTask",
+    ):
+        assert retired not in plugin_sources, retired
+    for retired in ("EmitClient.h", "SyncClient.h", "USDWireFraming.h"):
+        assert not (private / retired).exists()
+
+    assert "TSharedPtr<openusdconnect::client::ReceiverEndpoint> Receiver" in subsystem_header
+    assert "TSharedPtr<openusdconnect::client::ProducerEndpoint> Producer" in subsystem_header
+    for queue in ("ReceiverNotifications", "ProducerNotifications"):
+        assert f"TSharedPtr<openusdconnect::client::NotificationQueue> {queue}" in subsystem_header
+    # The receive path follows the engine's drain contract.
+    for call in (
+        "Receiver->Generation()",
+        "Receiver->DrainFrames(1)",
+        "Receiver->MarkAppliedThrough(Generation, Seq)",
+        "Receiver->ResetAppliedProgress()",
+        "Receiver->MarkReplayApplied()",
+        "Receiver->RequestReplayFrom(",
+        "FUSDEventApplier::ApplyValidatedFrame(",
+        "Queue.Drain()",
+    ):
+        assert call in subsystem, call
+    # A transaction ID is paired with the frame that encodes it under one lock.
+    submit = subsystem[subsystem.index("bool UUSDConnectSubsystem::SubmitTransaction") :]
+    lock = submit.index("FScopeLock Lock(&SubmitCS)")
+    assert lock < submit.index("Producer->NextTransactionId()") < submit.index("Producer->Append(")
+    assert "bOwnEcho" not in subsystem
+
     assert "FinishTransactionFrame(" in transaction_builder
     assert "BuildXformTrsEvent(" in transaction_builder
     assert "BuildVisibilityEvent(" in transaction_builder
     assert "BuildConnectableInputValue(" in transaction_builder
-    assert "HandshakeResponseView" in emitter_source
-    assert "ControlMessageView" in emitter_source
+    assert "FinishEnvelopeBuffer(builder, envelope)" in protocol_source
+    assert "FinishSizePrefixedEnvelopeBuffer(builder, envelope)" not in protocol_source
+    assert "builder.PushBytes(header, kFrameHeaderSize)" in protocol_source
+    assert "WriteFrameHeader(payload_size, header, max_frame_size)" in protocol_source
     assert "std::vector" not in protocol_source
-    assert "TSharedPtr<FProducerEndpointState> ProducerState" in subsystem_header
-    assert "NextProducerTxnId" not in subsystem_header
-    assert "struct FValidatedReceiverFrame" in receiver
-    assert "OrderedReceiverSession<FValidatedReceiverFrame>" in receiver
-    assert "FReceiverSession ReceiverSession" in receiver
-    assert "ReceiverReplayIdentity ReplayIdentityState" in receiver
-    assert "ReplayIdentityState.BeginConnection()" in receiver_source
-    assert "ReplayIdentityState.AcceptHello(" in receiver_source
-    assert "ReplayIdentityState.AcceptResync()" in receiver_source
-    assert "ReplayIdentityState.AcceptReplayComplete(" in receiver_source
-    assert "ReplayIdentityState.MarkReplayApplied()" in receiver_source
-    assert "FQueuedReceiverFrame" not in subsystem_header
-    assert "OnReceiverReplayGenerationChanged" in subsystem
-    assert "RequestReceiverReplay(" in subsystem
-    assert "SyncClient->TryPopFrame(Frame)" in subsystem
-    assert "DrainFrames" not in subsystem
-    assert "bOwnEcho" not in subsystem
-    assert "FUSDEventApplier::ApplyValidatedFrame(Frame.Bytes" in subsystem
-    assert "FUSDEventApplier::FrameUsesChangeBlock(Frame" not in subsystem
     assert "static bool ApplyFrame" in applier
     assert "static bool ApplyValidatedFrame" in applier
-    assert "WorkEvent->Trigger()" in emitter_source
-    assert "WorkEvent->Wait(WaitMilliseconds)" in emitter_source
 
 
 def test_native_unreal_department_receiver_fails_closed():

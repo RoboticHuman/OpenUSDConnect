@@ -298,44 +298,64 @@ def test_plugin_fingerprint_ignores_non_build_documentation(tmp_path):
     assert _plugin_fingerprint(plugin) != fingerprint
 
 
-def test_unreal_source_staging_vendors_canonical_client_core(tmp_path):
+def _fake_client_core(root: Path) -> Path:
+    for relative in (
+        "include/openusdconnect/client/producer_session.h",
+        "src/frame_codec.cpp",
+        "src/engine/receiver_endpoint.cpp",
+        "src/driver/threaded_producer_driver.cpp",
+        "src/platform/bsd_socket.cpp",
+        "CMakeLists.txt",
+    ):
+        path = root / relative
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(f"// canonical {relative}", encoding="utf-8")
+    return root
+
+
+def test_unreal_source_staging_vendors_only_the_compiled_client_core(tmp_path):
     plugin = tmp_path / "plugin"
-    (plugin / "Source").mkdir(parents=True)
-    (plugin / "OpenUSDConnect.uplugin").write_text("{}\n", encoding="utf-8")
-    stale = (
-        plugin
-        / "Source"
-        / "ThirdParty"
-        / "OpenUSDConnectClientCore"
-        / "include"
-        / "openusdconnect"
-        / "client"
-        / "producer_session.h"
-    )
+    module = plugin / "Source" / "OpenUSDConnectClientCore"
+    build_rules = module / "OpenUSDConnectClientCore.Build.cs"
+    stale = module / "src" / "engine" / "removed_endpoint.cpp"
     stale.parent.mkdir(parents=True)
-    stale.write_text("// stale staged core\n", encoding="utf-8")
-    core = tmp_path / "client_core"
-    header = core / "include" / "openusdconnect" / "client" / "producer_session.h"
-    header.parent.mkdir(parents=True)
-    header.write_text("// canonical core\n", encoding="utf-8")
+    stale.write_text("// stale staged core", encoding="utf-8")
+    build_rules.write_text("// module rules", encoding="utf-8")
+    (plugin / "OpenUSDConnect.uplugin").write_text("{}", encoding="utf-8")
+    core = _fake_client_core(tmp_path / "client_core")
 
-    staged = _stage_plugin_source(
-        plugin,
-        tmp_path / "staged",
-        client_core_source=core,
+    staged = _stage_plugin_source(plugin, tmp_path / "staged", client_core_source=core)
+
+    staged_module = staged / "Source" / "OpenUSDConnectClientCore"
+    assert sorted(
+        path.relative_to(staged_module).as_posix()
+        for path in staged_module.rglob("*")
+        if path.is_file()
+    ) == [
+        "OpenUSDConnectClientCore.Build.cs",
+        "include/openusdconnect/client/producer_session.h",
+        "src/engine/receiver_endpoint.cpp",
+        "src/frame_codec.cpp",
+    ]
+    header = staged_module / "include" / "openusdconnect" / "client" / "producer_session.h"
+    assert header.read_text(encoding="utf-8") == (
+        "// canonical include/openusdconnect/client/producer_session.h"
     )
 
-    staged_header = (
-        staged
-        / "Source"
-        / "ThirdParty"
-        / "OpenUSDConnectClientCore"
-        / "include"
-        / "openusdconnect"
-        / "client"
-        / "producer_session.h"
-    )
-    assert staged_header.read_text(encoding="utf-8") == "// canonical core\n"
+
+def test_plugin_fingerprint_covers_only_the_staged_client_core(tmp_path):
+    plugin = tmp_path / "plugin"
+    plugin.mkdir()
+    (plugin / "OpenUSDConnect.uplugin").write_text("{}", encoding="utf-8")
+    core = _fake_client_core(tmp_path / "client_core")
+    fingerprint = _plugin_fingerprint(plugin, core)
+
+    (core / "src" / "driver" / "threaded_producer_driver.cpp").write_text("// edited")
+    (core / "CMakeLists.txt").write_text("# edited")
+    assert _plugin_fingerprint(plugin, core) == fingerprint
+
+    (core / "src" / "engine" / "receiver_endpoint.cpp").write_text("// edited")
+    assert _plugin_fingerprint(plugin, core) != fingerprint
 
 
 def test_engine_fingerprint_distinguishes_builds_and_installations(tmp_path):

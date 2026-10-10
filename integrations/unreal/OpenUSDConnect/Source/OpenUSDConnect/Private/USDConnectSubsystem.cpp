@@ -2,8 +2,7 @@
 
 #include "USDConnectSubsystem.h"
 
-#include "SyncClient.h"
-#include "EmitClient.h"
+#include "EndpointRunner.h"
 #include "USDConnectSettings.h"
 #include "USDEventApplier.h"
 #include "USDMaterialXMaterializer.h"
@@ -16,12 +15,16 @@
 #include "EngineUtils.h"
 #include "Logging/LogMacros.h"
 #include "Stats/Stats.h"
-#include "Async/Async.h"
 #include "Misc/Guid.h"
 #include "Misc/App.h"
 #include "Misc/ConfigCacheIni.h"
 #include "Misc/Crc.h"
+#include "Misc/ScopeLock.h"
 #include "HAL/PlatformProcess.h"
+#include "HAL/PlatformTime.h"
+
+#include <algorithm>
+#include <type_traits>
 
 #if WITH_EDITOR
 #include "ScopedTransaction.h"
@@ -31,6 +34,40 @@ DEFINE_LOG_CATEGORY_STATIC(LogUSDConnectSubsystem, Log, All);
 
 DECLARE_STATS_GROUP(TEXT("OpenUSDConnect"), STATGROUP_OpenUSDConnect, STATCAT_Advanced);
 DECLARE_CYCLE_STAT(TEXT("USDConnect Tick"), STAT_USDConnectTick, STATGROUP_OpenUSDConnect);
+
+namespace ClientCore = openusdconnect::client;
+
+namespace
+{
+ClientCore::TimePoint Now()
+{
+	return std::chrono::steady_clock::now();
+}
+
+EUSDConnectRecoveryDisposition
+ToRecoveryDisposition(ClientCore::ProducerRecoveryDisposition Disposition)
+{
+	switch (Disposition)
+	{
+	case ClientCore::ProducerRecoveryDisposition::RecoverableConflict:
+		return EUSDConnectRecoveryDisposition::RecoverableConflict;
+	case ClientCore::ProducerRecoveryDisposition::InvalidOperation:
+		return EUSDConnectRecoveryDisposition::InvalidOperation;
+	case ClientCore::ProducerRecoveryDisposition::SessionFatal:
+		return EUSDConnectRecoveryDisposition::SessionFatal;
+	case ClientCore::ProducerRecoveryDisposition::None:
+		break;
+	}
+	return EUSDConnectRecoveryDisposition::None;
+}
+
+bool TargetsEndpoint(const ClientCore::ProducerConfig& Config, const FString& Host, int32 Port,
+					 const FString& Department)
+{
+	return Config.Host == OUC::ToUtf8(Host) && Config.Port == Port &&
+		   Config.Department == OUC::ToUtf8(Department);
+}
+} // namespace
 
 // ---------------------------------------------------------------------------
 // Authentication helpers
@@ -54,8 +91,8 @@ void UUSDConnectSubsystem::Initialize(FSubsystemCollectionBase& Collection)
 {
 	Super::Initialize(Collection);
 	bSuppressEmit.store(false);
-	bReplaySynchronized.store(false);
-	ActiveReplayGeneration.store(0);
+	ReceiverNotifications = MakeShared<ClientCore::NotificationQueue>();
+	ProducerNotifications = MakeShared<ClientCore::NotificationQueue>();
 
 	// Generate the stable client ID. Producer session identity is endpoint-scoped
 	// and is created lazily when ConnectResolved selects an endpoint.
@@ -78,6 +115,7 @@ void UUSDConnectSubsystem::Initialize(FSubsystemCollectionBase& Collection)
 void UUSDConnectSubsystem::Deinitialize()
 {
 	Disconnect();
+	ReleaseProducer();
 	Super::Deinitialize();
 }
 
@@ -90,30 +128,42 @@ void UUSDConnectSubsystem::Connect()
 	ConnectResolved(false);
 }
 
+void UUSDConnectSubsystem::ReleaseReceiver()
+{
+	if (ReceiverRunner)
+	{
+		ReceiverRunner->StopAndWait();
+		ReceiverRunner.Reset();
+	}
+	Receiver.Reset();
+}
+
+void UUSDConnectSubsystem::ReleaseProducer()
+{
+	if (ProducerRunner)
+	{
+		ProducerRunner->StopAndWait();
+		ProducerRunner.Reset();
+	}
+	Producer.Reset();
+}
+
 void UUSDConnectSubsystem::StopClients()
 {
-	if (SyncClient)
+	ReleaseReceiver();
+	if (Producer)
 	{
-		SyncClient->StopAndWait();
-		SyncClient.Reset();
-	}
-	if (EmitClient)
-	{
-		const uint64 Pending = ProducerState ? ProducerState->GetPendingTransactionCount() : 0;
-		if (Pending > 0 && !EmitClient->FlushPending(2.0))
+		if (bActiveEmitterStarted && !Flush(2.0f))
 		{
 			UE_LOG(LogUSDConnectSubsystem, Warning,
 				   TEXT("Disconnecting with %llu unacknowledged producer transactions"),
-				   ProducerState->GetPendingTransactionCount());
+				   static_cast<uint64>(Producer->Status().PendingTransactions));
 		}
-		EmitClient->StopAndWait();
-		EmitClient.Reset();
+		Producer->Disconnect();
+		ProducerRunner->Wake();
 	}
+	DeliverNotifications();
 	EmittedXformPrims.Reset();
-	LastEmitConnectionGeneration = 0;
-	bReplaySynchronized.store(false);
-	ReplayHeadSeq = 0;
-	ReplayEpoch = 0;
 
 	ActiveServerHost.Empty();
 	ActiveServerPort = 0;
@@ -122,7 +172,7 @@ void UUSDConnectSubsystem::StopClients()
 	bActiveUsingLiveMetadata = false;
 	bDeferredEmitterForToken = false;
 	ActiveSnapshotSeq = 0;
-	ActiveAuthToken.Empty();
+	SetAuthToken(FString());
 }
 
 void UUSDConnectSubsystem::ConnectResolved(bool bRespectLiveMetadataAutoStart)
@@ -174,21 +224,29 @@ void UUSDConnectSubsystem::ConnectResolved(bool bRespectLiveMetadataAutoStart)
 	}
 
 	const bool bSameProducerEndpoint =
-		ProducerState &&
-		ProducerState->MatchesEndpoint(TargetHost, TargetPort, Settings->Department);
-	if (ProducerState && !bSameProducerEndpoint && ProducerState->GetPendingTransactionCount() > 0)
+		Producer &&
+		TargetsEndpoint(Producer->Configuration(), TargetHost, TargetPort, Settings->Department);
+	if (Producer && !bSameProducerEndpoint)
 	{
-		SetStatusMessage(TEXT("pending_transactions"),
-						 FString::Printf(TEXT("Cannot switch endpoints with %llu unacknowledged "
-											  "transaction(s); reconnect to %s:%d and flush first"),
-										 ProducerState->GetPendingTransactionCount(),
-										 *ProducerState->GetHost(), ProducerState->GetPort()));
-		return;
+		const uint64 Pending = Producer->Status().PendingTransactions;
+		if (Pending > 0)
+		{
+			SetStatusMessage(
+				TEXT("pending_transactions"),
+				FString::Printf(TEXT("Cannot switch endpoints with %llu unacknowledged "
+									 "transaction(s); reconnect to %s:%d and flush first"),
+								Pending, *OUC::ToFString(Producer->Configuration().Host),
+								static_cast<int32>(Producer->Configuration().Port)));
+			return;
+		}
 	}
-	if (bSameProducerEndpoint && ProducerState->IsRecoveryRequired())
+	if (bSameProducerEndpoint)
 	{
-		SetStatusMessage(TEXT("recovery_required"), ProducerState->GetRecoveryReason());
-		return;
+		if (const std::optional<ClientCore::TransactionFailure> Failure = Producer->Failure())
+		{
+			SetStatusMessage(TEXT("recovery_required"), OUC::ToFString(Failure->Describe()));
+			return;
+		}
 	}
 
 	const FString TargetToken = Settings->bPersistAuthTokens
@@ -204,7 +262,7 @@ void UUSDConnectSubsystem::ConnectResolved(bool bRespectLiveMetadataAutoStart)
 		ActiveServerPort = TargetPort;
 		bActiveUsingLiveMetadata = bUsingLiveMetadata;
 		ActiveSnapshotSeq = ReceiverInitialLastSeq;
-		ActiveAuthToken = TargetToken;
+		SetAuthToken(TargetToken);
 		SetStatusMessage(bTargetRequiresToken ? TEXT("token_required") : TEXT("not_connected"),
 						 TEXT("Live metadata configured; auto-start disabled"));
 		UE_LOG(LogUSDConnectSubsystem, Log,
@@ -213,7 +271,7 @@ void UUSDConnectSubsystem::ConnectResolved(bool bRespectLiveMetadataAutoStart)
 		return;
 	}
 
-	if ((SyncClient || EmitClient) && ActiveServerHost == TargetHost &&
+	if ((Receiver || bActiveEmitterStarted) && ActiveServerHost == TargetHost &&
 		ActiveServerPort == TargetPort && bActiveReceiverStarted == bStartReceiver &&
 		bActiveEmitterStarted == bStartEmitter)
 	{
@@ -222,11 +280,42 @@ void UUSDConnectSubsystem::ConnectResolved(bool bRespectLiveMetadataAutoStart)
 	}
 
 	StopClients();
+	const std::chrono::milliseconds ReconnectDelay(
+		FMath::Max<int64>(1, FMath::RoundToInt64(Settings->ReconnectDelaySecs * 1000.0)));
+	const TFunction<FString()> ReadToken = [this]
+	{
+		return ReadAuthToken();
+	};
 	if (!bSameProducerEndpoint)
 	{
-		ProducerState =
-			MakeShared<FProducerEndpointState>(TargetHost, TargetPort, Settings->Department,
-											   FGuid::NewGuid().ToString(EGuidFormats::Digits));
+		ReleaseProducer();
+		ClientCore::ProducerConfig ProducerSettings;
+		ProducerSettings.Host = OUC::ToUtf8(TargetHost);
+		ProducerSettings.Port = static_cast<uint16>(TargetPort);
+		ProducerSettings.ClientId = OUC::ToUtf8(ClientId);
+		ProducerSettings.SessionId = OUC::ToUtf8(FGuid::NewGuid().ToString(EGuidFormats::Digits));
+		ProducerSettings.Origin = ProducerSettings.SessionId;
+		ProducerSettings.Department = OUC::ToUtf8(Settings->Department);
+		ProducerSettings.ReconnectBaseDelay = ReconnectDelay;
+		ProducerSettings.ReconnectMaxDelay =
+			std::max(ProducerSettings.ReconnectMaxDelay, ReconnectDelay);
+		if (TargetPort < 1 || TargetPort > MAX_uint16 ||
+			!ClientCore::ProducerEndpoint::IsValidConfiguration(ProducerSettings))
+		{
+			SetStatusMessage(TEXT("error"), FString::Printf(TEXT("Invalid server endpoint %s:%d"),
+															*TargetHost, TargetPort));
+			return;
+		}
+		Producer = MakeShared<ClientCore::ProducerEndpoint>(MoveTemp(ProducerSettings),
+															*ProducerNotifications);
+		ProducerRunner = MakeShared<FEndpointRunner<ClientCore::ProducerEndpoint>>(
+			*Producer, TEXT("Emitter"), ReadToken);
+		if (!ProducerRunner->Start())
+		{
+			ReleaseProducer();
+			SetStatusMessage(TEXT("error"), TEXT("Failed to start the emitter thread"));
+			return;
+		}
 	}
 	UE_LOG(LogUSDConnectSubsystem, Log, TEXT("Connecting to %s:%d (client_id=%s)"), *TargetHost,
 		   TargetPort, *ClientId);
@@ -244,7 +333,7 @@ void UUSDConnectSubsystem::ConnectResolved(bool bRespectLiveMetadataAutoStart)
 	bActiveUsingLiveMetadata = bUsingLiveMetadata;
 	bDeferredEmitterForToken = bDelayEmitterForToken;
 	ActiveSnapshotSeq = ReceiverInitialLastSeq;
-	ActiveAuthToken = TargetToken;
+	SetAuthToken(TargetToken);
 	SetStatusMessage(bTargetRequiresToken && TargetToken.IsEmpty() ? TEXT("token_required")
 																   : TEXT("connecting"),
 					 bDelayEmitterForToken ? TEXT("Starting receiver first to obtain auth token")
@@ -252,68 +341,42 @@ void UUSDConnectSubsystem::ConnectResolved(bool bRespectLiveMetadataAutoStart)
 
 	if (bStartReceiver)
 	{
-		SyncClient =
-			MakeShared<FSyncClient>(this, TargetHost, TargetPort, Settings->Department, ClientId,
-									ProducerState->GetSessionId(), Settings->ReconnectDelaySecs,
-									ReceiverInitialLastSeq, TargetToken);
-		if (SyncClient->Start())
+		ClientCore::ReceiverConfig ReceiverSettings;
+		ReceiverSettings.Host = OUC::ToUtf8(TargetHost);
+		ReceiverSettings.Port = static_cast<uint16>(TargetPort);
+		ReceiverSettings.ClientId = OUC::ToUtf8(ClientId);
+		ReceiverSettings.Origin = Producer->Configuration().SessionId;
+		ReceiverSettings.Department = OUC::ToUtf8(Settings->Department);
+		ReceiverSettings.LayeredReplay = false;
+		ReceiverSettings.SyncFrom = ReceiverInitialLastSeq + 1;
+		ReceiverSettings.ReconnectBaseDelay = ReconnectDelay;
+		ReceiverSettings.ReconnectMaxDelay =
+			std::max(ReceiverSettings.ReconnectMaxDelay, ReconnectDelay);
+		Receiver = MakeShared<ClientCore::ReceiverEndpoint>(MoveTemp(ReceiverSettings),
+															*ReceiverNotifications);
+		ReceiverRunner = MakeShared<FEndpointRunner<ClientCore::ReceiverEndpoint>>(
+			*Receiver, TEXT("Receiver"), ReadToken);
+		static_cast<void>(Receiver->Start(Now()));
+		if (ReceiverRunner->Start())
 		{
 			bActiveReceiverStarted = true;
 		}
 		else
 		{
-			SyncClient.Reset();
+			ReleaseReceiver();
 		}
 	}
 
 	if (bStartEmitter && !bDelayEmitterForToken)
 	{
-		EmitClient = MakeShared<FEmitClient>(this, ClientId, ProducerState.ToSharedRef(),
-											 Settings->ReconnectDelaySecs, TargetToken);
-		if (EmitClient->Start())
-		{
-			bActiveEmitterStarted = true;
-		}
-		else
-		{
-			EmitClient.Reset();
-		}
-	}
-}
-
-void UUSDConnectSubsystem::TryStartDeferredEmitter()
-{
-	if (!bDeferredEmitterForToken || EmitClient || !ProducerState || ActiveServerHost.IsEmpty() ||
-		ActiveServerPort <= 0)
-	{
-		return;
-	}
-
-	const UUSDConnectSettings* Settings = GetDefault<UUSDConnectSettings>();
-	if (!Settings)
-		return;
-
-	FString Token = ActiveAuthToken;
-	if (Token.IsEmpty() && Settings->bPersistAuthTokens)
-	{
-		Token = LoadAuthToken(ActiveServerHost, ActiveServerPort, Settings->Department);
-		ActiveAuthToken = Token;
-	}
-	if (Token.IsEmpty())
-		return;
-
-	bDeferredEmitterForToken = false;
-	EmitClient = MakeShared<FEmitClient>(this, ClientId, ProducerState.ToSharedRef(),
-										 Settings->ReconnectDelaySecs, Token);
-	if (EmitClient->Start())
-	{
 		bActiveEmitterStarted = true;
-		SetStatusMessage(TEXT("connected"), TEXT("Auth token available; emitter started"));
-	}
-	else
-	{
-		EmitClient.Reset();
-		SetStatusMessage(TEXT("error"), TEXT("Failed to start deferred emitter"));
+		// Unlike Tick's requests, an explicit connect also clears a handshake rejection.
+		const ClientCore::TimePoint Current = Now();
+		if (Producer->Connect(Current, Current + Producer->Configuration().HandshakeTimeout) ==
+			ClientCore::ConnectResult::Started)
+		{
+			ProducerRunner->Wake();
+		}
 	}
 }
 
@@ -328,10 +391,29 @@ void UUSDConnectSubsystem::Disconnect()
 
 bool UUSDConnectSubsystem::Flush(float TimeoutSeconds) const
 {
-	if (EmitClient)
-		return EmitClient->FlushPending(TimeoutSeconds);
-	return !ProducerState || (ProducerState->GetPendingTransactionCount() == 0 &&
-							  !ProducerState->IsRecoveryRequired());
+	if (!Producer)
+	{
+		return true;
+	}
+	const double Deadline = FPlatformTime::Seconds() + FMath::Max(0.0f, TimeoutSeconds);
+	for (;;)
+	{
+		const ClientCore::ProducerStatus ProducerState = Producer->Status();
+		if (ProducerState.Failure || ProducerState.PendingTransactions == 0)
+		{
+			return !ProducerState.Failure;
+		}
+		if (FPlatformTime::Seconds() >= Deadline)
+		{
+			return false;
+		}
+		// The game thread waits here, so Tick cannot reconnect the producer.
+		if (bActiveEmitterStarted)
+		{
+			RequestProducerConnect();
+		}
+		FPlatformProcess::Sleep(0.005f);
+	}
 }
 
 void UUSDConnectSubsystem::RefreshLiveMetadataFromStage(AUsdStageActor* Actor)
@@ -362,7 +444,7 @@ void UUSDConnectSubsystem::RefreshLiveMetadataFromStage(AUsdStageActor* Actor)
 
 bool UUSDConnectSubsystem::IsConnected() const
 {
-	return SyncClient && SyncClient->IsConnected();
+	return Receiver && Receiver->Status().Connected;
 }
 
 FUSDConnectStatus UUSDConnectSubsystem::GetStatus() const
@@ -373,25 +455,35 @@ FUSDConnectStatus UUSDConnectSubsystem::GetStatus() const
 	Status.bUsingLiveMetadata = bActiveUsingLiveMetadata;
 	Status.SnapshotSeq = ActiveSnapshotSeq;
 	Status.bReceiverStarted = bActiveReceiverStarted;
-	Status.bReceiverConnected = SyncClient && SyncClient->IsConnected();
-	Status.bReceiverSynchronized = bReplaySynchronized.load();
 	Status.bEmitterStarted = bActiveEmitterStarted;
-	Status.bEmitterConnected = EmitClient && EmitClient->IsConnected();
-	if (ProducerState)
+	if (Receiver)
 	{
-		Status.SubmittedTransactions =
-			static_cast<int64>(ProducerState->GetSubmittedTransactionCount());
-		Status.AcknowledgedTransactions =
-			static_cast<int64>(ProducerState->GetAcknowledgedTransactionCount());
-		Status.PendingTransactions = static_cast<int32>(FMath::Min<uint64>(
-			ProducerState->GetPendingTransactionCount(), static_cast<uint64>(MAX_int32)));
-		Status.bRecoveryRequired = ProducerState->IsRecoveryRequired();
-		Status.RecoveryDisposition = ProducerState->GetRecoveryDisposition();
+		const ClientCore::ReceiverStatus ReceiverState = Receiver->Status();
+		Status.bReceiverConnected = ReceiverState.Connected;
+		Status.bReceiverSynchronized = ReceiverState.Synchronized;
 	}
 	{
 		FScopeLock Lock(&StatusCS);
 		Status.AuthState = LastAuthState;
 		Status.LastMessage = LastStatusMessage;
+	}
+	if (Producer)
+	{
+		const ClientCore::ProducerStatus ProducerState = Producer->Status();
+		Status.bEmitterConnected = ProducerState.Connected;
+		Status.SubmittedTransactions = static_cast<int64>(ProducerState.NextTransactionId - 1);
+		Status.AcknowledgedTransactions =
+			static_cast<int64>(ProducerState.AcknowledgedTransactions);
+		Status.PendingTransactions = static_cast<int32>(
+			FMath::Min<uint64>(ProducerState.PendingTransactions, static_cast<uint64>(MAX_int32)));
+		if (ProducerState.Failure)
+		{
+			Status.bRecoveryRequired = true;
+			Status.RecoveryDisposition =
+				ToRecoveryDisposition(ProducerState.Failure->Disposition());
+			Status.AuthState = TEXT("recovery_required");
+			Status.LastMessage = OUC::ToFString(ProducerState.Failure->Describe());
+		}
 	}
 	return Status;
 }
@@ -425,144 +517,117 @@ void UUSDConnectSubsystem::SetStatusMessage(const FString& AuthState, const FStr
 	LastStatusMessage = Message;
 }
 
-void UUSDConnectSubsystem::OnClientTokenIssued(const FString& Token)
+FString UUSDConnectSubsystem::ReadAuthToken() const
 {
-	if (!IsInGameThread())
-	{
-		TWeakObjectPtr<UUSDConnectSubsystem> WeakThis(this);
-		AsyncTask(ENamedThreads::GameThread,
-				  [WeakThis, Token]()
-				  {
-					  if (WeakThis.IsValid())
-					  {
-						  WeakThis->OnClientTokenIssued(Token);
-					  }
-				  });
-		return;
-	}
+	FScopeLock Lock(&AuthTokenCS);
+	return ActiveAuthToken;
+}
 
-	const UUSDConnectSettings* Settings = GetDefault<UUSDConnectSettings>();
+void UUSDConnectSubsystem::SetAuthToken(const FString& Token)
+{
+	FScopeLock Lock(&AuthTokenCS);
 	ActiveAuthToken = Token;
-	bool bPersisted = false;
-	if (Settings && Settings->bPersistAuthTokens)
+}
+
+void UUSDConnectSubsystem::DeliverNotifications()
+{
+	for (const bool bProducer : {false, true})
 	{
-		SaveAuthToken(ActiveServerHost, ActiveServerPort, Settings->Department, Token);
-		bPersisted = true;
-	}
-	SetStatusMessage(bPersisted ? TEXT("token_saved") : TEXT("token_issued"),
-					 bPersisted ? TEXT("Auth token issued and saved")
-								: TEXT("Auth token issued for this session"));
-	if (bDeferredEmitterForToken)
-	{
-		UE_LOG(LogUSDConnectSubsystem, Log,
-			   TEXT("Auth token issued; emitter will start on the next tick"));
+		ClientCore::NotificationQueue& Queue =
+			bProducer ? *ProducerNotifications : *ReceiverNotifications;
+		const TCHAR* Role = bProducer ? TEXT("Emitter") : TEXT("Receiver");
+		for (const ClientCore::Notification& Notification : Queue.Drain())
+		{
+			std::visit(
+				[this, bProducer, Role](const auto& Value)
+				{
+					using FKind = std::decay_t<decltype(Value)>;
+					if constexpr (std::is_same_v<FKind, ClientCore::TokenIssued>)
+					{
+						const FString Token = OUC::ToFString(Value.Token);
+						SetAuthToken(Token);
+						const UUSDConnectSettings* Settings = GetDefault<UUSDConnectSettings>();
+						const bool bPersisted = Settings && Settings->bPersistAuthTokens;
+						if (bPersisted)
+						{
+							SaveAuthToken(ActiveServerHost, ActiveServerPort, Settings->Department,
+										  Token);
+						}
+						SetStatusMessage(bPersisted ? TEXT("token_saved") : TEXT("token_issued"),
+										 bPersisted ? TEXT("Auth token issued and saved")
+													: TEXT("Auth token issued for this session"));
+						if (bDeferredEmitterForToken)
+						{
+							bDeferredEmitterForToken = false;
+							bActiveEmitterStarted = true;
+							SetStatusMessage(TEXT("connected"),
+											 TEXT("Auth token available; emitter started"));
+						}
+					}
+					else if constexpr (std::is_same_v<FKind, ClientCore::Connected>)
+					{
+						if (bProducer)
+						{
+							// A replacement server has no guarantee that it saw prerequisites from
+							// the previous connection. Requeue the current values and make their
+							// first transaction on this connection self-contained.
+							{
+								FScopeLock Lock(&PendingEmitPathsCS);
+								PendingEmitPaths.Append(EmittedXformPrims);
+							}
+							EmittedXformPrims.Reset();
+						}
+						SetStatusMessage(TEXT("connected"),
+										 FString::Printf(TEXT("%s connected to %s:%d"), Role,
+														 *ActiveServerHost, ActiveServerPort));
+					}
+					else if constexpr (std::is_same_v<FKind, ClientCore::Disconnected>)
+					{
+						SetStatusMessage(TEXT("not_connected"),
+										 FString::Printf(TEXT("%s disconnected from %s:%d"), Role,
+														 *ActiveServerHost, ActiveServerPort));
+					}
+					else if constexpr (std::is_same_v<FKind, ClientCore::HandshakeRejected>)
+					{
+						const FString Reason = OUC::ToFString(Value.Reason);
+						if (Value.Authentication)
+						{
+							SetStatusMessage(
+								TEXT("auth_rejected"),
+								FString::Printf(TEXT("%s auth rejected: %s"), Role, *Reason));
+						}
+						else
+						{
+							const OpenUSDConnect::HelloRejectionCode Code = Value.Code;
+							SetStatusMessage(
+								Code == OpenUSDConnect::HelloRejectionCode::Unspecified
+									? FString(TEXT("connection_rejected"))
+									: FString(UTF8_TO_TCHAR(
+										  OpenUSDConnect::EnumNameHelloRejectionCode(Code))),
+								FString::Printf(TEXT("%s connection rejected: %s"), Role, *Reason));
+						}
+					}
+					// Stage metadata and playback notifications have no consumer in Unreal.
+				},
+				Notification);
+		}
 	}
 }
 
-void UUSDConnectSubsystem::OnClientHelloOk(const FString& Role)
+void UUSDConnectSubsystem::RequestProducerConnect() const
 {
-	if (!IsInGameThread())
+	const ClientCore::TimePoint Current = Now();
+	if (Producer->RequestConnect(Current, Current + Producer->Configuration().HandshakeTimeout))
 	{
-		TWeakObjectPtr<UUSDConnectSubsystem> WeakThis(this);
-		AsyncTask(ENamedThreads::GameThread,
-				  [WeakThis, Role]()
-				  {
-					  if (WeakThis.IsValid())
-					  {
-						  WeakThis->OnClientHelloOk(Role);
-					  }
-				  });
-		return;
+		ProducerRunner->Wake();
 	}
-
-	SetStatusMessage(TEXT("connected"), FString::Printf(TEXT("%s connected"), *Role));
-}
-
-void UUSDConnectSubsystem::OnReceiverReplayGenerationChanged(uint64 ReplayGeneration)
-{
-	uint64 Current = ActiveReplayGeneration.load(std::memory_order_acquire);
-	while (ReplayGeneration > Current &&
-		   !ActiveReplayGeneration.compare_exchange_weak(
-			   Current, ReplayGeneration, std::memory_order_acq_rel, std::memory_order_acquire))
-	{
-	}
-	if (ReplayGeneration < Current)
-		return;
-	bReplaySynchronized.store(false);
-}
-
-void UUSDConnectSubsystem::OnEmitterTransactionRejected(uint64 TxnId, const FString& Reason)
-{
-	if (!IsInGameThread())
-	{
-		TWeakObjectPtr<UUSDConnectSubsystem> WeakThis(this);
-		AsyncTask(ENamedThreads::GameThread,
-				  [WeakThis, TxnId, Reason]()
-				  {
-					  if (WeakThis.IsValid())
-					  {
-						  WeakThis->OnEmitterTransactionRejected(TxnId, Reason);
-					  }
-				  });
-		return;
-	}
-
-	SetStatusMessage(TEXT("recovery_required"),
-					 Reason.IsEmpty()
-						 ? FString::Printf(TEXT("Transaction %llu rejected"), TxnId)
-						 : FString::Printf(TEXT("Transaction %llu rejected: %s"), TxnId, *Reason));
-}
-
-void UUSDConnectSubsystem::OnClientAuthRejected(const FString& Role)
-{
-	if (!IsInGameThread())
-	{
-		TWeakObjectPtr<UUSDConnectSubsystem> WeakThis(this);
-		AsyncTask(ENamedThreads::GameThread,
-				  [WeakThis, Role]()
-				  {
-					  if (WeakThis.IsValid())
-					  {
-						  WeakThis->OnClientAuthRejected(Role);
-					  }
-				  });
-		return;
-	}
-
-	SetStatusMessage(TEXT("auth_rejected"), FString::Printf(TEXT("%s auth rejected"), *Role));
-}
-
-void UUSDConnectSubsystem::OnClientHelloRejected(const FString& Role, const FString& Code,
-												 const FString& Reason)
-{
-	if (!IsInGameThread())
-	{
-		TWeakObjectPtr<UUSDConnectSubsystem> WeakThis(this);
-		AsyncTask(ENamedThreads::GameThread,
-				  [WeakThis, Role, Code, Reason]()
-				  {
-					  if (WeakThis.IsValid())
-					  {
-						  WeakThis->OnClientHelloRejected(Role, Code, Reason);
-					  }
-				  });
-		return;
-	}
-
-	const FString Message =
-		Reason.IsEmpty() ? FString::Printf(TEXT("%s connection rejected"), *Role)
-						 : FString::Printf(TEXT("%s connection rejected: %s"), *Role, *Reason);
-	SetStatusMessage(Code.IsEmpty() ? TEXT("connection_rejected") : Code, Message);
 }
 
 void UUSDConnectSubsystem::RequestReceiverReplay(const FString& Reason)
 {
 	SetStatusMessage(TEXT("receiver_recovering"), Reason);
-	if (SyncClient)
-	{
-		SyncClient->RequestReplayFromApplied();
-		OnReceiverReplayGenerationChanged(SyncClient->GetGeneration());
-	}
+	verify(Receiver->RequestReplayFrom(Receiver->Status().LastAppliedSequence + 1));
+	ReceiverRunner->Wake();
 }
 
 // ---------------------------------------------------------------------------
@@ -613,7 +678,12 @@ void UUSDConnectSubsystem::Tick(float DeltaTime)
 
 	DrainAndApply();
 
-	TryStartDeferredEmitter();
+	// Token, connection, and rejection reports from both runner threads.
+	DeliverNotifications();
+	if (Producer && bActiveEmitterStarted)
+	{
+		RequestProducerConnect();
+	}
 
 	// Emit any user edits captured by the USD notice listener since last tick.
 	DrainAndEmit();
@@ -726,7 +796,7 @@ void UUSDConnectSubsystem::DetachFromStageActor()
 
 void UUSDConnectSubsystem::DrainAndApply()
 {
-	if (!SyncClient)
+	if (!Receiver)
 	{
 		return;
 	}
@@ -734,8 +804,8 @@ void UUSDConnectSubsystem::DrainAndApply()
 	AUsdStageActor* StageActor = CachedStageActor.Get();
 	if (!StageActor || !IsValid(StageActor))
 	{
-		constexpr int32 MaxBufferedFrames = 5000;
-		if (SyncClient->GetPendingFrameCount() > MaxBufferedFrames)
+		constexpr size_t MaxBufferedFrames = 5000;
+		if (Receiver->Status().QueuedFrames > MaxBufferedFrames)
 		{
 			RequestReceiverReplay(
 				TEXT("Receiver queue overflowed before a USD stage was available; replay requested "
@@ -744,34 +814,12 @@ void UUSDConnectSubsystem::DrainAndApply()
 		return;
 	}
 
-	auto PublishReplayIfApplied = [this]()
-	{
-		if (!SyncClient || !SyncClient->MarkReplayApplied())
-		{
-			return;
-		}
-		ReplayHeadSeq = SyncClient->GetReplayHeadSeq();
-		ReplayEpoch = SyncClient->GetReplayEpoch();
-		bReplaySynchronized.store(true);
-		UE_LOG(LogUSDConnectSubsystem, Log,
-			   TEXT("Receiver replay applied through seq=%d epoch=%llu publishing enabled"),
-			   ReplayHeadSeq, static_cast<unsigned long long>(ReplayEpoch));
-	};
-
-	PublishReplayIfApplied();
-	if (SyncClient->GetPendingFrameCount() == 0)
-	{
-		return;
-	}
-
 	constexpr int32 MaxApplyPerTick = 512;
 	constexpr double MaxApplySecondsPerTick = 0.016; // 16 ms preserves ~60 fps
 
 	const double Start = FPlatformTime::Seconds();
 	int32 Applied = 0;
-	int32 LastApplied = SyncClient->GetLastAppliedSeq();
-	bool bNeedsReplay = false;
-	FString RecoveryReason;
+	FString FailureReason;
 
 	bSuppressEmit.store(true);
 	{
@@ -779,35 +827,31 @@ void UUSDConnectSubsystem::DrainAndApply()
 		while (Applied < MaxApplyPerTick &&
 			   FPlatformTime::Seconds() - Start <= MaxApplySecondsPerTick)
 		{
-			FValidatedReceiverFrame Frame;
-			if (!SyncClient->TryPopFrame(Frame))
+			// One frame per drain, so the time budget never strands drained frames.
+			const uint64 Generation = Receiver->Generation();
+			const std::vector<std::vector<uint8>> Drained = Receiver->DrainFrames(1);
+			if (Drained.empty())
 			{
 				break;
 			}
-			if (Frame.bResync)
+			++Applied;
+			const std::vector<uint8>& Frame = Drained.front();
+			// The endpoint verified every queued envelope.
+			const OpenUSDConnect::Envelope* Envelope = OpenUSDConnect::GetEnvelope(Frame.data());
+			if (Envelope->payload_type() == OpenUSDConnect::Payload::Resync)
 			{
 				RunBlock.Reset();
-				SyncClient->ResetAppliedProgress();
-				LastApplied = 0;
-				bReplaySynchronized.store(false);
-				++Applied;
+				Receiver->ResetAppliedProgress();
 				continue;
 			}
-			const int32 Seq = Frame.Sequence;
-			if (Seq <= LastApplied)
+			const OpenUSDConnect::BroadcastEvent* Broadcast = Envelope->payload_as_BroadcastEvent();
+			if (!Broadcast)
 			{
-				++Applied;
 				continue;
 			}
-			if (Seq != LastApplied + 1)
-			{
-				bNeedsReplay = true;
-				RecoveryReason = FString::Printf(
-					TEXT("Receiver apply gap: expected=%d dequeued=%d"), LastApplied + 1, Seq);
-				break;
-			}
-
-			if (Frame.bUsesChangeBlock)
+			const int32 Seq = Broadcast->seq();
+			const OpenUSDConnect::EventPayload EventKind = Broadcast->event()->event_type();
+			if (FUSDEventApplier::EventUsesChangeBlock(EventKind))
 			{
 				if (!RunBlock)
 				{
@@ -819,46 +863,50 @@ void UUSDConnectSubsystem::DrainAndApply()
 				RunBlock.Reset();
 			}
 			FString TouchedPrim;
-			if (!FUSDEventApplier::ApplyValidatedFrame(Frame.Bytes, StageActor, &TouchedPrim))
+			if (!FUSDEventApplier::ApplyValidatedFrame(
+					MakeArrayView(Frame.data(), static_cast<int32>(Frame.size())), StageActor,
+					&TouchedPrim))
 			{
 				RunBlock.Reset();
-				bNeedsReplay = true;
-				RecoveryReason = FString::Printf(TEXT("Failed to apply receiver sequence %d"), Seq);
+				FailureReason = FString::Printf(TEXT("Failed to apply receiver sequence %d"), Seq);
 				break;
 			}
-			LastApplied = Seq;
-			if (!SyncClient->MarkAppliedThrough(Seq))
-			{
-				RunBlock.Reset();
-				bNeedsReplay = true;
-				RecoveryReason = FString::Printf(
-					TEXT("Receiver could not advance the applied cursor through seq=%d"), Seq);
-				break;
-			}
+			// False only when a reconnect replaced the stream, which then resumes
+			// from its own cursor.
+			static_cast<void>(Receiver->MarkAppliedThrough(Generation, Seq));
 			// Received network edits dirty their owning material for the
 			// materializer. EnsurePrim is included because shader-node
 			// creation changes the network without a connectable event.
 			if (!TouchedPrim.IsEmpty() &&
-				(Frame.EventKind == OpenUSDConnect::EventPayload::SetConnectableInput ||
-				 Frame.EventKind == OpenUSDConnect::EventPayload::SetConnectableConnection ||
-				 Frame.EventKind == OpenUSDConnect::EventPayload::EnsurePrim))
+				(EventKind == OpenUSDConnect::EventPayload::SetConnectableInput ||
+				 EventKind == OpenUSDConnect::EventPayload::SetConnectableConnection ||
+				 EventKind == OpenUSDConnect::EventPayload::EnsurePrim))
 			{
 				PendingMaterializePrims.Add(MoveTemp(TouchedPrim));
 			}
-			++Applied;
 		}
 	}
 	bSuppressEmit.store(false);
-	if (bNeedsReplay)
+	if (!FailureReason.IsEmpty())
 	{
-		RequestReceiverReplay(RecoveryReason);
+		RequestReceiverReplay(FailureReason);
 		return;
 	}
 
-	PublishReplayIfApplied();
-	const int32 QueueRemaining = SyncClient->GetPendingFrameCount();
-	UE_LOG(LogUSDConnectSubsystem, Verbose,
-		   TEXT("Applied %d event(s) this tick (queue remaining: %d)"), Applied, QueueRemaining);
+	if (Receiver->MarkReplayApplied())
+	{
+		const ClientCore::ReceiverStatus ReceiverState = Receiver->Status();
+		UE_LOG(LogUSDConnectSubsystem, Log,
+			   TEXT("Receiver replay applied through seq=%d epoch=%llu publishing enabled"),
+			   ReceiverState.ReplayHeadSequence, static_cast<uint64>(ReceiverState.ReplayEpoch));
+		ReceiverRunner->Wake();
+	}
+	if (Applied > 0)
+	{
+		UE_LOG(LogUSDConnectSubsystem, Verbose,
+			   TEXT("Applied %d frame(s) this tick (queue remaining: %llu)"), Applied,
+			   static_cast<uint64>(Receiver->Status().QueuedFrames));
+	}
 }
 
 // ---------------------------------------------------------------------------
@@ -867,29 +915,11 @@ void UUSDConnectSubsystem::DrainAndApply()
 
 void UUSDConnectSubsystem::DrainAndEmit()
 {
-	if (!EmitClient || !EmitClient->IsConnected())
+	if (!Producer || !Receiver || bSuppressEmit.load())
 		return;
-	if (!bReplaySynchronized.load())
+	// New transactions wait until the receiver's replay is applied.
+	if (!Producer->Status().Connected || !Receiver->Status().Synchronized)
 		return;
-	if (bSuppressEmit.load())
-		return;
-
-	const uint64 ConnectionGeneration = EmitClient->GetConnectionGeneration();
-	if (ConnectionGeneration != LastEmitConnectionGeneration)
-	{
-		// A replacement server has no guarantee that it saw prerequisites from
-		// the previous TCP connection. Requeue the current values and make their
-		// first transaction on this connection self-contained.
-		{
-			FScopeLock Lock(&PendingEmitPathsCS);
-			for (const FString& PrimPath : EmittedXformPrims)
-			{
-				PendingEmitPaths.Add(PrimPath);
-			}
-		}
-		EmittedXformPrims.Reset();
-		LastEmitConnectionGeneration = ConnectionGeneration;
-	}
 
 	AUsdStageActor* StageActor = CachedStageActor.Get();
 	if (!StageActor || !IsValid(StageActor))
@@ -949,25 +979,15 @@ void UUSDConnectSubsystem::EmitPrimChange(AUsdStageActor* StageActor, const FStr
 				bSuppressEmit.store(false);
 			}
 
-			TArray<FEmitXformTrs> Batch = {Xform};
+			const TArray<FEmitXformTrs> Batch = {Xform};
 			const bool bIncludeEnsureXformOps = !EmittedXformPrims.Contains(PrimPath);
-			const uint64 TxnId = ProducerState->GetNextTransactionId();
-			OUC::FWireFrame Frame;
-			const openusdconnect::client::FrameResult FrameResult =
-				BuildXformTxnFrame(TxnId, Batch, Frame, bIncludeEnsureXformOps);
-			if (FrameResult != openusdconnect::client::FrameResult::Success)
-			{
-				UE_LOG(LogUSDConnectSubsystem, Error,
-					   TEXT("EmitPrimChange(%s): failed to build TRS frame"), *PrimPath);
-				return;
-			}
-			UE_LOG(LogUSDConnectSubsystem, Verbose,
-				   TEXT("EmitPrimChange(%s): TRS frame built (%d bytes, fields=0x%02x%s%s); "
-						"enqueueing"),
-				   *PrimPath, Frame.Num(), Xform.Fields,
-				   bFromMatrixOp ? TEXT(", decomposed from matrix op") : TEXT(""),
-				   bIncludeEnsureXformOps ? TEXT(", includes ensure_xform_ops") : TEXT(""));
-			if (EmitClient->EnqueueFrame(TxnId, MoveTemp(Frame)))
+			if (SubmitTransaction(PrimPath, TEXT("TRS"), bIncludeEnsureXformOps ? 2 : 1,
+								  [&](uint64 TxnId, std::vector<uint8>& Frame)
+								  {
+									  return BuildXformTxnFrame(TxnId, Batch, Frame,
+																bIncludeEnsureXformOps) ==
+											 ClientCore::ProtocolResult::Success;
+								  }))
 			{
 				EmittedXformPrims.Add(PrimPath);
 			}
@@ -979,23 +999,13 @@ void UUSDConnectSubsystem::EmitPrimChange(AUsdStageActor* StageActor, const FStr
 		FEmitVisibility Vis;
 		if (FUSDStageBridge::ReadVisibility(StageActor, PrimPath, Vis))
 		{
-			TArray<FEmitVisibility> Batch = {Vis};
-			const uint64 TxnId = ProducerState->GetNextTransactionId();
-			OUC::FWireFrame Frame;
-			const openusdconnect::client::FrameResult FrameResult =
-				BuildVisibilityTxnFrame(TxnId, Batch, Frame);
-			if (FrameResult != openusdconnect::client::FrameResult::Success)
-			{
-				UE_LOG(LogUSDConnectSubsystem, Error,
-					   TEXT("EmitPrimChange(%s): failed to build visibility frame"), *PrimPath);
-				return;
-			}
-			UE_LOG(
-				LogUSDConnectSubsystem, Verbose,
-				TEXT(
-					"EmitPrimChange(%s): Visibility frame built (%d bytes, visible=%d) enqueueing"),
-				*PrimPath, Frame.Num(), Vis.bVisible ? 1 : 0);
-			EmitClient->EnqueueFrame(TxnId, MoveTemp(Frame));
+			const TArray<FEmitVisibility> Batch = {Vis};
+			SubmitTransaction(PrimPath, TEXT("visibility"), 1,
+							  [&](uint64 TxnId, std::vector<uint8>& Frame)
+							  {
+								  return BuildVisibilityTxnFrame(TxnId, Batch, Frame) ==
+										 ClientCore::ProtocolResult::Success;
+							  });
 		}
 	}
 }
@@ -1010,21 +1020,39 @@ void UUSDConnectSubsystem::EmitConnectableInputs(AUsdStageActor* StageActor,
 		return;
 	}
 
-	TArray<FEmitConnectableInput> Batch = {MoveTemp(Event)};
-	const uint64 TxnId = ProducerState->GetNextTransactionId();
-	OUC::FWireFrame Frame;
-	const openusdconnect::client::FrameResult FrameResult =
-		BuildConnectableInputTxnFrame(TxnId, Batch, Frame);
-	if (FrameResult != openusdconnect::client::FrameResult::Success)
+	const TArray<FEmitConnectableInput> Batch = {MoveTemp(Event)};
+	SubmitTransaction(PrimPath, TEXT("connectable input"), 1,
+					  [&](uint64 TxnId, std::vector<uint8>& Frame)
+					  {
+						  return BuildConnectableInputTxnFrame(TxnId, Batch, Frame) ==
+								 ClientCore::ProtocolResult::Success;
+					  });
+}
+
+bool UUSDConnectSubsystem::SubmitTransaction(
+	const FString& PrimPath, const TCHAR* Kind, int32 EventCount,
+	TFunctionRef<bool(uint64, std::vector<uint8>&)> BuildFrame)
+{
+	FScopeLock Lock(&SubmitCS);
+	const uint64 TxnId = Producer->NextTransactionId();
+	std::vector<uint8> Frame;
+	if (!BuildFrame(TxnId, Frame))
 	{
-		UE_LOG(LogUSDConnectSubsystem, Error,
-			   TEXT("EmitConnectableInputs(%s): failed to build frame"), *PrimPath);
-		return;
+		UE_LOG(LogUSDConnectSubsystem, Error, TEXT("Failed to build the %s transaction for %s"),
+			   Kind, *PrimPath);
+		return false;
 	}
-	UE_LOG(LogUSDConnectSubsystem, Verbose,
-		   TEXT("EmitConnectableInputs(%s): %d input(s), frame %d bytes enqueueing"), *PrimPath,
-		   Batch[0].Inputs.Num(), Frame.Num());
-	EmitClient->EnqueueFrame(TxnId, MoveTemp(Frame));
+	UE_LOG(LogUSDConnectSubsystem, Verbose, TEXT("Appending %s transaction %llu for %s (%d bytes)"),
+		   Kind, TxnId, *PrimPath, static_cast<int32>(Frame.size()));
+	if (Producer->Append(TxnId, MoveTemp(Frame), static_cast<size_t>(EventCount), std::string()) !=
+		ClientCore::ProducerResult::Accepted)
+	{
+		UE_LOG(LogUSDConnectSubsystem, Warning,
+			   TEXT("The emitter refused the %s transaction for %s"), Kind, *PrimPath);
+		return false;
+	}
+	ProducerRunner->Wake();
+	return true;
 }
 
 // ---------------------------------------------------------------------------

@@ -90,7 +90,7 @@ enum class ConnectResult : std::uint8_t
 // Sans-IO producer: the host applies the returned actions in order, on the
 // thread that reports its socket events, and reports time. It connects only
 // when asked. Thread-safe; never blocks or calls into the host.
-class ProducerEndpoint final
+class OPENUSDCONNECT_CLIENT_API ProducerEndpoint final
 {
 public:
 	ProducerEndpoint(ProducerConfig config, NotificationQueue& notifications);

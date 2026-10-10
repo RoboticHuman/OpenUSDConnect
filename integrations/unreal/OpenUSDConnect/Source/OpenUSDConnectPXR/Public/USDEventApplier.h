@@ -41,7 +41,7 @@ public:
 	 * owns any
 	 * surrounding SdfChangeBlock according to EventUsesChangeBlock().
 	 */
-	static bool ApplyValidatedFrame(const TArray<uint8>& RawFrame, AUsdStageActor* StageActor,
+	static bool ApplyValidatedFrame(TConstArrayView<uint8> RawFrame, AUsdStageActor* StageActor,
 									FString* OutTouchedPrim = nullptr,
 									OpenUSDConnect::EventPayload* OutEventKind = nullptr);
 

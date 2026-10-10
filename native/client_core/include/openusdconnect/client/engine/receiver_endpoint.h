@@ -60,7 +60,7 @@ struct ReceiverStatus final
 
 // Sans-IO receiver: the host applies the returned actions and reports socket
 // events and time. Thread-safe; never blocks or calls into the host.
-class ReceiverEndpoint final
+class OPENUSDCONNECT_CLIENT_API ReceiverEndpoint final
 {
 public:
 	ReceiverEndpoint(ReceiverConfig config, NotificationQueue& notifications);

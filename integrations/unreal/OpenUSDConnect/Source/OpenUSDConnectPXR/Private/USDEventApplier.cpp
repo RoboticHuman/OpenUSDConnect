@@ -1798,7 +1798,7 @@ const OpenUSDConnect::EventWrapper* GetFrameEventWrapper(const TArray<uint8>& Ra
 	return BcEvent ? BcEvent->event() : nullptr;
 }
 
-const OpenUSDConnect::EventWrapper* GetValidatedFrameEventWrapper(const TArray<uint8>& RawFrame)
+const OpenUSDConnect::EventWrapper* GetValidatedFrameEventWrapper(TConstArrayView<uint8> RawFrame)
 {
 	const OpenUSDConnect::Envelope* Env = OpenUSDConnect::GetEnvelope(RawFrame.GetData());
 	return Env->payload_as_BroadcastEvent()->event();
@@ -1887,7 +1887,7 @@ bool FUSDEventApplier::ApplyFrame(const TArray<uint8>& RawFrame, AUsdStageActor*
 	return ApplyEventWrapper(Wrapper, StageActor, OutTouchedPrim, OutEventKind, true);
 }
 
-bool FUSDEventApplier::ApplyValidatedFrame(const TArray<uint8>& RawFrame,
+bool FUSDEventApplier::ApplyValidatedFrame(TConstArrayView<uint8> RawFrame,
 										   AUsdStageActor* StageActor, FString* OutTouchedPrim,
 										   OpenUSDConnect::EventPayload* OutEventKind)
 {
