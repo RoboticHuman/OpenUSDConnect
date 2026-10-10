@@ -74,6 +74,13 @@ public:
 		Changed.notify_all();
 	}
 
+	// Like Stop, but the loop applies the queued actions, such as sends, before it exits.
+	void StopAfterQueued()
+	{
+		Target.Stop();
+		Wake();
+	}
+
 	void Wake()
 	{
 		std::shared_ptr<Socket> socket;
@@ -119,6 +126,32 @@ public:
 			Thread.join();
 		}
 		return true;
+	}
+
+	static constexpr std::chrono::milliseconds kCloseGrace{1'000};
+
+	// With a connected socket, StopAfterQueued and Join for kCloseGrace or a shorter
+	// timeout; then Stop and Join the rest of timeout. Returns whether the loop exited;
+	// on the loop thread, false at once, and the loop exits after the callback returns.
+	[[nodiscard]] bool Close(std::optional<std::chrono::milliseconds> timeout)
+	{
+		const std::optional<TimePoint> deadline =
+			timeout ? std::optional(Now() + *timeout) : std::nullopt;
+		if (IsConnectionOpen())
+		{
+			StopAfterQueued();
+			if (Join(std::min(timeout.value_or(kCloseGrace), kCloseGrace)))
+			{
+				return true;
+			}
+		}
+		if (ThreadId() == std::this_thread::get_id())
+		{
+			StopAfterQueued();
+			return false;
+		}
+		Stop();
+		return Join(Until(deadline));
 	}
 
 	[[nodiscard]] bool Running() const
@@ -200,6 +233,18 @@ protected:
 	[[nodiscard]] static TimePoint Now() noexcept
 	{
 		return std::chrono::steady_clock::now();
+	}
+
+	[[nodiscard]] static std::chrono::milliseconds Until(TimePoint deadline) noexcept
+	{
+		return std::max(std::chrono::ceil<std::chrono::milliseconds>(deadline - Now()),
+						std::chrono::milliseconds::zero());
+	}
+
+	[[nodiscard]] static std::optional<std::chrono::milliseconds>
+	Until(std::optional<TimePoint> deadline)
+	{
+		return deadline ? std::optional(Until(*deadline)) : std::nullopt;
 	}
 
 	Endpoint& Target;
@@ -299,14 +344,18 @@ private:
 		{
 			Fail(SocketOperation::Connect, result, *socket,
 				 "could not connect to " + action.Host + ":" + std::to_string(action.Port));
-			Close(DisconnectReason::ConnectFailed);
+			CloseConnection(DisconnectReason::ConnectFailed);
 			return;
+		}
+		{
+			std::lock_guard lock(Mutex);
+			ConnectionOpen = true;
 		}
 		const std::optional<std::string> token =
 			Callbacks.Token ? Callbacks.Token() : std::optional<std::string>(std::in_place);
 		if (!token)
 		{
-			Close(DisconnectReason::ConnectFailed);
+			CloseConnection(DisconnectReason::ConnectFailed);
 			return;
 		}
 		Target.OnConnected(*token);
@@ -323,13 +372,13 @@ private:
 		if (result != SocketResult::Success)
 		{
 			Fail(SocketOperation::Send, result, *Connection, "send failed");
-			Close(DisconnectReason::TransportError);
+			CloseConnection(DisconnectReason::TransportError);
 		}
 	}
 
 	void Apply(const CloseAction& action)
 	{
-		Close(action.Reason);
+		CloseConnection(action.Reason);
 	}
 
 	void Apply(const LogAction& action)
@@ -367,11 +416,11 @@ private:
 		case SocketResult::Interrupted:
 			return;
 		case SocketResult::Closed:
-			Close(DisconnectReason::PeerClosed);
+			CloseConnection(DisconnectReason::PeerClosed);
 			return;
 		case SocketResult::Failed:
 			Fail(SocketOperation::Receive, result, *Connection, "receive failed");
-			Close(DisconnectReason::TransportError);
+			CloseConnection(DisconnectReason::TransportError);
 			return;
 		}
 	}
@@ -393,12 +442,13 @@ private:
 		}
 	}
 
-	void Close(DisconnectReason reason)
+	void CloseConnection(DisconnectReason reason)
 	{
 		std::shared_ptr<Socket> closed;
 		{
 			std::lock_guard lock(Mutex);
 			closed = std::exchange(Connection, nullptr);
+			ConnectionOpen = false;
 		}
 		closed.reset();
 		Target.OnDisconnected(reason, Now());
@@ -421,6 +471,12 @@ private:
 		Log(LogLevel::Warning, context + ": " + Describe(failure));
 	}
 
+	[[nodiscard]] bool IsConnectionOpen() const
+	{
+		std::lock_guard lock(Mutex);
+		return ConnectionOpen;
+	}
+
 	void Log(LogLevel level, const std::string& message)
 	{
 		if (Callbacks.Log)
@@ -440,6 +496,8 @@ private:
 	std::condition_variable Changed;
 	// Written only by the loop thread under Mutex, so the loop reads it unlocked.
 	std::shared_ptr<Socket> Connection;
+	// Connection finished connecting, so the writes queued for it can still reach the peer.
+	bool ConnectionOpen = false;
 	std::optional<TransportFailure> Failure;
 	std::thread::id ThreadIdentity;
 	bool Started = false;

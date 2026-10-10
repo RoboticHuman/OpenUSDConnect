@@ -206,9 +206,9 @@ private:
 		}
 		if (self.is_valid() && Py_REFCNT(self.ptr()) == 1)
 		{
-			// Its owner is gone: stop now, and destroy it on the main thread. A
-			// full pending-call queue leaks the stopped driver instead.
-			Native->Stop();
+			// Its owner is gone: the loop writes what is queued and exits, and the main
+			// thread destroys the driver. A full pending-call queue leaks it instead.
+			Native->StopAfterQueued();
 			static_cast<void>(Py_AddPendingCall(
 				[](void* object)
 				{

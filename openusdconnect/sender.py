@@ -335,9 +335,9 @@ class EventSender:
         acknowledgements; :meth:`flush` does. Waits up to ``timeout`` seconds
         in all, without limit for ``None``, and returns whether the thread has
         exited: ``True`` before the first connection request, ``False`` on
-        timeout or from a callback, which runs on that thread and stops it
-        without writing. Afterwards :meth:`connect` and :meth:`request_connect`
-        return ``False``; repeated calls are harmless.
+        timeout or at once from a callback, which runs on that thread; the
+        thread then exits once the callback returns. Afterwards :meth:`connect`
+        and :meth:`request_connect` return ``False``; repeated calls are harmless.
         """
         return self._driver.close(timeout)
 

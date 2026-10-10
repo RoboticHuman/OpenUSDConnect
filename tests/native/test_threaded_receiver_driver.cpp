@@ -185,6 +185,14 @@ void TestStopInterruptsBlockingCalls()
 	}
 }
 
+void TestCloseEndsTheConnection()
+{
+	Harness harness(FastConfig());
+	const std::shared_ptr<ScriptedConnection> connection = harness.Handshake();
+	CHECK(harness.Driver->Close(kPatience));
+	CHECK(connection->ClosedByClient());
+}
+
 void TestWakeAppliesAReplayRequest()
 {
 	Harness harness(FastConfig());
@@ -245,6 +253,7 @@ int main()
 	TestReadTimeoutsReconnect();
 	TestFailedConnectIsRecordedAndRetried();
 	TestStopInterruptsBlockingCalls();
+	TestCloseEndsTheConnection();
 	TestWakeAppliesAReplayRequest();
 	TestCallbacksReenterTheEndpointAndDriver();
 	return 0;
