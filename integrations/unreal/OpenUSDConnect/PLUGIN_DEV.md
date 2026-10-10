@@ -20,8 +20,8 @@ the plugin's modules, threading model, protocol implementation, and known gaps.
 │            bSuppressEmit=true                                                │
 │                                                                              │
 │  OnObjectsChanged() ─► queues exact changed Sdf paths                         │
-│  Tick()             ─► drains those paths unless bSuppressEmit is true       │
-│                     ─► reads TRS / visibility / shader inputs                │
+│  Tick()             ─► reads their TRS / visibility / shader inputs before   │
+│                        applying received frames (latest value wins)          │
 │                     ─► encodes Txn frames and appends them to the producer   │
 │                                                                              │
 └──────────────────┬─────────────────────────────────┬─────────────────────────┘
@@ -152,9 +152,12 @@ deadlock loading at ~90 %.
 preventing received changes and local MaterialX support opinions from being
 emitted back to the server.
 
-The listener reports exact Sdf paths. They are coalesced in `PendingEmitPaths`
-and drained once per tick, avoiding the ancestor roll-up behavior of
-`AUsdStageActor::OnPrimChanged`.
+The listener reports exact Sdf paths. They are coalesced in `PendingEmitPaths`,
+and once per tick, before any received frame applies, the subsystem reads their
+values into captured events (the latest per prim and input). Those values, not a
+later read of the stage, are sent once the emitter can publish, so a replay after
+a reconnect cannot replace an edit made offline. Exact paths also avoid the
+ancestor roll-up behavior of `AUsdStageActor::OnPrimChanged`.
 
 ## Build configuration
 

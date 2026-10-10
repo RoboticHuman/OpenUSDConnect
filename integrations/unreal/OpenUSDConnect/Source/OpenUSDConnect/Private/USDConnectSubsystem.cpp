@@ -37,6 +37,14 @@ DECLARE_CYCLE_STAT(TEXT("USDConnect Tick"), STAT_USDConnectTick, STATGROUP_OpenU
 
 namespace ClientCore = openusdconnect::client;
 
+// The latest captured value per prim, and per input of a prim.
+struct FUSDConnectCapturedEdits
+{
+	TMap<FString, FEmitXformTrs> Xforms;
+	TMap<FString, FEmitVisibility> Visibilities;
+	TMap<FString, FEmitConnectableInput> Inputs;
+};
+
 namespace
 {
 ClientCore::TimePoint Now()
@@ -93,6 +101,7 @@ void UUSDConnectSubsystem::Initialize(FSubsystemCollectionBase& Collection)
 	bSuppressEmit.store(false);
 	ReceiverNotifications = MakeShared<ClientCore::NotificationQueue>();
 	ProducerNotifications = MakeShared<ClientCore::NotificationQueue>();
+	CapturedEdits = MakeShared<FUSDConnectCapturedEdits>();
 
 	// Generate the stable client ID. Producer session identity is endpoint-scoped
 	// and is created lazily when ConnectResolved selects an endpoint.
@@ -569,11 +578,17 @@ void UUSDConnectSubsystem::DeliverNotifications()
 						if (bProducer)
 						{
 							// A replacement server has no guarantee that it saw prerequisites from
-							// the previous connection. Requeue the current values and make their
-							// first transaction on this connection self-contained.
+							// the previous connection, so each prim's next transform carries them
+							// again. A captured edit is newer than the current values and wins.
+							AUsdStageActor* StageActor = CachedStageActor.Get();
+							for (const FString& PrimPath : EmittedXformPrims)
 							{
-								FScopeLock Lock(&PendingEmitPathsCS);
-								PendingEmitPaths.Append(EmittedXformPrims);
+								if (IsValid(StageActor) &&
+									!CapturedEdits->Xforms.Contains(PrimPath) &&
+									!CapturedEdits->Visibilities.Contains(PrimPath))
+								{
+									CapturePrim(StageActor, PrimPath);
+								}
 							}
 							EmittedXformPrims.Reset();
 						}
@@ -674,6 +689,13 @@ void UUSDConnectSubsystem::Tick(float DeltaTime)
 	{
 		bPendingAutoConnect = false;
 		ConnectResolved(true);
+	}
+
+	// Local edits are read before received frames apply, so a replay cannot
+	// replace them with older server values.
+	if (StageActor)
+	{
+		CaptureEdits(StageActor);
 	}
 
 	DrainAndApply();
@@ -785,6 +807,7 @@ void UUSDConnectSubsystem::DetachFromStageActor()
 		PendingEmitInputs.Reset();
 	}
 
+	*CapturedEdits = FUSDConnectCapturedEdits();
 	EmittedXformPrims.Reset();
 	CachedStageActor = nullptr;
 	LastMaterializedRootLayerIdentifier.Empty();
@@ -910,21 +933,11 @@ void UUSDConnectSubsystem::DrainAndApply()
 }
 
 // ---------------------------------------------------------------------------
-// DrainAndEmit (emitter ← USD stage, via TfNotice listener)
+// CaptureEdits and DrainAndEmit (emitter ← USD stage, via TfNotice listener)
 // ---------------------------------------------------------------------------
 
-void UUSDConnectSubsystem::DrainAndEmit()
+void UUSDConnectSubsystem::CaptureEdits(AUsdStageActor* StageActor)
 {
-	if (!Producer || !Receiver || bSuppressEmit.load())
-		return;
-	// New transactions wait until the receiver's replay is applied.
-	if (!Producer->Status().Connected || !Receiver->Status().Synchronized)
-		return;
-
-	AUsdStageActor* StageActor = CachedStageActor.Get();
-	if (!StageActor || !IsValid(StageActor))
-		return;
-
 	TSet<FString> Changed;
 	TMap<FString, TSet<FString>> ChangedInputs;
 	{
@@ -938,95 +951,126 @@ void UUSDConnectSubsystem::DrainAndEmit()
 	}
 
 	UE_LOG(LogUSDConnectSubsystem, Verbose,
-		   TEXT("Draining %d changed prim path(s) from FUsdListener"), Changed.Num());
+		   TEXT("Capturing %d changed prim path(s) from FUsdListener"), Changed.Num());
 
 	for (const FString& Path : Changed)
 	{
-		EmitPrimChange(StageActor, Path);
+		CapturePrim(StageActor, Path);
 	}
 	for (const auto& Pair : ChangedInputs)
 	{
 		// Edits on a Material's document-projected interface inputs are
 		// local artifacts; reroute them onto the inline shader instead of
 		// emitting an orphan material-level event. The shader authoring
-		// re-enters this path next tick and emits/rematerializes normally.
+		// re-enters this path next tick and is captured normally.
 		if (FUSDMaterialXMaterializer::RerouteMaterialInterfaceEdit(StageActor, Pair.Key,
 																	Pair.Value))
 		{
 			continue;
 		}
-		EmitConnectableInputs(StageActor, Pair.Key, Pair.Value);
+		FEmitConnectableInput Event;
+		if (FUSDStageBridge::ReadConnectableInputs(StageActor, Pair.Key, Pair.Value, Event))
+		{
+			FEmitConnectableInput& Captured = CapturedEdits->Inputs.FindOrAdd(Pair.Key);
+			Captured.PrimPath = MoveTemp(Event.PrimPath);
+			Captured.InfoId = MoveTemp(Event.InfoId);
+			for (FEmitConnectableValue& Value : Event.Inputs)
+			{
+				FEmitConnectableValue* Existing = Captured.Inputs.FindByPredicate(
+					[&Value](const FEmitConnectableValue& Candidate)
+					{
+						return Candidate.Name == Value.Name;
+					});
+				if (Existing)
+				{
+					*Existing = MoveTemp(Value);
+				}
+				else
+				{
+					Captured.Inputs.Add(MoveTemp(Value));
+				}
+			}
+		}
 		// Local shader edits also dirty their owning material so the
 		// materializer refreshes the local .mtlx document.
 		PendingMaterializePrims.Add(Pair.Key);
 	}
 }
 
-void UUSDConnectSubsystem::EmitPrimChange(AUsdStageActor* StageActor, const FString& PrimPath)
+void UUSDConnectSubsystem::CapturePrim(AUsdStageActor* StageActor, const FString& PrimPath)
 {
-	// Try to read and emit TRS
+	FEmitXformTrs Xform;
+	bool bFromMatrixOp = false;
+	if (FUSDStageBridge::ReadXformTrs(StageActor, PrimPath, Xform, &bFromMatrixOp))
 	{
-		FEmitXformTrs Xform;
-		bool bFromMatrixOp = false;
-		if (FUSDStageBridge::ReadXformTrs(StageActor, PrimPath, Xform, &bFromMatrixOp))
+		if (bFromMatrixOp)
 		{
-			if (bFromMatrixOp)
-			{
-				// Suppress our own listener: the restore fires notices, but
-				// it re-authors the exact values being emitted below.
-				bSuppressEmit.store(true);
-				FUSDStageBridge::RestoreCanonicalXformOps(StageActor, PrimPath, Xform);
-				bSuppressEmit.store(false);
-			}
-
-			const TArray<FEmitXformTrs> Batch = {Xform};
-			const bool bIncludeEnsureXformOps = !EmittedXformPrims.Contains(PrimPath);
-			if (SubmitTransaction(PrimPath, TEXT("TRS"), bIncludeEnsureXformOps ? 2 : 1,
-								  [&](uint64 TxnId, std::vector<uint8>& Frame)
-								  {
-									  return BuildXformTxnFrame(TxnId, Batch, Frame,
-																bIncludeEnsureXformOps) ==
-											 ClientCore::ProtocolResult::Success;
-								  }))
-			{
-				EmittedXformPrims.Add(PrimPath);
-			}
+			// Suppress our own listener: the restore fires notices, but
+			// it re-authors the exact values being captured.
+			bSuppressEmit.store(true);
+			FUSDStageBridge::RestoreCanonicalXformOps(StageActor, PrimPath, Xform);
+			bSuppressEmit.store(false);
 		}
+		CapturedEdits->Xforms.Add(PrimPath, Xform);
 	}
 
-	// Try to read and emit visibility
+	FEmitVisibility Visibility;
+	if (FUSDStageBridge::ReadVisibility(StageActor, PrimPath, Visibility))
 	{
-		FEmitVisibility Vis;
-		if (FUSDStageBridge::ReadVisibility(StageActor, PrimPath, Vis))
+		CapturedEdits->Visibilities.Add(PrimPath, Visibility);
+	}
+}
+
+void UUSDConnectSubsystem::DrainAndEmit()
+{
+	if (!Producer || !Receiver || bSuppressEmit.load())
+		return;
+	// New transactions wait until the receiver's replay is applied.
+	if (!Producer->Status().Connected || !Receiver->Status().Synchronized)
+		return;
+
+	for (auto It = CapturedEdits->Xforms.CreateIterator(); It; ++It)
+	{
+		const TArray<FEmitXformTrs> Batch = {It.Value()};
+		const bool bIncludeEnsureXformOps = !EmittedXformPrims.Contains(It.Key());
+		if (SubmitTransaction(It.Key(), TEXT("TRS"), bIncludeEnsureXformOps ? 2 : 1,
+							  [&](uint64 TxnId, std::vector<uint8>& Frame)
+							  {
+								  return BuildXformTxnFrame(TxnId, Batch, Frame,
+															bIncludeEnsureXformOps) ==
+										 ClientCore::ProtocolResult::Success;
+							  }))
 		{
-			const TArray<FEmitVisibility> Batch = {Vis};
-			SubmitTransaction(PrimPath, TEXT("visibility"), 1,
+			EmittedXformPrims.Add(It.Key());
+			It.RemoveCurrent();
+		}
+	}
+	for (auto It = CapturedEdits->Visibilities.CreateIterator(); It; ++It)
+	{
+		const TArray<FEmitVisibility> Batch = {It.Value()};
+		if (SubmitTransaction(It.Key(), TEXT("visibility"), 1,
 							  [&](uint64 TxnId, std::vector<uint8>& Frame)
 							  {
 								  return BuildVisibilityTxnFrame(TxnId, Batch, Frame) ==
 										 ClientCore::ProtocolResult::Success;
-							  });
+							  }))
+		{
+			It.RemoveCurrent();
 		}
 	}
-}
-
-void UUSDConnectSubsystem::EmitConnectableInputs(AUsdStageActor* StageActor,
-												 const FString& PrimPath,
-												 const TSet<FString>& InputAttrNames)
-{
-	FEmitConnectableInput Event;
-	if (!FUSDStageBridge::ReadConnectableInputs(StageActor, PrimPath, InputAttrNames, Event))
+	for (auto It = CapturedEdits->Inputs.CreateIterator(); It; ++It)
 	{
-		return;
+		const TArray<FEmitConnectableInput> Batch = {It.Value()};
+		if (SubmitTransaction(It.Key(), TEXT("connectable input"), 1,
+							  [&](uint64 TxnId, std::vector<uint8>& Frame)
+							  {
+								  return BuildConnectableInputTxnFrame(TxnId, Batch, Frame) ==
+										 ClientCore::ProtocolResult::Success;
+							  }))
+		{
+			It.RemoveCurrent();
+		}
 	}
-
-	const TArray<FEmitConnectableInput> Batch = {MoveTemp(Event)};
-	SubmitTransaction(PrimPath, TEXT("connectable input"), 1,
-					  [&](uint64 TxnId, std::vector<uint8>& Frame)
-					  {
-						  return BuildConnectableInputTxnFrame(TxnId, Batch, Frame) ==
-								 ClientCore::ProtocolResult::Success;
-					  });
 }
 
 bool UUSDConnectSubsystem::SubmitTransaction(

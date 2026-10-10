@@ -12,6 +12,7 @@
 #include "USDConnectSubsystem.generated.h"
 
 class AUsdStageActor;
+struct FUSDConnectCapturedEdits;
 template <typename Endpoint>
 class FEndpointRunner;
 
@@ -175,22 +176,21 @@ private:
 
 	void DrainAndApply();
 
-	/** Drain accumulated SdfPaths from the stage listener and emit one frame per unique path */
-	void DrainAndEmit();
+	/** Read the values of the paths the stage listener reported into CapturedEdits */
+	void CaptureEdits(AUsdStageActor* StageActor);
 
-	/** Build and send a Txn event for a changed prim (emitter side) */
-	void EmitPrimChange(AUsdStageActor* StageActor, const FString& PrimPath);
+	/** Capture a prim's current transform and visibility */
+	void CapturePrim(AUsdStageActor* StageActor, const FString& PrimPath);
+
+	/** Send the captured edits, keeping each one the producer refuses */
+	void DrainAndEmit();
 
 	/**
 	 * Pairs the next transaction ID with the frame BuildFrame encodes for it and
-	 * appends the frame to the producer outbox.
+	 * appends the frame to the producer outbox; true when the producer accepted it.
 	 */
 	bool SubmitTransaction(const FString& PrimPath, const TCHAR* Kind, int32 EventCount,
 						   TFunctionRef<bool(uint64, std::vector<uint8>&)> BuildFrame);
-
-	/** Build and send a SetConnectableInput Txn for changed shader inputs on one prim */
-	void EmitConnectableInputs(AUsdStageActor* StageActor, const FString& PrimPath,
-							   const TSet<FString>& InputAttrNames);
 
 	/** Refresh local .mtlx documents for materials dirtied this tick */
 	void ProcessPendingMaterializations();
@@ -256,10 +256,16 @@ private:
 
 	/**
 	 * Changed "inputs:*" property names per prim (same lock as PendingEmitPaths).
-	 * Keeping the property names lets the drain read and emit only the edited
-	 * shader inputs instead of the whole network.
+	 * Keeping the property names lets the capture read only the edited shader
+	 * inputs instead of the whole network.
 	 */
 	TMap<FString, TSet<FString>> PendingEmitInputs;
+
+	/**
+	 * Values of local edits, read before received frames apply so a replay
+	 * cannot overwrite them before they are sent. Game thread only.
+	 */
+	TSharedPtr<FUSDConnectCapturedEdits> CapturedEdits;
 
 	/** Active TCP endpoint for the currently running clients. */
 	FString ActiveServerHost;
