@@ -244,6 +244,34 @@ void TestStopInterruptsBlockingCalls()
 	}
 }
 
+void TestCloseWritesWhatWasQueued()
+{
+	{
+		Harness harness;
+		const std::shared_ptr<ScriptedConnection> connection = harness.Handshake();
+		const Bytes frame = harness.Submit("/A");
+		CHECK(harness.Driver->Close(kPatience));
+		CHECK(connection->ClosedByClient());
+		const std::vector<Bytes> frames = AfterHello(*connection);
+		CHECK(frames.size() == 2 && frames.front() == frame);
+		CHECK(DecodeSent(frames.back()).payload_type() == Payload::Quit);
+	}
+	{
+		// A peer that stopped reading cannot hold Close past its bound.
+		ProducerConfig config = TestConfig();
+		config.HandshakeTimeout = kPatience;
+		Harness harness(config);
+		const std::shared_ptr<ScriptedConnection> connection = harness.Handshake();
+		connection->StallSends();
+		static_cast<void>(harness.Submit("/A"));
+		const TimePoint closing = Now();
+		static_cast<void>(harness.Driver->Close(100ms));
+		CHECK(Now() - closing < kPatience / 5);
+		CHECK(harness.Driver->Join(kPatience));
+		CHECK(connection->ClosedByClient());
+	}
+}
+
 void TestRejectedTransactionSurfacesThroughFailure()
 {
 	Harness harness;
@@ -296,6 +324,7 @@ int main()
 	TestFlushWaitsOutTheRateLimit();
 	TestStalledWriteClosesAtTheSendDeadline();
 	TestStopInterruptsBlockingCalls();
+	TestCloseWritesWhatWasQueued();
 	TestRejectedTransactionSurfacesThroughFailure();
 	TestCallbacksCannotBlockOnTheLoop();
 	return 0;

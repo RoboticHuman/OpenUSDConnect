@@ -32,6 +32,14 @@ public:
 		return ThreadedDriver::Start();
 	}
 
+	// Stops the loop and waits up to timeout, without one indefinitely, for it to
+	// exit; returns whether it exited. A receiver queues nothing to write first.
+	[[nodiscard]] bool Close(std::optional<std::chrono::milliseconds> timeout)
+	{
+		Stop();
+		return Join(timeout);
+	}
+
 	// Each returns the state once it holds, the loop stops, or timeout passes.
 	[[nodiscard]] bool WaitConnected(std::optional<std::chrono::milliseconds> timeout)
 	{

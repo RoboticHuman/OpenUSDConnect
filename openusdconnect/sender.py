@@ -329,17 +329,17 @@ class EventSender:
         self._driver.wake()
 
     def close(self, timeout: float | None = None) -> bool:
-        """Stop the connection thread and close its connection; repeated calls are harmless.
+        """Write the queued transactions and the Quit message, then close the connection.
 
-        Waits up to ``timeout`` seconds for the thread to exit, without limit
-        for ``None``, and returns whether it has exited: ``True`` before the
-        first connection request, ``False`` on timeout or from a callback,
-        which runs on that thread. Afterwards :meth:`connect` and
-        :meth:`request_connect` return ``False``. Closing does not flush; call
-        :meth:`flush` first if the outbox matters.
+        Then stops the connection thread. Closing does not wait for
+        acknowledgements; :meth:`flush` does. Waits up to ``timeout`` seconds
+        in all, without limit for ``None``, and returns whether the thread has
+        exited: ``True`` before the first connection request, ``False`` on
+        timeout or from a callback, which runs on that thread and stops it
+        without writing. Afterwards :meth:`connect` and :meth:`request_connect`
+        return ``False``; repeated calls are harmless.
         """
-        self._driver.stop()
-        return self._driver.join(timeout)
+        return self._driver.close(timeout)
 
     def __enter__(self) -> EventSender:
         return self

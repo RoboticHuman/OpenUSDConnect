@@ -331,8 +331,7 @@ class EventReceiver:
         if self._driver is None:
             self._endpoint.stop()
             return True
-        self._driver.stop()
-        return self._driver.join(timeout)
+        return self._driver.close(timeout)
 
     def __enter__(self) -> EventReceiver:
         return self

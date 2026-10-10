@@ -557,7 +557,7 @@ def test_playback_messages_follow_the_connection(senders, server):
     wait_until(lambda: state.get_playback_state()["leader_client_id"] != sender.client_id)
 
 
-def test_close_stops_the_thread_for_good(senders, server):
+def test_close_stops_the_thread_permanently(senders, server):
     assert senders(_port(server)).close(0), "a sender that never connected has no thread"
     sender = senders(_port(server))
     assert sender.connect(timeout=5)
@@ -576,11 +576,22 @@ def test_close_stops_the_thread_for_good(senders, server):
     wait_until(lambda: not client_registered(server, sender.client_id))
 
 
+def test_close_writes_the_queued_transactions():
+    with embedded_server() as runtime:
+        sender = EventSender("127.0.0.1", _port(runtime), client_id=uuid.uuid4().hex)
+        assert sender.connect(timeout=5)
+        assert sender.send_events([ensure_prim_event(f"/Queued{index}") for index in range(3)])
+        assert sender.close(5)
+        wait_until(lambda: runtime.sync_server.get_event_count() == 3)
+
+
 def test_collecting_a_sender_stops_its_connection(server):
     sender = EventSender("127.0.0.1", _port(server), client_id=uuid.uuid4().hex)
-    client_id = sender.client_id
+    client_id, session_id = sender.client_id, sender.session_id
     assert sender.connect(timeout=5)
     wait_until(lambda: client_registered(server, client_id))
+    assert sender.send_events([ensure_prim_event(f"/Collected{uuid.uuid4().hex}")])
     del sender
     gc.collect()
     wait_until(lambda: not client_registered(server, client_id))
+    wait_until(lambda: server.sync_server.producer_committed_through(client_id, session_id) == 1)

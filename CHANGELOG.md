@@ -84,8 +84,10 @@ Behavior:
   instead of `is_alive()`. On it and on `EventSender`, settings and state are
   read-only properties (`token`, and the receiver's `reconnect`, stay
   assignable) and `sock` is gone; read `connected`. Both close on leaving a
-  `with` block, and a collected one stops its thread, so keep the handle
-  while it should run.
+  `with` block, and a collected one closes too, so keep the handle while it
+  should run. `EventSender.close()` writes the transactions already queued
+  and the Quit message, and does not wait for acknowledgements; call
+  `flush()` first for those.
 
 The low-level `EventSender`, `EventReceiver`, and `EventDispatcher` keep their
 callable arguments and properties.

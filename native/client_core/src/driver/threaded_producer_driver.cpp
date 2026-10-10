@@ -12,6 +12,8 @@ namespace
 
 // How long Flush waits after a failed attempt before it connects again.
 constexpr std::chrono::milliseconds kFlushRetryPause{100};
+// How long Close without a timeout lets the loop write and close the connection.
+constexpr std::chrono::milliseconds kCloseGrace{1'000};
 
 [[nodiscard]] std::chrono::milliseconds Until(TimePoint deadline) noexcept
 {
@@ -105,6 +107,21 @@ FlushResult ThreadedProducerDriver::Flush(std::optional<std::chrono::millisecond
 	}
 }
 
+bool ThreadedProducerDriver::Close(std::optional<std::chrono::milliseconds> timeout)
+{
+	const std::optional<TimePoint> deadline =
+		timeout ? std::optional(Now() + *timeout) : std::nullopt;
+	if (CanWait())
+	{
+		// Disconnecting queues the Quit and the close after the pending sends.
+		Target.Disconnect();
+		Wake();
+		static_cast<void>(WaitDisconnected(deadline.value_or(Now() + kCloseGrace)));
+	}
+	Stop();
+	return Join(Until(deadline));
+}
+
 bool ThreadedProducerDriver::CanWait() const
 {
 	// On the loop thread a wait would wait for itself.
@@ -118,6 +135,17 @@ bool ThreadedProducerDriver::WaitSettled(TimePoint deadline)
 		{
 			const ProducerStatus status = Target.Status();
 			return !status.Handshaking && !status.Closing;
+		},
+		Until(deadline));
+}
+
+bool ThreadedProducerDriver::WaitDisconnected(TimePoint deadline)
+{
+	return Wait(
+		[this]
+		{
+			const ProducerStatus status = Target.Status();
+			return !status.Connected && !status.Handshaking && !status.Closing;
 		},
 		Until(deadline));
 }

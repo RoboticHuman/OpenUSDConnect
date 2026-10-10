@@ -52,9 +52,9 @@ void DurationProperty(nb::class_<Config>& cls, const char* name,
 
 [[nodiscard]] nb::object ToPython(client::Notification notification);
 
-// Owns a reference driver whose thread calls Python, and stops and joins it
-// when destroyed. Every Python object here is touched only with the GIL, and
-// the GIL is released around every wait.
+// Owns a reference driver whose thread calls Python, and closes it when
+// destroyed, so the loop writes what was queued. Every Python object here is
+// touched only with the GIL, and the GIL is released around every wait.
 template <typename Driver>
 class PythonDriver final
 {
@@ -88,8 +88,7 @@ public:
 			Registry().erase(this);
 		}
 		nb::gil_scoped_release release;
-		Native->Stop();
-		static_cast<void>(Native->Join());
+		static_cast<void>(Native->Close(std::nullopt));
 	}
 
 	PythonDriver(const PythonDriver&) = delete;
@@ -114,11 +113,7 @@ public:
 		nb::gil_scoped_release release;
 		for (const auto& [object, driver] : drivers)
 		{
-			driver->Stop();
-		}
-		for (const auto& [object, driver] : drivers)
-		{
-			static_cast<void>(driver->Join());
+			static_cast<void>(driver->Close(std::nullopt));
 		}
 	}
 
@@ -262,6 +257,13 @@ void BindThreadedDriver(nb::class_<PythonDriver<Driver>>& cls)
 			[](Bound& driver, std::optional<double> timeout)
 			{
 				return driver.Get().Join(Timeout(timeout));
+			},
+			nb::arg("timeout") = nb::none(), nb::call_guard<nb::gil_scoped_release>())
+		.def(
+			"close",
+			[](Bound& driver, std::optional<double> timeout)
+			{
+				return driver.Get().Close(Timeout(timeout));
 			},
 			nb::arg("timeout") = nb::none(), nb::call_guard<nb::gil_scoped_release>())
 		.def_prop_ro("running",
