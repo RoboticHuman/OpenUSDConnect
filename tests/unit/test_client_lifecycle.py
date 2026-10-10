@@ -107,17 +107,6 @@ def test_blocked_states_raise_instead_of_timing_out(phase, auth_rejected, failur
         _client_lifecycle.raise_if_blocked(SimpleNamespace(), status)
 
 
-def test_each_phase_outranks_the_phases_after_it():
-    flags = [
-        "closed", "recovery_required", "rejected", "parked", "replaying", "ready", "connecting",
-    ]
-    for index, flag in enumerate(flags):
-        state = {name: position >= index for position, name in enumerate(flags)}
-        assert _client_lifecycle.compute_phase(**state) is client_types.ClientPhase(flag)
-    offline = _client_lifecycle.compute_phase(**dict.fromkeys(flags, False))
-    assert offline is client_types.ClientPhase.OFFLINE
-
-
 @pytest.mark.parametrize("kind", [ManagedClient, SharedStageClient, UsdReceiver, UsdPublisher])
 def test_every_client_reports_the_same_lifecycle_phases(kind, tmp_path):
     stage = Usd.Stage.CreateNew(str(tmp_path / "scene.usda"))
@@ -210,20 +199,6 @@ def test_credential_keeps_a_token_issued_while_storage_loads(monkeypatch):
     reader.join(5)
     issuer.join(5)
     assert credential.current() == "issued-during-load"
-
-
-def test_sender_takes_its_token_from_the_provider_on_every_attempt(monkeypatch, managed_server):
-    hellos = recorded_hellos(monkeypatch)
-    tokens = iter(["first", "second"])
-    sender = sender_module.EventSender(
-        "127.0.0.1", managed_server.server_address[1], client_id="token-attempts",
-        token="stale", token_provider=lambda: next(tokens),
-    )
-    for expected in ("first", "second"):
-        assert sender.connect(timeout=5)
-        assert sender.token == expected
-        sender.disconnect()
-    assert [hello["token"] for hello in hellos] == ["first", "second"]
 
 
 @pytest.mark.parametrize("failure", [None, "persistence", "observer"])

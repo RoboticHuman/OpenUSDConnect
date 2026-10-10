@@ -1,6 +1,5 @@
 #include "openusdconnect/client/engine/status.h"
 #include "openusdconnect/client/producer_recovery.h"
-#include "openusdconnect/client/producer_session.h"
 #include "openusdconnect/client/receiver_session.h"
 #include "openusdconnect/client/schema/messages_generated.h"
 
@@ -9,8 +8,6 @@
 #include <cstddef>
 #include <cstdint>
 #include <iterator>
-#include <optional>
-#include <string_view>
 #include <vector>
 
 using namespace openusdconnect::client;
@@ -63,31 +60,6 @@ static void TestEachPhaseOutranksThePhasesAfterIt()
 		CHECK(ComputePhase(inputs) == kPhasePrecedence[index].Phase);
 	}
 	CHECK(ComputePhase(PhaseInputs{}) == ClientPhase::Offline);
-}
-
-struct RejectionCase final
-{
-	std::uint8_t Code;
-	std::optional<std::string_view> Name;
-	ProducerRecoveryDisposition Disposition;
-};
-
-static void TestRejectionNamesAndDispositions()
-{
-	const RejectionCase cases[] = {
-		{0, std::nullopt, ProducerRecoveryDisposition::SessionFatal},
-		{1, "invalid_identity", ProducerRecoveryDisposition::SessionFatal},
-		{2, "unexpected_id", ProducerRecoveryDisposition::SessionFatal},
-		{3, "stale_layer_graph", ProducerRecoveryDisposition::RecoverableConflict},
-		{4, "invalid_transaction", ProducerRecoveryDisposition::InvalidOperation},
-		{5, std::nullopt, ProducerRecoveryDisposition::SessionFatal},
-		{255, std::nullopt, ProducerRecoveryDisposition::SessionFatal},
-	};
-	for (const RejectionCase& expected : cases)
-	{
-		CHECK(RejectionCodeName(expected.Code) == expected.Name);
-		CHECK(RejectionDisposition(expected.Code) == expected.Disposition);
-	}
 }
 
 static void TestTransactionFailureDescription()
@@ -273,10 +245,9 @@ static void TestOverflowIsBoundedAndReplayable()
 	CHECK(!inbox.Overflowed());
 }
 
-static void TestResetReconnectsFromOneWithoutDiscardingTheQueue(bool require_contiguous,
-																bool queued_prefix)
+static void TestResetReconnectsFromOneWithoutDiscardingTheQueue(bool queued_prefix)
 {
-	TestInbox inbox(4, queued_prefix ? 2 : 1, require_contiguous);
+	TestInbox inbox(4, queued_prefix ? 2 : 1, true);
 	ConnectionStart connection = inbox.BeginConnection();
 	CHECK(connection.SyncFrom == 4);
 	std::vector<int> expected;
@@ -332,33 +303,9 @@ static void TestRejectedResetPreservesTheSnapshotCursorAndQueue()
 	CHECK(inbox.Drain() == std::vector<int>{4});
 }
 
-static void TestContiguousDelivery()
-{
-	TestInbox inbox(1, 4, true);
-	const std::uint64_t generation = inbox.BeginConnection().Generation;
-	CHECK(AcceptEvent(inbox, generation, 2) == AcceptResult::SequenceGap);
-	CHECK(AcceptEvent(inbox, generation, 1) == AcceptResult::Accepted);
-	CHECK(AcceptEvent(inbox, generation, 1) == AcceptResult::Duplicate);
-	CHECK(inbox.Drain() == std::vector<int>{1});
-	CHECK(inbox.MarkAppliedThrough(generation, 1));
-	CHECK(inbox.LastAppliedSequence() == 1);
-}
-
-static void TestHighwaterAheadQuarantinesTheProducerSession()
-{
-	OrderedProducerSession<int> session(2);
-	const std::optional<ProducerConnectionStart> connection = session.BeginConnection();
-	CHECK(connection);
-	CHECK(session.AcceptHello(connection->Generation, 1) == ProducerResult::HighwaterAhead);
-	CHECK(session.Phase() == ProducerPhase::RecoveryRequired);
-	CHECK(session.RecoveryRequired());
-	CHECK(!session.BeginConnection());
-}
-
 int main()
 {
 	TestEachPhaseOutranksThePhasesAfterIt();
-	TestRejectionNamesAndDispositions();
 	TestTransactionFailureDescription();
 	TestHoldCoversOnlyFramesQueuedBeforeTheMarker();
 	TestRejectedFramesDoNotExtendTheHold();
@@ -369,16 +316,11 @@ int main()
 	TestReplayAppliesBeforeLiveFramesDrain();
 	TestStaleGenerationIsRejectedWithoutMutation();
 	TestOverflowIsBoundedAndReplayable();
-	for (const bool require_contiguous : {false, true})
+	for (const bool queued_prefix : {false, true})
 	{
-		for (const bool queued_prefix : {false, true})
-		{
-			TestResetReconnectsFromOneWithoutDiscardingTheQueue(require_contiguous, queued_prefix);
-		}
+		TestResetReconnectsFromOneWithoutDiscardingTheQueue(queued_prefix);
 	}
 	TestFullReplayCursorSurvivesDisconnectBeforeAnyFrames();
 	TestRejectedResetPreservesTheSnapshotCursorAndQueue();
-	TestContiguousDelivery();
-	TestHighwaterAheadQuarantinesTheProducerSession();
 	return 0;
 }

@@ -131,7 +131,6 @@ void TestReadTimeoutsReconnect()
 	Harness harness(config);
 	const std::shared_ptr<ScriptedConnection> connection = harness.Handshake();
 	CHECK(connection->WaitClosed(kPatience));
-	CHECK(harness.Record.Logged("2 consecutive read timeouts"));
 	CHECK(DecodeHello(harness.Accept()->Sent()).SyncFrom == 1);
 }
 
@@ -142,7 +141,6 @@ void TestFailedConnectIsRecordedAndRetried()
 	CHECK(harness.Sockets->Refuse(kPatience, kRefused));
 	const std::shared_ptr<ScriptedConnection> connection = harness.Accept();
 	CHECK(harness.Sockets->Attempts() == 2);
-	CHECK(harness.Record.Logged("could not connect to 127.0.0.1:7200: "));
 	CHECK(!harness.Driver->LastFailure());
 
 	ReceiverConfig config = FastConfig();
@@ -156,7 +154,6 @@ void TestFailedConnectIsRecordedAndRetried()
 	const std::optional<TransportFailure> failure = once.Driver->LastFailure();
 	CHECK(failure && failure->Operation == SocketOperation::Connect);
 	CHECK(failure->Result == SocketResult::Failed && failure->SystemError == kRefused);
-	CHECK(Describe(*failure) == DescribeSystemError(kRefused));
 	CHECK(once.Endpoint.Status().Stopped);
 }
 

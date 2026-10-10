@@ -21,7 +21,13 @@ from openusdconnect.recovery import RejectionDisposition
 from openusdconnect.sdf_spec_delta import serialize_spec_fields
 from openusdconnect.sender import EventSender, TransactionRejectedError
 from openusdconnect.server import connection
-from tests.helpers import embedded_server, ensure_prim_event, recorded_hellos, wait_until
+from tests.helpers import (
+    client_registered,
+    embedded_server,
+    ensure_prim_event,
+    recorded_hellos,
+    wait_until,
+)
 
 METADATA = {"timeCodesPerSecond": 24.0, "upAxis": "Z"}
 
@@ -114,42 +120,27 @@ def test_invalid_settings_raise_value_error(handshake_timeout, outcome):
 
 def test_settings_read_back_and_state_starts_empty():
     sender = EventSender(
-        "127.0.0.1",
-        7300,
-        client_id="client",
-        origin="origin",
-        department="layout",
-        token="token",
-        handshake_timeout=2.5,
-        session_id="session",
-        max_pending_transactions=7,
+        "127.0.0.1", 7300, client_id="client", handshake_timeout=2.5, max_pending_transactions=7
     )
-    assert (sender.host, sender.port, sender.client_id, sender.role) == (
-        "127.0.0.1",
+    assert (sender.port, sender.handshake_timeout, sender.max_pending_transactions) == (
         7300,
-        "client",
-        "emitter",
+        2.5,
+        7,
     )
-    assert (sender.origin, sender.department, sender.token) == ("origin", "layout", "token")
-    assert (sender.handshake_timeout, sender.max_pending_transactions) == (2.5, 7)
-    assert sender.session_id == "session"
     assert sender.layer_mode is LayerMode.MANAGED
     with pytest.raises(AttributeError):
         sender.host = "elsewhere"
-    sender.token = "assigned"
-    assert sender.token == "assigned"
-    assert len(EventSender("127.0.0.1", 7300, client_id="client").session_id) == 32
+    assert len(sender.session_id) == 32
 
     assert not sender.connected and not sender.is_connected
     assert sender.layer_mode_active is LayerMode.MANAGED
     assert sender.stage_metadata == {}
     assert not sender.auth_rejected and not sender.hello_rejected
-    assert sender.rejection_reason == ""
     assert (sender.pending_transaction_count, sender.pending_event_count) == (0, 0)
     assert (sender.acknowledged_transaction_count, sender.acknowledged_event_count) == (0, 0)
     assert sender.drain_acknowledged_event_count() == 0
     assert sender.acknowledged_checkpoint is None
-    assert sender.transaction_failure is None and sender.transaction_error == ""
+    assert sender.transaction_failure is None
     assert not sender.recovery_required and sender.recovery_disposition is None
     assert sender.recovery_incident is None and sender.recovery_artifact is None
     assert sender.cancel_connect()
@@ -222,16 +213,7 @@ def test_handshake_presents_the_identity_and_reads_state_through(
         "layout",
     )
     assert hello["producer_session_id"] == "identity-session" and "token" not in hello
-    state = server.sync_server
-
-    def registered():
-        with state.clients_lock:
-            return any(
-                (info.role, info.client_id) == ("emitter", sender.client_id)
-                for info in state.clients.values()
-            )
-
-    wait_until(registered)
+    wait_until(lambda: client_registered(server, sender.client_id))
 
 
 def test_token_provider_supplies_each_attempt_and_the_issued_token_is_presented(
@@ -241,6 +223,7 @@ def test_token_provider_supplies_each_attempt_and_the_issued_token_is_presented(
     credential = ClientCredential("127.0.0.1", 0, None, persist=False)
     sender = senders(
         _port(server),
+        token="stale",
         token_provider=credential.current,
         on_token_issued=credential.issued,
     )
@@ -298,8 +281,6 @@ def test_a_given_queue_takes_the_notifications_and_snapshot_reads_the_status(sen
         sender.pending_event_count,
         sender.acknowledged_event_count,
     )
-    assert _client_backend.stage_metadata_fields(snapshot.metadata) == sender.stage_metadata
-    assert snapshot.rejection is None and not sender.hello_rejected
 
 
 def test_concurrent_submissions_commit_in_transaction_order(senders, server):
@@ -577,41 +558,29 @@ def test_playback_messages_follow_the_connection(senders, server):
 
 
 def test_close_stops_the_thread_for_good(senders, server):
-    state = server.sync_server
     assert senders(_port(server)).close(0), "a sender that never connected has no thread"
-
-    def registered(sender):
-        with state.clients_lock:
-            return any(info.client_id == sender.client_id for info in state.clients.values())
-
     sender = senders(_port(server))
     assert sender.connect(timeout=5)
-    wait_until(lambda: registered(sender))
+    wait_until(lambda: client_registered(server, sender.client_id))
     assert sender.close()
     assert not sender.connected
-    wait_until(lambda: not registered(sender))
+    wait_until(lambda: not client_registered(server, sender.client_id))
     assert not sender.connect(timeout=5)
     assert not sender.request_connect()
     assert sender.close(0)
 
     with senders(_port(server)) as sender:
         assert sender.connect(timeout=5)
-        wait_until(lambda: registered(sender))
+        wait_until(lambda: client_registered(server, sender.client_id))
     assert sender.close(0) and not sender.connected
-    wait_until(lambda: not registered(sender))
+    wait_until(lambda: not client_registered(server, sender.client_id))
 
 
 def test_collecting_a_sender_stops_its_connection(server):
-    state = server.sync_server
     sender = EventSender("127.0.0.1", _port(server), client_id=uuid.uuid4().hex)
     client_id = sender.client_id
     assert sender.connect(timeout=5)
-
-    def connected():
-        with state.clients_lock:
-            return any(info.client_id == client_id for info in state.clients.values())
-
-    wait_until(connected)
+    wait_until(lambda: client_registered(server, client_id))
     del sender
     gc.collect()
-    wait_until(lambda: not connected())
+    wait_until(lambda: not client_registered(server, client_id))

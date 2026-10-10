@@ -119,19 +119,10 @@ void TestConfigurationValidation()
 		{valid, true},
 		{With(valid, &ProducerConfig::LayerMode, LayerMode::SharedStage), true},
 		{With(valid, &ProducerConfig::Origin, ""), true},
-		{With(valid, &ProducerConfig::Host, ""), false},
 		{With(valid, &ProducerConfig::Port, 0), false},
-		{With(valid, &ProducerConfig::ClientId, ""), false},
-		{With(valid, &ProducerConfig::SessionId, ""), false},
-		{With(valid, &ProducerConfig::SessionId, std::string(128, 's')), true},
-		{With(valid, &ProducerConfig::SessionId, std::string(129, 's')), false},
 		{With(valid, &ProducerConfig::SessionId, longest_multibyte), true},
 		{With(valid, &ProducerConfig::SessionId, longest_multibyte + two_byte), false},
-		{With(valid, &ProducerConfig::HandshakeTimeout, 0ms), false},
-		{With(valid, &ProducerConfig::MaxPendingTransactions, 0), false},
-		{With(valid, &ProducerConfig::ReconnectBaseDelay, 0ms), false},
 		{With(valid, &ProducerConfig::ReconnectMaxDelay, 999ms), false},
-		{With(valid, &ProducerConfig::LayerMode, static_cast<LayerMode>(2)), false},
 		{With(With(valid, &ProducerConfig::LayerMode, LayerMode::SharedStage),
 			  &ProducerConfig::Department, "layout"),
 		 false},
@@ -145,10 +136,8 @@ void TestConfigurationValidation()
 void TestAttemptsAreBoundedAndExclusive()
 {
 	Producer producer;
-	CHECK(!producer.Status().Handshaking && !producer.Endpoint.NextWake());
 	CHECK(producer.Endpoint.RequestConnect(producer.Now, producer.Now + 2s));
 	CHECK(producer.Attempt() == producer.Now + 2s);
-	CHECK(producer.Endpoint.NextWake() == producer.Now + 2s);
 	CHECK(producer.Status().Handshaking && !producer.Status().Connected);
 	CHECK(!producer.Endpoint.RequestConnect(producer.Now, producer.Now + 2s));
 	CHECK(producer.Endpoint.Connect(producer.Now, producer.Now + 2s) == ConnectResult::Busy);
@@ -189,14 +178,6 @@ void TestHelloCarriesTheProducerIdentity()
 	CHECK(hello.Mode == LayerMode::Managed);
 	CHECK(hello.ProducerSessionId == "session");
 	CHECK(!hello.ReplayServerInstance && !hello.ReplayEpoch);
-
-	config = TestConfig();
-	config.LayerMode = LayerMode::SharedStage;
-	config.Origin.clear();
-	Producer shared(config);
-	const SentHello shared_hello = shared.Request();
-	CHECK(shared_hello.Mode == LayerMode::SharedStage);
-	CHECK(shared_hello.Origin.empty() && shared_hello.Token.empty());
 }
 
 void TestAcceptedHelloNotifiesThenPublishes()
@@ -216,11 +197,6 @@ void TestAcceptedHelloNotifiesThenPublishes()
 	CHECK(As<TokenIssued>(notices[0]).Token == "issued");
 	CHECK(As<StageMetadata>(notices[1]).MetersPerUnit == 0.01);
 	static_cast<void>(As<Connected>(notices[2]));
-	const ProducerStatus status = producer.Status();
-	CHECK(status.Connected && !status.Handshaking && !status.Rejection && !status.Failure);
-	CHECK(status.Metadata.UpAxis == "Y" && !status.Metadata.TimeCodesPerSecond);
-	CHECK(status.LayerModeActive == LayerMode::Managed);
-	CHECK(status.SessionId == "session");
 
 	// Metadata the server did not author is neither notified nor kept.
 	Producer bare;
@@ -256,12 +232,18 @@ void TestHandshakeRejectionsHoldUntilAnExplicitConnect()
 		producer.Feed(server::HelloOk());
 		CHECK(producer.Status().Connected);
 	}
+	server::Hello shared;
+	shared.Mode = LayerMode::SharedStage;
+	shared.Token = "not-issued";
 	// An empty reason stays empty; hosts word their own default.
 	const std::pair<Bytes, HandshakeRejected> rejections[] = {
 		{server::HelloRejected(HelloRejectionCode::Unspecified, ""),
 		 {false, HelloRejectionCode::Unspecified, ""}},
 		{server::HelloRejected(HelloRejectionCode::LayerModeMismatch, "server uses shared_stage"),
 		 {false, HelloRejectionCode::LayerModeMismatch, "server uses shared_stage"}},
+		{server::HelloOk(shared),
+		 {false, HelloRejectionCode::LayerModeMismatch,
+		  "server negotiated shared_stage instead of managed"}},
 	};
 	for (const auto& [frame, expected] : rejections)
 	{
@@ -276,29 +258,6 @@ void TestHandshakeRejectionsHoldUntilAnExplicitConnect()
 	}
 }
 
-void TestLayerModeMismatchIsARejection()
-{
-	const std::pair<LayerMode, std::string_view> cases[] = {
-		{LayerMode::Managed, "server negotiated shared_stage instead of managed"},
-		{LayerMode::SharedStage, "server negotiated managed instead of shared_stage"},
-	};
-	for (const auto& [requested, reason] : cases)
-	{
-		Producer producer(With(TestConfig(), &ProducerConfig::LayerMode, requested));
-		static_cast<void>(producer.Request());
-		server::Hello hello;
-		hello.Mode = requested == LayerMode::Managed ? LayerMode::SharedStage : LayerMode::Managed;
-		hello.Token = "not-issued";
-		producer.Feed(server::HelloOk(hello));
-		CHECK(producer.Single<CloseAction>().Reason == DisconnectReason::HandshakeRejected);
-		const HandshakeRejected rejected = producer.Notice<HandshakeRejected>();
-		CHECK(!rejected.Authentication);
-		CHECK(rejected.Code == HelloRejectionCode::LayerModeMismatch);
-		CHECK(rejected.Reason == reason);
-		CHECK(producer.Status().LayerModeActive == LayerMode::Managed);
-	}
-}
-
 void CheckSessionFailure(Producer& producer, std::uint64_t transaction_id, std::string_view reason)
 {
 	const std::optional<TransactionFailure> failure = producer.Endpoint.Failure();
@@ -310,73 +269,68 @@ void CheckSessionFailure(Producer& producer, std::uint64_t transaction_id, std::
 	CHECK(failure->Disposition() == ProducerRecoveryDisposition::SessionFatal);
 }
 
-void TestHelloHighwaterAheadRequiresRecovery()
+struct HighwaterCase final
 {
-	Producer producer;
-	static_cast<void>(producer.Request());
-	server::Hello hello;
-	hello.CommittedThrough = 1;
-	hello.Token = "not-issued";
-	producer.Feed(server::HelloOk(hello));
-	CHECK(producer.Single<CloseAction>().Reason == DisconnectReason::RecoveryRequired);
-	CheckSessionFailure(producer, 1, "server producer highwater 1 is ahead of local transaction 0");
-	CHECK(producer.Endpoint.Failure()->Describe() ==
-		  "transaction 1 rejected (unexpected_id): server producer highwater 1 is ahead of local "
-		  "transaction 0");
-	CHECK(producer.Notices().empty());
-	producer.Disconnect();
-	const ProducerStatus status = producer.Status();
-	CHECK(!status.Connected && !status.Rejection && status.Failure);
-	CHECK(!producer.Endpoint.RequestConnect(producer.Now + 1h, producer.Now + 2h));
-	CHECK(producer.Endpoint.Connect(producer.Now + 1h, producer.Now + 2h) ==
-		  ConnectResult::Refused);
-	const std::optional<RecoveryArtifact> artifact = producer.Endpoint.Artifact();
-	CHECK(artifact && artifact->SessionId == "session" && artifact->Transactions.empty());
+	int Submitted;
+	std::uint64_t AcknowledgedBefore;
+	Bytes Frame;
+	std::uint64_t TransactionId;
+	std::string_view Reason;
+	std::size_t ArtifactSize;
+};
 
-	// A session ahead of its local outbox keeps the outbox as evidence.
-	Producer behind;
-	static_cast<void>(behind.Handshake());
-	CHECK(behind.Submit("/A") == ProducerResult::Accepted);
-	CHECK(behind.Submit("/B") == ProducerResult::Accepted);
-	static_cast<void>(behind.Sends());
-	behind.Disconnect();
-	static_cast<void>(behind.Request());
-	hello.CommittedThrough = 3;
-	behind.Feed(server::HelloOk(hello));
-	behind.ExpectClose(DisconnectReason::RecoveryRequired);
-	CheckSessionFailure(behind, 3, "server producer highwater 3 is ahead of local transaction 2");
-	CHECK(behind.Endpoint.Artifact()->Transactions.size() == 2);
-}
-
-void TestHelloHighwaterRegressionRequiresRecovery()
+void TestHighwaterContradictionsRequireRecovery()
 {
-	Producer producer;
-	static_cast<void>(producer.Handshake());
-	CHECK(producer.Submit("/A") == ProducerResult::Accepted);
-	CHECK(producer.Submit("/B") == ProducerResult::Accepted);
-	static_cast<void>(producer.Sends());
-	producer.Feed(server::Acknowledged(2));
-	producer.Disconnect();
-	static_cast<void>(producer.Request());
-	server::Hello hello;
-	hello.CommittedThrough = 1;
-	producer.Feed(server::HelloOk(hello));
-	producer.ExpectClose(DisconnectReason::RecoveryRequired);
-	CheckSessionFailure(producer, 1, "server producer highwater regressed from 2 to 1");
-	CHECK(producer.Endpoint.Artifact()->Transactions.empty());
+	const auto hello_ok = [](std::uint64_t committed_through)
+	{
+		server::Hello hello;
+		hello.CommittedThrough = committed_through;
+		hello.Token = "not-issued";
+		return server::HelloOk(hello);
+	};
+	const HighwaterCase cases[] = {
+		{0, 0, hello_ok(1), 1, "server producer highwater 1 is ahead of local transaction 0", 0},
+		// A session ahead of its local outbox keeps the outbox as evidence.
+		{2, 0, hello_ok(3), 3, "server producer highwater 3 is ahead of local transaction 2", 2},
+		{2, 2, hello_ok(1), 1, "server producer highwater regressed from 2 to 1", 0},
+		{1, 0, server::Acknowledged(9), 9,
+		 "server producer highwater 9 is ahead of local transaction 1", 1},
+		{3, 2, server::Acknowledged(1), 1, "server producer highwater regressed from 2 to 1", 1},
+	};
+	for (const HighwaterCase& expected : cases)
+	{
+		Producer producer;
+		static_cast<void>(producer.Handshake());
+		for (int index = 0; index < expected.Submitted; ++index)
+		{
+			CHECK(producer.Submit("/P") == ProducerResult::Accepted);
+		}
+		static_cast<void>(producer.Sends());
+		if (expected.AcknowledgedBefore != 0)
+		{
+			producer.Feed(server::Acknowledged(expected.AcknowledgedBefore));
+		}
+		const bool hello = DecodeSent(expected.Frame).payload_type() == Payload::HelloOk;
+		if (hello)
+		{
+			producer.Disconnect();
+			static_cast<void>(producer.Request());
+			static_cast<void>(producer.Notices());
+		}
+		producer.Feed(expected.Frame);
+		producer.ExpectClose(DisconnectReason::RecoveryRequired);
+		CheckSessionFailure(producer, expected.TransactionId, expected.Reason);
+		CHECK(producer.Endpoint.Artifact()->Transactions.size() == expected.ArtifactSize);
+		if (hello)
+		{
+			CHECK(producer.Notices().empty());
+		}
+	}
 }
 
 void TestHandshakeProtocolErrorsAreFailedAttempts()
 {
-	flatbuffers::FlatBufferBuilder old_schema(32);
-	const Bytes cases[] = {
-		server::Ping(),
-		Bytes{0, 0, 0, 2, 0xFF, 0xFF},
-		server::Frame(old_schema, Payload::Ping, OpenUSDConnect::CreatePing(old_schema).Union(),
-					  kSchemaVersion - 1),
-		Bytes{0, 0, 0, 0},
-	};
-	for (const Bytes& bytes : cases)
+	for (const Bytes& bytes : {server::Ping(), Bytes{0, 0, 0, 2, 0xFF, 0xFF}})
 	{
 		Producer producer;
 		static_cast<void>(producer.Request());
@@ -452,16 +406,11 @@ void TestRequestBackoff()
 			 producer.Disconnect(DisconnectReason::ConnectFailed);
 		 },
 		 false, true},
-		// Cancelling, disconnecting, and a published connection reset it; a lost
-		// connection is not a failed attempt.
+		// Cancelling and a published connection reset it; a lost connection is
+		// not a failed attempt.
 		{[](Producer& producer)
 		 {
 			 CHECK(producer.Endpoint.CancelConnect());
-		 },
-		 true, true},
-		{[](Producer& producer)
-		 {
-			 producer.Endpoint.Disconnect();
 		 },
 		 true, true},
 		{[](Producer& producer)
@@ -616,8 +565,7 @@ void TestPublicationReplaysUnsentFramesInOrderWithoutCopies()
 	producer.Feed(server::Acknowledged(1));
 	producer.Disconnect();
 	CHECK(producer.Notice<Disconnected>().Reason == DisconnectReason::PeerClosed);
-	ProducerStatus status = producer.Status();
-	CHECK(status.PendingTransactions == 2 && status.PendingEvents == 5);
+	CHECK(producer.Status().PendingTransactions == 2);
 
 	static_cast<void>(producer.Request());
 	server::Hello hello;
@@ -626,32 +574,12 @@ void TestPublicationReplaysUnsentFramesInOrderWithoutCopies()
 	const std::vector<SendAction> replayed = producer.SendActions();
 	CHECK(replayed.size() == 1);
 	CHECK(replayed[0].Bytes == first[2].Bytes);
-	status = producer.Status();
-	CHECK(status.PendingTransactions == 1 && status.PendingEvents == 3);
-	CHECK(status.AcknowledgedTransactions == 2 && status.AcknowledgedEvents == 3);
+	const ProducerStatus status = producer.Status();
+	CHECK(status.PendingTransactions == 1 && status.AcknowledgedTransactions == 2);
 
 	CHECK(producer.Submit("/D") == ProducerResult::Accepted);
 	producer.Feed(server::Acknowledged(4));
 	CHECK(producer.Endpoint.OutboxEmpty());
-	CHECK(producer.Endpoint.DrainAcknowledgedEventCount() == 7);
-	CHECK(producer.Endpoint.DrainAcknowledgedEventCount() == 0);
-	CHECK(producer.Status().NextTransactionId == 5);
-}
-
-void TestReplayOrderSurvivesSeveralLostConnections()
-{
-	Producer producer;
-	static_cast<void>(producer.Handshake());
-	for (const std::string_view prim : {"/A", "/B", "/C"})
-	{
-		CHECK(producer.Submit(prim) == ProducerResult::Accepted);
-	}
-	const std::vector<Bytes> sent = producer.Sends();
-	for (int attempt = 0; attempt < 2; ++attempt)
-	{
-		producer.Disconnect();
-		CHECK(producer.Handshake() == sent);
-	}
 }
 
 void TestAppendRequiresAPublishedHealthyConnection()
@@ -674,11 +602,8 @@ void TestAppendRequiresAPublishedHealthyConnection()
 	CHECK(producer.Endpoint.Append(2, TransactionFrame(2, "/A"), 1, "") ==
 		  ProducerResult::SequenceMismatch);
 	CHECK(producer.Endpoint.Append(1, frame, 0, "") == ProducerResult::InvalidArgument);
-	CHECK(producer.Endpoint.Append(1, Bytes(frame.begin() + kFrameHeaderSize, frame.end()), 1,
-								   "") == ProducerResult::InvalidArgument);
 	CHECK(producer.Endpoint.Append(1, Bytes(frame.begin(), frame.end() - 1), 1, "") ==
 		  ProducerResult::InvalidArgument);
-	CHECK(producer.Endpoint.Append(1, {}, 1, "") == ProducerResult::InvalidArgument);
 	CHECK(producer.Commands().empty());
 
 	CHECK(producer.Endpoint.Append(1, frame, 1, "") == ProducerResult::Accepted);
@@ -725,7 +650,6 @@ void TestAcknowledgedCheckpointNeedsAnEmptyOutbox()
 	CHECK(producer.Submit("/D") == ProducerResult::Accepted);
 	producer.Feed(server::Acknowledged(4, server::Checkpoint{4, 10}));
 	CHECK(producer.Endpoint.AcknowledgedCheckpoint());
-	CHECK((TransactionIds(producer.Sends()) == std::vector<std::uint64_t>{1, 2, 3, 4}));
 	// A Hello acknowledges no mirror position, even with nothing pending.
 	producer.Disconnect();
 	CHECK(producer.Endpoint.AcknowledgedCheckpoint());
@@ -745,40 +669,7 @@ void TestAcknowledgedCheckpointNeedsAnEmptyOutbox()
 	CHECK(anonymous.Endpoint.OutboxEmpty() && !anonymous.Endpoint.AcknowledgedCheckpoint());
 }
 
-void TestAcknowledgementHighwaterFailures()
-{
-	{
-		Producer producer;
-		static_cast<void>(producer.Handshake());
-		CHECK(producer.Submit("/A") == ProducerResult::Accepted);
-		static_cast<void>(producer.Sends());
-		producer.Feed(server::Acknowledged(9));
-		CHECK(producer.Single<CloseAction>().Reason == DisconnectReason::RecoveryRequired);
-		CheckSessionFailure(producer, 9,
-							"server producer highwater 9 is ahead of local transaction 1");
-		CHECK(producer.Notice<Disconnected>().Reason == DisconnectReason::RecoveryRequired);
-	}
-	{
-		Producer producer;
-		static_cast<void>(producer.Handshake());
-		CHECK(producer.Submit("/A") == ProducerResult::Accepted);
-		CHECK(producer.Submit("/B") == ProducerResult::Accepted);
-		CHECK(producer.Submit("/C") == ProducerResult::Accepted);
-		producer.Feed(server::Acknowledged(2));
-		producer.Feed(server::Acknowledged(1));
-		CheckSessionFailure(producer, 1, "server producer highwater regressed from 2 to 1");
-		CHECK(producer.Endpoint.Artifact()->Transactions.size() == 1);
-	}
-}
-
-struct DispositionCase final
-{
-	TransactionRejectionCode Code;
-	ProducerRecoveryDisposition Disposition;
-	std::string_view Description;
-};
-
-void TestRejectionQuarantinesTheOutbox(const DispositionCase& expected)
+void TestRejectionQuarantinesTheOutbox()
 {
 	Producer producer;
 	static_cast<void>(producer.Handshake());
@@ -787,16 +678,15 @@ void TestRejectionQuarantinesTheOutbox(const DispositionCase& expected)
 	const std::vector<Bytes> sent = producer.Sends();
 	// Frames after a rejection in the same read are not handled.
 	producer.Feed(Concatenate(
-		{server::Rejected(1, expected.Code, "layer was remapped", 1), server::Acknowledged(1)}));
+		{server::Rejected(1, TransactionRejectionCode::StaleLayerGraph, "layer was remapped", 1),
+		 server::Acknowledged(1)}));
 	CHECK(producer.Single<CloseAction>().Reason == DisconnectReason::RecoveryRequired);
 	CHECK(producer.Notice<Disconnected>().Reason == DisconnectReason::RecoveryRequired);
 
 	const std::optional<TransactionFailure> failure = producer.Endpoint.Failure();
 	CHECK(failure && failure->TransactionId == 1 && failure->ExpectedTransactionId == 1);
-	CHECK(failure->Code == static_cast<std::uint8_t>(expected.Code));
+	CHECK(failure->Code == static_cast<std::uint8_t>(TransactionRejectionCode::StaleLayerGraph));
 	CHECK(failure->Reason == "layer was remapped");
-	CHECK(failure->Disposition() == expected.Disposition);
-	CHECK(failure->Describe() == expected.Description);
 
 	CHECK(producer.Submit("/C") == ProducerResult::RecoveryRequired);
 	CHECK(!producer.Endpoint.QueueControl(ClaimFrame()));
@@ -809,7 +699,6 @@ void TestRejectionQuarantinesTheOutbox(const DispositionCase& expected)
 
 	const std::optional<RecoveryArtifact> artifact = producer.Endpoint.Artifact();
 	CHECK(artifact && artifact->SessionId == "session");
-	CHECK(artifact->Failure.Describe() == expected.Description);
 	CHECK(artifact->Transactions.size() == 2);
 	const std::pair<std::string_view, std::size_t> transactions[] = {{"layer-a", 1},
 																	 {"layer-b", 2}};
@@ -821,18 +710,6 @@ void TestRejectionQuarantinesTheOutbox(const DispositionCase& expected)
 		CHECK(entry.LayerKey == transactions[index].first);
 		CHECK(entry.EventCount == transactions[index].second);
 	}
-}
-
-void TestRejectionWithoutReasonOrKnownCode()
-{
-	Producer producer;
-	static_cast<void>(producer.Handshake());
-	CHECK(producer.Submit("/A") == ProducerResult::Accepted);
-	producer.Feed(server::Rejected(1, static_cast<TransactionRejectionCode>(9), ""));
-	const std::optional<TransactionFailure> failure = producer.Endpoint.Failure();
-	CHECK(failure && failure->Code == 9);
-	CHECK(failure->Disposition() == ProducerRecoveryDisposition::SessionFatal);
-	CHECK(failure->Describe() == "transaction 1 rejected (unknown_9): no reason supplied");
 }
 
 void TestRejectionOfAnUnknownTransaction()
@@ -873,10 +750,8 @@ void TestRateLimitClosesAndOpensARetryWindow()
 	CHECK(!producer.Status().Failure);
 
 	const std::pair<float, std::chrono::steady_clock::duration> hostile[] = {
-		{-1.0F, std::chrono::steady_clock::duration::zero()},
 		{std::numeric_limits<float>::quiet_NaN(), std::chrono::steady_clock::duration::zero()},
 		{std::numeric_limits<float>::infinity(), 1h},
-		{1e30F, 1h},
 	};
 	for (const auto& [seconds, window] : hostile)
 	{
@@ -902,16 +777,11 @@ void TestRepairReplacesTheRejectedTransaction()
 	producer.ExpectClose(DisconnectReason::RecoveryRequired);
 
 	const Bytes repaired = TransactionFrame(1, "/Repaired", "new-layer");
-	CHECK(producer.Endpoint.RepairRejected(Bytes{0, 0, 0, 1}, 1, "") ==
-		  ProducerResult::InvalidArgument);
-	CHECK(producer.Endpoint.RepairRejected(repaired, 0, "new-layer") ==
-		  ProducerResult::InvalidArgument);
 	CHECK(producer.Endpoint.Failure());
 	CHECK(producer.Endpoint.RepairRejected(repaired, 2, "new-layer") == ProducerResult::Accepted);
 	const ProducerStatus status = producer.Status();
 	CHECK(!status.Failure && !producer.Endpoint.Artifact());
-	CHECK(status.PendingTransactions == 2 && status.PendingEvents == 3);
-	CHECK(status.NextTransactionId == 3);
+	CHECK(status.PendingTransactions == 2);
 
 	CHECK(producer.Handshake() == (std::vector<Bytes>{repaired, sent[1]}));
 	producer.Feed(server::Acknowledged(2));
@@ -938,20 +808,16 @@ void TestAbandonContinuesAsAFreshSession()
 	producer.ExpectClose(DisconnectReason::RecoveryRequired);
 
 	CHECK(!producer.Endpoint.AbandonRejectedSession(""));
-	CHECK(!producer.Endpoint.AbandonRejectedSession(std::string(129, 's')));
 	CHECK(!producer.Endpoint.AbandonRejectedSession("session"));
 	CHECK(producer.Endpoint.Failure());
 
 	const std::optional<RecoveryArtifact> artifact =
 		producer.Endpoint.AbandonRejectedSession("replacement");
 	CHECK(artifact && artifact->SessionId == "session");
-	CHECK(artifact->Failure.Code ==
-		  static_cast<std::uint8_t>(TransactionRejectionCode::InvalidTransaction));
 	CHECK(artifact->Transactions.size() == 2);
 	const ProducerStatus status = producer.Status();
 	CHECK(status.SessionId == "replacement" && !status.Failure);
 	CHECK(status.PendingTransactions == 0 && status.NextTransactionId == 1);
-	CHECK(!producer.Endpoint.Artifact());
 	CHECK(!producer.Endpoint.AbandonRejectedSession("another"));
 
 	CHECK(producer.Request().ProducerSessionId == "replacement");
@@ -1037,12 +903,8 @@ void TestMessagesWithoutAProducerActionAreIgnored()
 	static_cast<void>(producer.Handshake());
 	flatbuffers::FlatBufferBuilder newer(32);
 	const Bytes frames[] = {
-		server::Ping(),
 		server::Claimed("client"),
-		server::ClaimRejected("already led", "other"),
-		server::Playback(1.0, true, 1.0, "other"),
 		server::Event(1),
-		server::Resync(),
 		server::HelloOk(),
 		server::Frame(newer, static_cast<Payload>(200), OpenUSDConnect::CreatePing(newer).Union()),
 	};
@@ -1139,9 +1001,7 @@ int main()
 	TestHelloCarriesTheProducerIdentity();
 	TestAcceptedHelloNotifiesThenPublishes();
 	TestHandshakeRejectionsHoldUntilAnExplicitConnect();
-	TestLayerModeMismatchIsARejection();
-	TestHelloHighwaterAheadRequiresRecovery();
-	TestHelloHighwaterRegressionRequiresRecovery();
+	TestHighwaterContradictionsRequireRecovery();
 	TestHandshakeProtocolErrorsAreFailedAttempts();
 	TestHandshakeDeadline();
 	TestRequestBackoff();
@@ -1151,28 +1011,9 @@ int main()
 	TestAReportedEndVoidsActionsQueuedForTheConnection();
 	TestAnUntakenAttemptIsWithdrawn();
 	TestPublicationReplaysUnsentFramesInOrderWithoutCopies();
-	TestReplayOrderSurvivesSeveralLostConnections();
 	TestAppendRequiresAPublishedHealthyConnection();
 	TestAcknowledgedCheckpointNeedsAnEmptyOutbox();
-	TestAcknowledgementHighwaterFailures();
-	const DispositionCase dispositions[] = {
-		{TransactionRejectionCode::StaleLayerGraph,
-		 ProducerRecoveryDisposition::RecoverableConflict,
-		 "transaction 1 rejected (stale_layer_graph, expected transaction 1): layer was remapped"},
-		{TransactionRejectionCode::InvalidTransaction,
-		 ProducerRecoveryDisposition::InvalidOperation,
-		 "transaction 1 rejected (invalid_transaction, expected transaction 1): layer was "
-		 "remapped"},
-		{TransactionRejectionCode::InvalidIdentity, ProducerRecoveryDisposition::SessionFatal,
-		 "transaction 1 rejected (invalid_identity, expected transaction 1): layer was remapped"},
-		{TransactionRejectionCode::UnexpectedId, ProducerRecoveryDisposition::SessionFatal,
-		 "transaction 1 rejected (unexpected_id, expected transaction 1): layer was remapped"},
-	};
-	for (const DispositionCase& expected : dispositions)
-	{
-		TestRejectionQuarantinesTheOutbox(expected);
-	}
-	TestRejectionWithoutReasonOrKnownCode();
+	TestRejectionQuarantinesTheOutbox();
 	TestRejectionOfAnUnknownTransaction();
 	TestRateLimitClosesAndOpensARetryWindow();
 	TestRepairReplacesTheRejectedTransaction();

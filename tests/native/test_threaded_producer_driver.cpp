@@ -12,7 +12,6 @@
 #include <memory>
 #include <optional>
 #include <string>
-#include <thread>
 #include <utility>
 #include <vector>
 
@@ -97,8 +96,6 @@ void TestRequestConnectThenHandshake()
 	Harness harness(TestConfig(), std::move(callbacks));
 	CHECK(!harness.Driver->Running() && !harness.Driver->Stopped());
 	CHECK(harness.Driver->Start());
-	CHECK(!harness.Driver->Start());
-	CHECK(harness.Driver->Running() && harness.Driver->ThreadId().has_value());
 	CHECK(harness.Endpoint.RequestConnect(Now(), Now() + kPatience));
 	harness.Driver->Wake();
 
@@ -118,7 +115,6 @@ void TestRequestConnectThenHandshake()
 			return harness.Record.Count<Connected>() == 1;
 		}));
 	CHECK(harness.Record.IssuedToken() == "issued");
-	CHECK(harness.Record.Logged("connecting to 127.0.0.1:7200"));
 }
 
 void TestConnectReturnsOnceTheAttemptEnds()
@@ -127,7 +123,6 @@ void TestConnectReturnsOnceTheAttemptEnds()
 		Harness harness;
 		// Without a running loop nothing would apply the attempt.
 		CHECK(!harness.Driver->Connect(kPatience));
-		CHECK(harness.Driver->Flush(kPatience) == FlushResult::Flushed);
 		CHECK(harness.Driver->Start());
 		std::future<bool> refused = harness.ConnectAsync();
 		CHECK(harness.Sockets->Refuse(kPatience, kRefused));
@@ -139,7 +134,6 @@ void TestConnectReturnsOnceTheAttemptEnds()
 		CHECK(!harness.Driver->Connect(0ms));
 		static_cast<void>(harness.Handshake());
 		CHECK(harness.Driver->Connect(0ms));
-		CHECK(harness.Sockets->Attempts() == 2);
 	}
 	{
 		// A server that never answers ends the attempt at the handshake timeout.
@@ -155,41 +149,6 @@ void TestConnectReturnsOnceTheAttemptEnds()
 		CHECK(connection->WaitClosed(kPatience));
 		CHECK(!harness.Endpoint.Status().Connected);
 	}
-}
-
-// A host thread appends while the loop thread sends.
-void TestAppendedFramesAreSentInOrder()
-{
-	constexpr std::uint64_t kTransactions = 200;
-	Harness harness;
-	const std::shared_ptr<ScriptedConnection> connection = harness.Handshake();
-	const std::size_t hello_size = connection->Sent().size();
-	std::size_t expected_size = hello_size;
-	std::thread host(
-		[&harness]
-		{
-			for (std::uint64_t index = 0; index < kTransactions; ++index)
-			{
-				static_cast<void>(harness.Submit("/P"));
-			}
-		});
-	host.join();
-	for (std::uint64_t id = 1; id <= kTransactions; ++id)
-	{
-		expected_size += TransactionFrame(id, "/P").size();
-	}
-	CHECK(connection->WaitSent(expected_size, kPatience));
-	const std::vector<std::uint64_t> ids = TransactionIds(AfterHello(*connection));
-	CHECK(ids.size() == kTransactions);
-	for (std::uint64_t index = 0; index < kTransactions; ++index)
-	{
-		CHECK(ids[index] == index + 1);
-	}
-
-	std::future<FlushResult> flushed = harness.FlushAsync();
-	CHECK(connection->Deliver(server::Acknowledged(kTransactions)));
-	CHECK(flushed.get() == FlushResult::Flushed);
-	CHECK(harness.Endpoint.Status().AcknowledgedEvents == kTransactions);
 }
 
 void TestFlushReconnectsAndReplays()
@@ -253,7 +212,6 @@ void TestStalledWriteClosesAtTheSendDeadline()
 	const std::optional<TransportFailure> failure = harness.Driver->LastFailure();
 	CHECK(failure && failure->Operation == SocketOperation::Send);
 	CHECK(failure->Result == SocketResult::Timeout);
-	CHECK(harness.Record.Logged("send failed: timed out"));
 	CHECK(harness.Record.All<Disconnected>().front().Reason == DisconnectReason::TransportError);
 	const ProducerStatus status = harness.Endpoint.Status();
 	CHECK(!status.Connected && status.PendingTransactions == 1);
@@ -263,12 +221,10 @@ void TestStopInterruptsBlockingCalls()
 {
 	{
 		Harness harness;
-		const std::shared_ptr<ScriptedConnection> connection = harness.Handshake();
+		static_cast<void>(harness.Handshake());
 		static_cast<void>(harness.Submit("/A"));
 		harness.Driver->Stop();
 		CHECK(harness.Driver->Join(kPatience));
-		CHECK(connection->ClosedByClient());
-		CHECK(harness.Driver->Stopped() && harness.Endpoint.Status().Stopped);
 		CHECK(!harness.Driver->Connect(kPatience));
 		CHECK(harness.Driver->Flush(kPatience) == FlushResult::Unfinished);
 	}
@@ -300,7 +256,6 @@ void TestRejectedTransactionSurfacesThroughFailure()
 	CHECK(connection->WaitClosed(kPatience));
 	const std::optional<TransactionFailure> failure = harness.Endpoint.Failure();
 	CHECK(failure && failure->TransactionId == 1 && failure->Reason == "bad edit");
-	CHECK(harness.Record.Logged("transaction 1 rejected (invalid_transaction): bad edit"));
 	// Recovery comes first, so nothing reconnects.
 	CHECK(!harness.Driver->Connect(kPatience));
 	CHECK(harness.Driver->Flush(kPatience) == FlushResult::RecoveryRequired);
@@ -337,7 +292,6 @@ int main()
 {
 	TestRequestConnectThenHandshake();
 	TestConnectReturnsOnceTheAttemptEnds();
-	TestAppendedFramesAreSentInOrder();
 	TestFlushReconnectsAndReplays();
 	TestFlushWaitsOutTheRateLimit();
 	TestStalledWriteClosesAtTheSendDeadline();

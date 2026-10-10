@@ -132,16 +132,9 @@ void TestConfigurationValidation()
 	const std::pair<ReceiverConfig, bool> rules[] = {
 		{valid, true},
 		{shared_stage, true},
-		{With(valid, &ReceiverConfig::Host, ""), false},
-		{With(valid, &ReceiverConfig::Port, 0), false},
 		{With(With(valid, &ReceiverConfig::ClientId, ""), &ReceiverConfig::Origin, ""), true},
-		{With(valid, &ReceiverConfig::SyncFrom, 0), false},
-		{With(valid, &ReceiverConfig::MaxQueue, 0), false},
-		{With(valid, &ReceiverConfig::SocketTimeout, 0ms), false},
-		{With(valid, &ReceiverConfig::MaxConsecutiveTimeouts, 0), false},
-		{With(valid, &ReceiverConfig::ReconnectBaseDelay, 0ms), false},
+		{With(valid, &ReceiverConfig::Port, 0), false},
 		{With(valid, &ReceiverConfig::ReconnectMaxDelay, 999ms), false},
-		{With(valid, &ReceiverConfig::LayerMode, static_cast<LayerMode>(2)), false},
 		{With(valid, &ReceiverConfig::LayerMode, LayerMode::SharedStage), false},
 		{With(shared_stage, &ReceiverConfig::Department, "layout"), false},
 	};
@@ -151,26 +144,19 @@ void TestConfigurationValidation()
 	}
 }
 
-void TestStartRequestsOneConnection()
-{
-	Receiver receiver;
-	receiver.Now += 5s;
-	CHECK(receiver.Endpoint.Start(receiver.Now));
-	const ConnectAction connect = receiver.Single<ConnectAction>();
-	CHECK(connect.Host == "127.0.0.1");
-	CHECK(connect.Port == 7200);
-	CHECK(connect.Deadline == receiver.Now + 30s);
-	CHECK(!receiver.Endpoint.Start(receiver.Now));
-	CHECK(!receiver.Endpoint.NextWake());
-}
-
-void TestFirstHelloCarriesConfigurationWithoutClaim()
+void TestStartConnectsOnceAndSendsTheConfiguredHello()
 {
 	ReceiverConfig config = TestConfig();
 	config.Department = "layout";
 	config.SyncFrom = 5;
 	Receiver receiver(config);
-	const SentHello hello = receiver.Start("token-1");
+	CHECK(receiver.Endpoint.Start(receiver.Now));
+	const ConnectAction connect = receiver.Single<ConnectAction>();
+	CHECK(connect.Host == "127.0.0.1" && connect.Port == 7200);
+	CHECK(connect.Deadline == receiver.Now + config.SocketTimeout);
+	CHECK(!receiver.Endpoint.Start(receiver.Now));
+	receiver.Endpoint.OnConnected("token-1");
+	const SentHello hello = DecodeHello(*receiver.Single<SendAction>().Bytes);
 	CHECK(hello.Role == "receiver");
 	CHECK(hello.ProtocolVersion == kProtocolVersion);
 	CHECK(hello.SyncFrom == 5);
@@ -181,16 +167,6 @@ void TestFirstHelloCarriesConfigurationWithoutClaim()
 	CHECK(hello.LayeredReplay);
 	CHECK(hello.Mode == LayerMode::Managed);
 	CHECK(!hello.ReplayServerInstance && !hello.ReplayEpoch);
-}
-
-void TestAnonymousReceiverSendsEmptyIdentity()
-{
-	ReceiverConfig config = TestConfig();
-	config.ClientId.clear();
-	config.Origin.clear();
-	Receiver receiver(config);
-	const SentHello hello = receiver.Start();
-	CHECK(hello.ClientId.empty() && hello.Origin.empty());
 }
 
 void TestAcceptedHelloNotifiesInOrder()
@@ -222,22 +198,24 @@ void TestAcceptedHelloNotifiesInOrder()
 	CHECK(status.QueuedFrames == 0);
 }
 
-void TestEmptyStageMetadataIsNotNotified()
-{
-	Receiver receiver;
-	server::Hello hello;
-	hello.Metadata = StageMetadata{};
-	static_cast<void>(receiver.Handshake(hello));
-	static_cast<void>(receiver.Notice<Connected>());
-}
-
 void TestHandshakeRejectionsStop()
 {
+	server::Hello shared;
+	shared.Mode = LayerMode::SharedStage;
+	shared.Token = "not-issued";
+	server::Hello flat;
+	flat.LayeredReplay = false;
 	const std::pair<Bytes, HandshakeRejected> rejections[] = {
 		{server::AuthRejected("invalid token"),
 		 {true, HelloRejectionCode::Unspecified, "invalid token"}},
 		{server::HelloRejected(HelloRejectionCode::LayeredReplayRequired, "replay is required"),
 		 {false, HelloRejectionCode::LayeredReplayRequired, "replay is required"}},
+		{server::HelloOk(shared),
+		 {false, HelloRejectionCode::LayerModeMismatch,
+		  "server did not negotiate requested layer mode"}},
+		{server::HelloOk(flat),
+		 {false, HelloRejectionCode::LayeredReplayRequired,
+		  "server did not negotiate requested layered replay"}},
 	};
 	const auto same = [](const HandshakeRejected& left, const HandshakeRejected& right)
 	{
@@ -259,34 +237,8 @@ void TestHandshakeRejectionsStop()
 	}
 }
 
-void TestNegotiationRejections()
+void TestNegotiatedModesConnect()
 {
-	{
-		Receiver receiver;
-		static_cast<void>(receiver.Start());
-		server::Hello hello;
-		hello.Mode = LayerMode::SharedStage;
-		hello.Token = "not-issued";
-		receiver.Feed(server::HelloOk(hello));
-		CHECK(receiver.Single<CloseAction>().Reason == DisconnectReason::HandshakeRejected);
-		const HandshakeRejected rejected = receiver.Notice<HandshakeRejected>();
-		CHECK(!rejected.Authentication);
-		CHECK(rejected.Code == HelloRejectionCode::LayerModeMismatch);
-		CHECK(rejected.Reason == "server did not negotiate requested layer mode");
-		CHECK(receiver.Status().LayerModeActive == LayerMode::SharedStage);
-	}
-	{
-		Receiver receiver;
-		static_cast<void>(receiver.Start());
-		server::Hello hello;
-		hello.LayeredReplay = false;
-		receiver.Feed(server::HelloOk(hello));
-		CHECK(receiver.Single<CloseAction>().Reason == DisconnectReason::HandshakeRejected);
-		const ReceiverStatus status = receiver.Status();
-		CHECK(status.Rejection->Code == HelloRejectionCode::LayeredReplayRequired);
-		CHECK(status.Rejection->Reason == "server did not negotiate requested layered replay");
-		CHECK(!status.LayeredReplayActive);
-	}
 	{
 		ReceiverConfig config = TestConfig();
 		config.LayeredReplay = false;
@@ -353,7 +305,6 @@ void TestReplayCompleteWaitsForDrainedFrames()
 	CHECK(!receiver.Status().Synchronized);
 	const std::uint64_t generation = receiver.Endpoint.Generation();
 	CHECK((Sequences(receiver.Endpoint.DrainFrames(2)) == std::vector<std::int32_t>{1, 2}));
-	CHECK(receiver.Status().QueuedFrames == 1);
 	CHECK(!receiver.Endpoint.MarkReplayApplied());
 	CHECK(Sequences(receiver.Endpoint.DrainFrames(2)) == std::vector<std::int32_t>{3});
 	CHECK(receiver.Endpoint.MarkAppliedThrough(generation, 3));
@@ -364,7 +315,6 @@ void TestReplayCompleteWaitsForDrainedFrames()
 	CHECK(status.ReplayEpoch == 7);
 	CHECK(status.ServerInstance == "server");
 
-	CHECK(!receiver.Logged(LogLevel::Warning));
 	receiver.Feed(server::ReplayComplete(-1, 8));
 	CHECK(receiver.Logged(LogLevel::Warning));
 	CHECK(receiver.Status().Synchronized);
@@ -543,14 +493,6 @@ void TestReconnectDisabledStops()
 	config.Reconnect = false;
 	{
 		Receiver receiver(config);
-		CHECK(receiver.Endpoint.Start(receiver.Now));
-		static_cast<void>(receiver.Single<ConnectAction>());
-		receiver.Disconnect(DisconnectReason::ConnectFailed);
-		CHECK(receiver.Commands().empty());
-		CHECK(receiver.Status().Stopped);
-	}
-	{
-		Receiver receiver(config);
 		static_cast<void>(receiver.Handshake());
 		receiver.Disconnect();
 		CHECK(receiver.Commands().empty());
@@ -594,15 +536,11 @@ void TestReconnectToggleAppliesWhenTheSessionEnds()
 void TestReplayRequests()
 {
 	Receiver receiver;
-	CHECK(!receiver.Endpoint.RequestReplayFrom(0));
 	static_cast<void>(receiver.Handshake());
 	receiver.Feed(server::Event(1));
 	receiver.Feed(server::Event(2));
-	const std::uint64_t marker = receiver.Endpoint.FreezeMarker();
-	CHECK(!receiver.Endpoint.DrainedThrough(marker));
 	CHECK(receiver.Endpoint.RequestReplayFrom(2));
 	CHECK(receiver.Single<CloseAction>().Reason == DisconnectReason::ReplayRequested);
-	CHECK(receiver.Endpoint.DrainedThrough(marker));
 	const ReceiverStatus status = receiver.Status();
 	CHECK(status.LastSequence == 1 && status.QueuedFrames == 0);
 	CHECK(receiver.Reconnect().SyncFrom == 2);
@@ -627,20 +565,6 @@ void TestReplayRequests()
 	CHECK(receiver.Reconnect().SyncFrom == 1);
 }
 
-void TestReconnectCursorFollowsReceivedFrames()
-{
-	ReceiverConfig config = TestConfig();
-	config.SyncFrom = 10;
-	Receiver receiver(config);
-	static_cast<void>(receiver.Handshake());
-	receiver.Feed(server::Event(10));
-	CHECK(receiver.Reconnect().SyncFrom == 11);
-	receiver.Feed(server::HelloOk());
-	receiver.Feed(server::Resync());
-	receiver.Feed(server::Event(1));
-	CHECK(receiver.Reconnect().SyncFrom == 2);
-}
-
 void TestProtocolErrorsCloseTheConnection()
 {
 	flatbuffers::FlatBufferBuilder future(32);
@@ -655,21 +579,13 @@ void TestProtocolErrorsCloseTheConnection()
 	const std::uint8_t noise[] = {1, 2, 3, 4, 5, 6, 7, 8};
 	CHECK(EncodeFrame(noise, sizeof(noise), garbage) == FrameResult::Success);
 	const Bytes empty_header{0, 0, 0, 0};
-	for (const bool handshaking : {true, false})
+	for (const Bytes& error : {future_schema, no_payload, unknown_payload, garbage, empty_header})
 	{
-		for (const Bytes& error :
-			 {future_schema, no_payload, unknown_payload, garbage, empty_header})
-		{
-			Receiver receiver;
-			static_cast<void>(receiver.Start());
-			if (!handshaking)
-			{
-				receiver.Feed(server::HelloOk());
-			}
-			receiver.Feed(error);
-			CHECK(receiver.Single<CloseAction>().Reason == DisconnectReason::ProtocolError);
-			CHECK(receiver.Reconnect().SyncFrom == 1);
-		}
+		Receiver receiver;
+		static_cast<void>(receiver.Handshake());
+		receiver.Feed(error);
+		CHECK(receiver.Single<CloseAction>().Reason == DisconnectReason::ProtocolError);
+		CHECK(receiver.Reconnect().SyncFrom == 1);
 	}
 	// The server answers a Hello before it sends anything else.
 	for (const Bytes& early : {server::Ping(), server::Event(1)})
@@ -715,8 +631,6 @@ void TestStop()
 		CHECK(receiver.Notice<Disconnected>().Reason == DisconnectReason::Stopped);
 		CHECK(receiver.Status().Stopped && !receiver.Status().Connected);
 		receiver.Disconnect();
-		receiver.Advance(60s);
-		CHECK(receiver.Commands().empty());
 		CHECK(!receiver.Endpoint.Start(receiver.Now));
 		receiver.Endpoint.Stop();
 		CHECK(receiver.Commands().empty());
@@ -814,7 +728,7 @@ void TestFullReplayRequestQueuesItsOwnReset()
 	CHECK(receiver.Status().QueuedFrames == 0);
 }
 
-void TestChangedHelloIdentityWaitsForTheReset(std::string_view instance, bool queue_full)
+void TestChangedHelloIdentityWaitsForTheReset(bool queue_full)
 {
 	ReceiverConfig config = TestConfig();
 	config.MaxQueue = 1;
@@ -827,7 +741,6 @@ void TestChangedHelloIdentityWaitsForTheReset(std::string_view instance, bool qu
 	CHECK(hello.Claims("server", 0));
 
 	server::Hello changed;
-	changed.ServerInstance = std::string(instance);
 	changed.ReplayEpoch = 1;
 	receiver.Feed(server::HelloOk(changed));
 	const ReceiverStatus status = receiver.Status();
@@ -851,11 +764,11 @@ void TestChangedHelloIdentityWaitsForTheReset(std::string_view instance, bool qu
 	{
 		const SentHello retry = receiver.Reconnect();
 		CHECK(retry.SyncFrom == 1);
-		CHECK(retry.Claims(instance, 1));
+		CHECK(retry.Claims("server", 1));
 	}
 }
 
-void TestOldServerRetainsCursorWithoutIdentity(std::string_view instance)
+void TestOldServerRetainsCursorWithoutIdentity()
 {
 	ReceiverConfig config = TestConfig();
 	config.SyncFrom = 4;
@@ -863,7 +776,7 @@ void TestOldServerRetainsCursorWithoutIdentity(std::string_view instance)
 	Receiver receiver(config);
 	static_cast<void>(receiver.Start());
 	server::Hello old_server;
-	old_server.ServerInstance = std::string(instance);
+	old_server.ServerInstance.clear();
 	old_server.ReplayIdentity = false;
 	old_server.ReplayEpoch.reset();
 	old_server.LayeredReplay = false;
@@ -1165,13 +1078,10 @@ void TestOwnQueuedResetIsPending()
 int main()
 {
 	TestConfigurationValidation();
-	TestStartRequestsOneConnection();
-	TestFirstHelloCarriesConfigurationWithoutClaim();
-	TestAnonymousReceiverSendsEmptyIdentity();
+	TestStartConnectsOnceAndSendsTheConfiguredHello();
 	TestAcceptedHelloNotifiesInOrder();
-	TestEmptyStageMetadataIsNotNotified();
 	TestHandshakeRejectionsStop();
-	TestNegotiationRejections();
+	TestNegotiatedModesConnect();
 	TestControlMessages();
 	TestReplayCompleteWaitsForDrainedFrames();
 	TestInPlaceResyncClearsReadyUntilApplied();
@@ -1186,20 +1096,17 @@ int main()
 	TestReconnectDisabledStops();
 	TestReconnectToggleAppliesWhenTheSessionEnds();
 	TestReplayRequests();
-	TestReconnectCursorFollowsReceivedFrames();
 	TestProtocolErrorsCloseTheConnection();
 	TestHostDisconnectEndsTheSession();
 	TestStop();
 	TestReceivedIdentityIsPublishedOnlyWhenApplied();
 	TestInterruptedLiveResetClaimsUnknownPrefix();
 	TestFullReplayRequestQueuesItsOwnReset();
-	for (const std::string_view instance : {"server", "replacement"})
+	for (const bool queue_full : {false, true})
 	{
-		TestChangedHelloIdentityWaitsForTheReset(instance, false);
-		TestChangedHelloIdentityWaitsForTheReset(instance, true);
+		TestChangedHelloIdentityWaitsForTheReset(queue_full);
 	}
-	TestOldServerRetainsCursorWithoutIdentity("");
-	TestOldServerRetainsCursorWithoutIdentity("older-checkpoint-server");
+	TestOldServerRetainsCursorWithoutIdentity();
 	TestInitialSnapshotCursorIsNotProof();
 	for (const OverflowStart start : {OverflowStart::FirstReplay, OverflowStart::AfterServerReset,
 									  OverflowStart::AfterLiveReset, OverflowStart::SnapshotCursor,

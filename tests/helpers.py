@@ -218,6 +218,13 @@ def embedded_server(**config):
             runtime.sync_server.token_store.close()
 
 
+def client_registered(runtime, client_id):
+    """Whether the server of *runtime* holds a connection from *client_id*."""
+    state = runtime.sync_server
+    with state.clients_lock:
+        return any(info.client_id == client_id for info in state.clients.values())
+
+
 def wait_until(predicate, timeout=5.0):
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
