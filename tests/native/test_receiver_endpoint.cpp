@@ -274,7 +274,7 @@ void TestNegotiatedModesConnect()
 void TestControlMessages()
 {
 	Receiver receiver(kConnected);
-	receiver.Notices();
+	receiver.DropNotices();
 	receiver.Feed(server::Ping());
 	receiver.Feed(server::Playback(12.5, true, 2.0, "leader"));
 	receiver.Feed(server::Claimed("me"));
@@ -342,7 +342,7 @@ void TestInPlaceResyncClearsReadyUntilApplied()
 void TestDataFrameAcceptResults()
 {
 	Receiver receiver(kConnected);
-	receiver.Notices();
+	receiver.DropNotices();
 	receiver.Feed(server::Event(1));
 	receiver.Feed(server::Event(2));
 	receiver.Apply();
@@ -392,7 +392,7 @@ void TestOverflowWaitsForTheDrain(DrainOutcome outcome)
 	config.MaxQueue = 2;
 	config.ReconnectMaxDelay = 2s;
 	Receiver receiver(kConnected, config);
-	receiver.Notices();
+	receiver.DropNotices();
 	receiver.Feed(server::Event(1));
 	receiver.Feed(server::Event(2));
 	receiver.Feed(server::Event(3));
@@ -543,7 +543,7 @@ void TestReplayRequests()
 	CHECK(receiver.Connect().SyncFrom == 2);
 
 	// A request during the handshake abandons it before the Hello is accepted.
-	receiver.Notices();
+	receiver.DropNotices();
 	CHECK(receiver.Endpoint.RequestReplayFrom(1));
 	CHECK(receiver.Single<CloseAction>().Reason == DisconnectReason::ReplayRequested);
 	receiver.Feed(server::HelloOk());
@@ -593,7 +593,7 @@ void TestHostDisconnectEndsTheSession()
 	receiver.Advance(1s);
 	receiver.Connect();
 	receiver.Feed(server::HelloOk());
-	receiver.Notices();
+	receiver.DropNotices();
 	receiver.Feed(server::ReplayComplete(0, 0));
 	CHECK(receiver.Endpoint.MarkReplayApplied());
 	receiver.Disconnect(DisconnectReason::TransportError);
@@ -610,7 +610,7 @@ void TestStop()
 {
 	{
 		Receiver receiver(kConnected);
-		receiver.Notices();
+		receiver.DropNotices();
 		receiver.Endpoint.Stop();
 		CHECK(receiver.Single<CloseAction>().Reason == DisconnectReason::Stopped);
 		CHECK(receiver.Notice<Disconnected>().Reason == DisconnectReason::Stopped);

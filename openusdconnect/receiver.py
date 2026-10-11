@@ -1,4 +1,4 @@
-"""Receive wire messages on a native thread for a stage-owning consumer to drain."""
+"""Receive wire messages on a connection thread for a stage-owning consumer to drain."""
 
 from __future__ import annotations
 
@@ -33,7 +33,7 @@ def _transport_error(failure) -> OSError:
 class EventReceiver:
     """Receive wire messages for a stage-owning consumer to drain.
 
-    A native thread runs the connection until :meth:`close` and queues scene
+    A connection thread runs until :meth:`close` and queues scene
     messages as raw FlatBuffers for the consumer thread to decode and apply.
     Handshake and control messages, including their callbacks, are handled on
     that thread; given ``notifications``, the owner drains that queue instead
@@ -246,7 +246,11 @@ class EventReceiver:
         return self._token_error if failure is None else _transport_error(failure)
 
     def snapshot(self) -> _client_backend.ReceiverStatus:
-        """The native status in one call, for reading several fields together."""
+        """The status object in one call, for reading several fields together.
+
+        Its fields are named ``last_sequence``, ``queued_frames``, and so on,
+        not the property names.
+        """
         return self._endpoint.status()
 
     def mark_applied_through(self, generation: int, sequence: int) -> bool:
@@ -308,7 +312,7 @@ class EventReceiver:
         return deque(self._endpoint.drain_frames(max_messages))
 
     def start(self) -> None:
-        """Start connecting on a native thread that runs until closed or collected; once only."""
+        """Start the connection thread, which runs until closed or collected; once only."""
         if self._driver is not None:
             raise RuntimeError("a receiver can only be started once")
         self._driver = _client_backend.ReceiverDriver(

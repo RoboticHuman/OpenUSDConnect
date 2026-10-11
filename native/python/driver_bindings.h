@@ -1,6 +1,7 @@
 #pragma once
 
 #include "openusdconnect/client/driver/socket.h"
+#include "openusdconnect/client/driver/threaded_driver.h"
 #include "openusdconnect/client/engine/notification.h"
 
 #include <nanobind/nanobind.h>

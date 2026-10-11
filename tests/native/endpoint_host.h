@@ -78,9 +78,14 @@ public:
 		return logged;
 	}
 
-	std::vector<Notification> Notices()
+	[[nodiscard]] std::vector<Notification> Notices()
 	{
 		return Notifications.Drain();
+	}
+
+	void DropNotices()
+	{
+		static_cast<void>(Notices());
 	}
 
 	template <typename T>

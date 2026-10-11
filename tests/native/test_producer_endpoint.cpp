@@ -53,7 +53,7 @@ public:
 		return sends;
 	}
 
-	std::vector<Bytes> Sends()
+	[[nodiscard]] std::vector<Bytes> Sends()
 	{
 		std::vector<Bytes> frames;
 		for (const SendAction& send : SendActions())
@@ -61,6 +61,11 @@ public:
 			frames.push_back(*send.Bytes);
 		}
 		return frames;
+	}
+
+	void DropSends()
+	{
+		static_cast<void>(SendActions());
 	}
 
 	// Takes a new attempt's actions and returns its deadline, when the endpoint wakes.
@@ -92,7 +97,7 @@ public:
 		Request();
 		Feed(server::HelloOk(hello));
 		CHECK(Status().Connected);
-		Notices();
+		DropNotices();
 		return Sends();
 	}
 
@@ -308,7 +313,7 @@ void TestHighwaterContradictionsRequireRecovery()
 		{
 			CHECK(producer.Submit("/P") == ProducerResult::Accepted);
 		}
-		producer.Sends();
+		producer.DropSends();
 		if (expected.AcknowledgedBefore != 0)
 		{
 			producer.Feed(server::Acknowledged(expected.AcknowledgedBefore));
@@ -318,7 +323,7 @@ void TestHighwaterContradictionsRequireRecovery()
 		{
 			producer.Disconnect();
 			producer.Request();
-			producer.Notices();
+			producer.DropNotices();
 		}
 		producer.Feed(expected.Frame);
 		producer.ExpectClose(DisconnectReason::RecoveryRequired);
@@ -594,7 +599,7 @@ void TestAppendRequiresAPublishedHealthyConnection()
 	CHECK(producer.Endpoint.NextTransactionId() == 1 && producer.Endpoint.OutboxEmpty());
 
 	producer.Feed(server::HelloOk());
-	producer.Notices();
+	producer.DropNotices();
 	const Bytes frame = TransactionFrame(1, "/A");
 	CHECK(producer.Endpoint.Append(2, TransactionFrame(2, "/A"), 1, "") ==
 		  ProducerResult::SequenceMismatch);
@@ -610,7 +615,7 @@ void TestAppendRequiresAPublishedHealthyConnection()
 	CHECK(TransactionIds(producer.Sends()) == std::vector<std::uint64_t>{2});
 	producer.Feed(server::Acknowledged(1));
 	CHECK(producer.Submit("/C") == ProducerResult::Accepted);
-	producer.Sends();
+	producer.DropSends();
 
 	producer.Disconnect();
 	CHECK(producer.Submit("/D") == ProducerResult::InvalidPhase);
@@ -792,7 +797,7 @@ void TestAbandonContinuesAsAFreshSession()
 	producer.Handshake();
 	CHECK(producer.Submit("/Rejected") == ProducerResult::Accepted);
 	CHECK(producer.Submit("/Suffix") == ProducerResult::Accepted);
-	producer.Sends();
+	producer.DropSends();
 	producer.Feed(server::Rejected(1, TransactionRejectionCode::InvalidTransaction, "injected"));
 	producer.ExpectClose(DisconnectReason::RecoveryRequired);
 
@@ -908,7 +913,7 @@ void TestFramesAfterTheHelloOkInOneReadFollowPublication()
 	Producer producer(kConnected);
 	CHECK(producer.Submit("/A") == ProducerResult::Accepted);
 	CHECK(producer.Submit("/B") == ProducerResult::Accepted);
-	producer.Sends();
+	producer.DropSends();
 	producer.Disconnect();
 
 	producer.Request();

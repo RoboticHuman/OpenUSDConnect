@@ -9,6 +9,7 @@
 #include <condition_variable>
 #include <cstddef>
 #include <cstdint>
+#include <functional>
 #include <memory>
 #include <mutex>
 #include <optional>
@@ -20,6 +21,21 @@
 
 namespace openusdconnect::client
 {
+
+// What a reference driver calls on its host. Every callback is optional, must
+// return normally, and runs on the driver thread, which holds no driver or
+// endpoint lock while calling it.
+struct DriverCallbacks final
+{
+	// Read just before each handshake; nullopt abandons that connection attempt.
+	std::function<std::optional<std::string>()> Token;
+	// The token an accepted Hello issued, before the next Token read.
+	std::function<void(const std::string&)> TokenIssued;
+	// When set, the driver drains the notification queue into it after every
+	// endpoint call, so a notification is handled before the next attempt.
+	std::function<void(Notification)> Notifications;
+	std::function<void(LogLevel, const std::string&)> Log;
+};
 
 // Reference host loop: one thread with blocking sockets applies a started endpoint's actions,
 // ticks at NextWake, and exits once the endpoint stops. Wake it after queuing actions from

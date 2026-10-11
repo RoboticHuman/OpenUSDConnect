@@ -1,4 +1,4 @@
-"""Durable transaction producer whose connection runs on a native thread."""
+"""Durable transaction producer whose connection runs on its own thread."""
 
 from __future__ import annotations
 
@@ -72,10 +72,10 @@ class EventSender:
     """Pipelined producer whose outbox survives reconnects.
 
     ``send_events`` returns once this object owns the encoded transaction. The
-    native outbox removes it only after the server's cumulative durable
+    outbox removes it only after the server's cumulative durable
     acknowledgement covers it, and replays the same bytes under the same
     Hello-bound producer identity after a reconnect, so an acknowledgement lost
-    after commit cannot apply the USD edits twice. A native thread, started by
+    after commit cannot apply the USD edits twice. A connection thread, started by
     the first connection request, writes, reads, and runs the callbacks until
     :meth:`close`; given ``notifications``, the owner drains that queue instead
     and only ``on_token_issued`` runs there.
@@ -138,7 +138,7 @@ class EventSender:
             **_client_backend.driver_callbacks(self, LOG, sink=owns_notifications),
         )
         self._started = False
-        # Pairs each transaction ID with the frame that encodes it.
+        # Holds next_transaction_id() and append() together, as ProducerEndpoint::Append requires.
         self._submit_lock = threading.Lock()
         # Builds the recovery objects once per failure, so their identity holds.
         self._recovery_lock = threading.Lock()
@@ -288,7 +288,11 @@ class EventSender:
         return self._current_recovery() is not None
 
     def snapshot(self) -> _client_backend.ProducerStatus:
-        """The native status in one call, for reading several fields together."""
+        """The status object in one call, for reading several fields together.
+
+        Its fields are named ``pending_transactions``,
+        ``acknowledged_events``, and so on, not the property names.
+        """
         return self._endpoint.status()
 
     def request_connect(self, timeout: float | None = 2.0) -> bool:
@@ -392,7 +396,7 @@ class EventSender:
             payload = encode_message(make_txn(events, layer_key=layer_key, txn_id=failure.txn_id))
             result = self._endpoint.repair_rejected(payload, len(events), layer_key)
             if result != _client_backend.ProducerResult.ACCEPTED:
-                raise RuntimeError(f"native recovery rejected repair: {result}")
+                raise RuntimeError(f"recovery rejected the repair: {result}")
             self._recovery = None
         return failure.txn_id
 

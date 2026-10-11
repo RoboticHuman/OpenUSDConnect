@@ -51,7 +51,6 @@ void BindEndpoint(nb::module_& module)
 		.def_rw("layer_mode", &ReceiverConfig::LayerMode)
 		.def_rw("sync_from", &ReceiverConfig::SyncFrom)
 		.def_rw("max_queue", &ReceiverConfig::MaxQueue)
-		.def_rw("max_consecutive_timeouts", &ReceiverConfig::MaxConsecutiveTimeouts)
 		.def_rw("reconnect", &ReceiverConfig::Reconnect);
 	DurationProperty(config_class, "socket_timeout", &ReceiverConfig::SocketTimeout);
 	DurationProperty(config_class, "reconnect_base_delay", &ReceiverConfig::ReconnectBaseDelay);

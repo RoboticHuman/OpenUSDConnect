@@ -2,7 +2,7 @@
 
 These APIs attach OpenUSDConnect to an application-owned `pxr.Usd.Stage`.
 Call `update()` from the stage-owning thread. Socket reads, transaction
-writes, and reconnects run on native threads that do not need the GIL;
+writes, and reconnects run on connection threads that do not hold the GIL;
 encoding and USD work run on the calling thread.
 
 ## Choose an API
@@ -464,7 +464,7 @@ does not wait for them; closing does not wait for acknowledgements, which
 closes.
 Either object also takes `notifications=`, a `NotificationQueue` its owner
 drains instead of every callback but `on_token_issued` (combining them raises
-`ValueError`), and offers `snapshot()`, its native status read in one call.
+`ValueError`), and offers `snapshot()`, its status read in one call.
 
 ## Embed a server
 

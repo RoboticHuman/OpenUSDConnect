@@ -2,12 +2,16 @@
 
 import gc
 import socket
+import subprocess
+import sys
+import textwrap
 import threading
 import time
 import uuid
 import weakref
 from contextlib import contextmanager
 from contextlib import nullcontext as does_not_raise
+from pathlib import Path
 
 import pytest
 from pxr import Sdf, Usd, UsdGeom
@@ -620,3 +624,41 @@ def test_dropping_a_sender_inside_its_callback_writes_and_stops(server):
     wait_until(lambda: server.sync_server.producer_committed_through(client_id, session_id) == 1)
     wait_until(lambda: not client_registered(server, client_id))
     assert collected() is None
+
+
+def test_interpreter_exit_stops_clients_still_running():
+    child = textwrap.dedent(
+        """
+        import uuid
+        from openusdconnect.receiver import EventReceiver
+        from openusdconnect.sender import EventSender
+        from tests.helpers import embedded_server, ensure_prim_event, wait_until
+
+        # Alive at interpreter exit, so only the atexit hook stops their native threads.
+        SURVIVORS = []
+
+        def main(port):
+            receiver = EventReceiver(
+                "127.0.0.1", port, client_id=uuid.uuid4().hex, reconnect_base_delay=0.01
+            )
+            receiver.start()
+            assert receiver.wait_connected(5)
+            sender = EventSender("127.0.0.1", port, client_id=uuid.uuid4().hex)
+            assert sender.connect(5)
+            assert sender.send_events([ensure_prim_event("/Exit")])
+            SURVIVORS.extend((receiver, sender))
+
+        with embedded_server() as server:
+            main(server.server_address[1])
+            wait_until(lambda: server.sync_server.get_event_count() == 1)
+            print(server.sync_server.get_event_count())
+        """
+    )
+    result = subprocess.run(
+        [sys.executable, "-c", child],
+        cwd=Path(__file__).resolve().parents[2],
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+    assert (result.returncode, result.stdout.strip()) == (0, "1"), result.stderr

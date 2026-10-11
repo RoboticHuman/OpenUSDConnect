@@ -28,8 +28,9 @@ class _FakeSender:
     def connect(self):
         return True
 
-    def disconnect(self):
+    def close(self, timeout=None):
         self.is_connected = False
+        return True
 
 
 def _applied(count: int) -> SyncUpdate:

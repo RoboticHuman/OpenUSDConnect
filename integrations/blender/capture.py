@@ -1806,7 +1806,7 @@ def unregister():
     sender = _state.sender
     _state.sender = None
     if sender is not None:
-        sender.disconnect()
+        sender.close(timeout=2.0)
     for c in reversed(_CAPTURE_CLASSES):
         bpy.utils.unregister_class(c)
     for attr, _, _ in _SCENE_PROPS:

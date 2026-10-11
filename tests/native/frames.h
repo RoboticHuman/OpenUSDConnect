@@ -25,6 +25,7 @@ using OpenUSDConnect::TransactionRejectionCode;
 
 using Bytes = std::vector<std::uint8_t>;
 
+// Not a frame: a copy of object with field set to value, for tweaking a config or hello inline.
 template <typename Type, typename Field>
 [[nodiscard]] Type With(Type object, Field Type::* field, std::common_type_t<Field> value)
 {

@@ -86,6 +86,8 @@ enum class DisconnectReason : std::uint8_t
 	SequenceGap,
 	QueueFull,
 	ReadTimeout,
+	// An undecodable frame or handshake answer other than HelloOk, HelloRejected, or AuthRejected.
+	// After the handshake the receiver also closes on an unknown payload; the producer ignores it.
 	ProtocolError,
 	Cancelled,
 	HandshakeTimeout,
@@ -116,10 +118,6 @@ struct SendAction final
 	// Shared with the producer outbox, so replaying a transaction copies nothing.
 	std::shared_ptr<const std::vector<std::uint8_t>> Bytes;
 };
-
-// Both endpoints Close with ProtocolError on an undecodable frame or a handshake answer other than
-// HelloOk, HelloRejected, or AuthRejected. After the handshake the receiver closes on a payload
-// type it does not know; the producer ignores everything but transaction results and RateLimited.
 
 // Close the socket, or abandon the connect attempt, then report OnDisconnected.
 struct CloseAction final

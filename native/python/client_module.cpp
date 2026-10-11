@@ -1,6 +1,6 @@
 #include "driver_bindings.h"
 
-#include "openusdconnect/client/engine/status.h"
+#include "openusdconnect/client/engine/phase.h"
 #include "openusdconnect/client/producer_recovery.h"
 #include "openusdconnect/client/producer_session.h"
 

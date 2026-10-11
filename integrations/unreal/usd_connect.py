@@ -436,7 +436,7 @@ def stop():
 
     # Close sender
     if _sender is not None:
-        _sender.disconnect()
+        _sender.close(timeout=2.0)
         _sender = None
 
     _stage = None

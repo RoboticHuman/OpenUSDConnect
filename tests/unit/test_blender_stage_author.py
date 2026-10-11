@@ -1223,7 +1223,7 @@ def test_blender_unregister_detaches_sender_owned_by_reconnect_worker(monkeypatc
     capture.unregister()
 
     sender.cancel_connect.assert_called_once_with()
-    sender.disconnect.assert_called_once_with()
+    sender.close.assert_called_once_with(timeout=2.0)
     assert capture._state.sender is None
 
 

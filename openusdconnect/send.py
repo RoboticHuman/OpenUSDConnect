@@ -94,6 +94,9 @@ def main(argv: list[str] | None = None):
             if not sender.send_events(events):
                 print("Failed to send events", file=sys.stderr)
                 sys.exit(1)
+            if not sender.flush(timeout=10.0):
+                print("Server did not acknowledge the events", file=sys.stderr)
+                sys.exit(1)
             print(f"Sent {len(events)} event(s)")
 
         for msg in raw_msgs:

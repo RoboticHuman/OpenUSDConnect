@@ -47,6 +47,9 @@ struct FUSDConnectCapturedEdits
 
 namespace
 {
+// The Quit must leave before FEndpointRunner::Stop sets bStopping, which aborts a blocking send.
+constexpr double ProducerQuitGraceSeconds = 0.3;
+
 ClientCore::TimePoint Now()
 {
 	return std::chrono::steady_clock::now();
@@ -170,8 +173,7 @@ void UUSDConnectSubsystem::StopClients()
 		}
 		Producer->Disconnect();
 		ProducerRunner->Wake();
-		// Lets the runner write the Quit before ReleaseProducer's Stop aborts its sends.
-		const double CloseDeadline = FPlatformTime::Seconds() + 0.3;
+		const double CloseDeadline = FPlatformTime::Seconds() + ProducerQuitGraceSeconds;
 		while (Producer->Status().Closing && FPlatformTime::Seconds() < CloseDeadline)
 		{
 			FPlatformProcess::Sleep(0.005f);

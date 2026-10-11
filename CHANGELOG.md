@@ -85,9 +85,7 @@ Behavior:
   read-only properties (`token`, and the receiver's `reconnect`, stay
   assignable) and `sock` is gone; read `connected`. Both close on leaving a
   `with` block, and a collected one closes too, so keep the handle while it
-  should run. `EventSender.close()` writes the transactions already queued
-  and the Quit message, and does not wait for acknowledgements; call
-  `flush()` first for those.
+  should run.
 
 The low-level `EventSender`, `EventReceiver`, and `EventDispatcher` keep their
 callable arguments and properties.
@@ -112,7 +110,11 @@ callable arguments and properties.
   for each connection attempt.
 - `notifications=` on `EventSender` and `EventReceiver` pushes their
   notifications into a queue the owner drains, and `snapshot()` returns the
-  native status in one call.
+  status in one call.
+- `close(timeout)` and context-manager support on `EventSender` and
+  `EventReceiver`, and the receiver's `generation`, `mark_applied_through()`,
+  `reset_applied_progress()`, `freeze_marker()`, `drained_through()`, and
+  `running`.
 - `EventDispatcher.drained_message_count`, `EventReceiver.stopped`, and
   `NoticeEmitter.has_local_changes`.
 - Receiver replay identity and optional post-commit transaction checkpoints.
@@ -121,7 +123,7 @@ callable arguments and properties.
 
 - `EventDispatcher` starts its cursor at `receiver.sync_from - 1`, so
   integrations no longer seed `last_seq` for continuation.
-- `EventSender` and `EventReceiver` run their connections on native threads
+- `EventSender` and `EventReceiver` run their connections on threads
   in the client core: transaction writes leave the calling thread and need no
   GIL, callbacks and the token provider run on the connection thread, and
   `close()` writes what was already queued, then stops the thread; a pending
