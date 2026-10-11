@@ -54,7 +54,7 @@ public:
 	}
 
 	// Starts the loop if needed and connects; returns the accepted connection.
-	[[nodiscard]] std::shared_ptr<ScriptedConnection> Handshake(const server::Hello& hello = {})
+	std::shared_ptr<ScriptedConnection> Handshake(const server::Hello& hello = {})
 	{
 		if (!Driver->Running())
 		{
@@ -132,14 +132,12 @@ void TestConnectReturnsOnceTheAttemptEnds()
 		CHECK(failure->SystemError == kRefused);
 
 		CHECK(!harness.Driver->Connect(0ms));
-		static_cast<void>(harness.Handshake());
+		harness.Handshake();
 		CHECK(harness.Driver->Connect(0ms));
 	}
 	{
 		// A server that never answers ends the attempt at the handshake timeout.
-		ProducerConfig config = TestConfig();
-		config.HandshakeTimeout = 50ms;
-		Harness harness(config);
+		Harness harness(With(TestConfig(), &ProducerConfig::HandshakeTimeout, 50ms));
 		CHECK(harness.Driver->Start());
 		const TimePoint started = Now();
 		std::future<bool> silent = harness.ConnectAsync();
@@ -195,13 +193,11 @@ void TestFlushWaitsOutTheRateLimit()
 
 void TestStalledWriteClosesAtTheSendDeadline()
 {
-	ProducerConfig config = TestConfig();
-	config.HandshakeTimeout = 250ms;
-	Harness harness(config);
+	Harness harness(With(TestConfig(), &ProducerConfig::HandshakeTimeout, 250ms));
 	const std::shared_ptr<ScriptedConnection> connection = harness.Handshake();
 	connection->StallSends();
 	const TimePoint stalled = Now();
-	static_cast<void>(harness.Submit("/A"));
+	harness.Submit("/A");
 	CHECK(connection->WaitClosed(kPatience));
 	CHECK(Now() - stalled >= 250ms);
 	CHECK(Eventually(
@@ -221,8 +217,8 @@ void TestStopInterruptsBlockingCalls()
 {
 	{
 		Harness harness;
-		static_cast<void>(harness.Handshake());
-		static_cast<void>(harness.Submit("/A"));
+		harness.Handshake();
+		harness.Submit("/A");
 		harness.Driver->Stop();
 		CHECK(harness.Driver->Join(kPatience));
 		CHECK(!harness.Driver->Connect(kPatience));
@@ -258,12 +254,10 @@ void TestCloseWritesWhatWasQueued()
 	}
 	{
 		// A peer that stopped reading cannot hold Close past its bound.
-		ProducerConfig config = TestConfig();
-		config.HandshakeTimeout = kPatience;
-		Harness harness(config);
+		Harness harness(With(TestConfig(), &ProducerConfig::HandshakeTimeout, kPatience));
 		const std::shared_ptr<ScriptedConnection> connection = harness.Handshake();
 		connection->StallSends();
-		static_cast<void>(harness.Submit("/A"));
+		harness.Submit("/A");
 		const TimePoint closing = Now();
 		static_cast<void>(harness.Driver->Close(100ms));
 		CHECK(Now() - closing < kPatience / 5);
@@ -276,7 +270,7 @@ void TestRejectedTransactionSurfacesThroughFailure()
 {
 	Harness harness;
 	const std::shared_ptr<ScriptedConnection> connection = harness.Handshake();
-	static_cast<void>(harness.Submit("/A"));
+	harness.Submit("/A");
 	std::future<FlushResult> flushed = harness.FlushAsync();
 	CHECK(connection->Deliver(
 		server::Rejected(1, TransactionRejectionCode::InvalidTransaction, "bad edit")));
@@ -306,7 +300,7 @@ void TestCallbacksCannotBlockOnTheLoop()
 	Harness harness(TestConfig(), std::move(callbacks));
 	driver = harness.Driver.get();
 	const std::shared_ptr<ScriptedConnection> connection = harness.Handshake();
-	static_cast<void>(harness.Submit("/A"));
+	harness.Submit("/A");
 	connection->Close();
 	std::future<std::pair<bool, FlushResult>> result = reported.get_future();
 	CHECK(result.wait_for(kPatience / 2) == std::future_status::ready);

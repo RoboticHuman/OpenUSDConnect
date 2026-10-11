@@ -10,6 +10,7 @@
 #include <optional>
 #include <string>
 #include <string_view>
+#include <type_traits>
 #include <vector>
 
 // Wire frames shared by the endpoint and driver tests.
@@ -23,6 +24,13 @@ using OpenUSDConnect::Payload;
 using OpenUSDConnect::TransactionRejectionCode;
 
 using Bytes = std::vector<std::uint8_t>;
+
+template <typename Type, typename Field>
+[[nodiscard]] Type With(Type object, Field Type::* field, std::common_type_t<Field> value)
+{
+	object.*field = value;
+	return object;
+}
 
 [[nodiscard]] inline std::string Text(const flatbuffers::String* value)
 {

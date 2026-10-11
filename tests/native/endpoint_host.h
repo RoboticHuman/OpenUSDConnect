@@ -8,7 +8,6 @@
 
 #include <algorithm>
 #include <chrono>
-#include <type_traits>
 #include <utility>
 #include <variant>
 #include <vector>
@@ -16,15 +15,13 @@
 namespace endpoint_test
 {
 
-template <typename Config, typename Field>
-[[nodiscard]] Config With(Config config, Field Config::* field, std::common_type_t<Field> value)
+struct ConnectedTag final
 {
-	config.*field = value;
-	return config;
-}
+};
+inline constexpr ConnectedTag kConnected{};
 
 template <typename T>
-[[nodiscard]] const T& As(const Notification& notification)
+const T& As(const Notification& notification)
 {
 	CHECK(std::holds_alternative<T>(notification));
 	return std::get<T>(notification);
@@ -49,7 +46,7 @@ public:
 	}
 
 	template <typename T>
-	[[nodiscard]] T Single()
+	T Single()
 	{
 		std::vector<Action> commands = Commands();
 		CHECK(commands.size() == 1);
@@ -81,13 +78,13 @@ public:
 		return logged;
 	}
 
-	[[nodiscard]] std::vector<Notification> Notices()
+	std::vector<Notification> Notices()
 	{
 		return Notifications.Drain();
 	}
 
 	template <typename T>
-	[[nodiscard]] T Notice()
+	T Notice()
 	{
 		std::vector<Notification> notices = Notices();
 		CHECK(notices.size() == 1);

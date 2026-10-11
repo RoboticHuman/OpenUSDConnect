@@ -143,9 +143,7 @@ void TestFailedConnectIsRecordedAndRetried()
 	CHECK(harness.Sockets->Attempts() == 2);
 	CHECK(!harness.Driver->LastFailure());
 
-	ReceiverConfig config = FastConfig();
-	config.Reconnect = false;
-	Harness once(config);
+	Harness once(With(FastConfig(), &ReceiverConfig::Reconnect, false));
 	CHECK(once.Driver->Start());
 	CHECK(once.Sockets->Refuse(kPatience, kRefused));
 	CHECK(once.Driver->Join(kPatience));

@@ -35,6 +35,12 @@ public:
 	{
 	}
 
+	explicit Producer(ConnectedTag, const ProducerConfig& config = TestConfig())
+		: Producer(config)
+	{
+		Handshake();
+	}
+
 	// The frames to send since the last call; any other action fails.
 	[[nodiscard]] std::vector<SendAction> SendActions()
 	{
@@ -47,7 +53,7 @@ public:
 		return sends;
 	}
 
-	[[nodiscard]] std::vector<Bytes> Sends()
+	std::vector<Bytes> Sends()
 	{
 		std::vector<Bytes> frames;
 		for (const SendAction& send : SendActions())
@@ -76,17 +82,17 @@ public:
 	SentHello Request(std::string_view token = {})
 	{
 		CHECK(Endpoint.RequestConnect(Now, Now + 2s));
-		static_cast<void>(Attempt());
+		Attempt();
 		return Open(token);
 	}
 
 	// Connects and returns what publication replayed.
 	std::vector<Bytes> Handshake(const server::Hello& hello = {})
 	{
-		static_cast<void>(Request());
+		Request();
 		Feed(server::HelloOk(hello));
 		CHECK(Status().Connected);
-		static_cast<void>(Notices());
+		Notices();
 		return Sends();
 	}
 
@@ -141,7 +147,7 @@ void TestAttemptsAreBoundedAndExclusive()
 	CHECK(producer.Status().Handshaking && !producer.Status().Connected);
 	CHECK(!producer.Endpoint.RequestConnect(producer.Now, producer.Now + 2s));
 	CHECK(producer.Endpoint.Connect(producer.Now, producer.Now + 2s) == ConnectResult::Busy);
-	static_cast<void>(producer.Open());
+	producer.Open();
 	CHECK(producer.Status().Handshaking);
 	CHECK(producer.Endpoint.Connect(producer.Now, producer.Now + 2s) == ConnectResult::Busy);
 	producer.Feed(server::HelloOk());
@@ -163,9 +169,7 @@ void TestAttemptsAreBoundedAndExclusive()
 
 void TestHelloCarriesTheProducerIdentity()
 {
-	ProducerConfig config = TestConfig();
-	config.Department = "layout";
-	Producer producer(config);
+	Producer producer(With(TestConfig(), &ProducerConfig::Department, "layout"));
 	const SentHello hello = producer.Request("token-1");
 	CHECK(hello.Role == "emitter");
 	CHECK(hello.ProtocolVersion == kProtocolVersion);
@@ -183,7 +187,7 @@ void TestHelloCarriesTheProducerIdentity()
 void TestAcceptedHelloNotifiesThenPublishes()
 {
 	Producer producer;
-	static_cast<void>(producer.Request());
+	producer.Request();
 	StageMetadata metadata;
 	metadata.MetersPerUnit = 0.01;
 	metadata.UpAxis = "Y";
@@ -196,15 +200,15 @@ void TestAcceptedHelloNotifiesThenPublishes()
 	CHECK(notices.size() == 3);
 	CHECK(As<TokenIssued>(notices[0]).Token == "issued");
 	CHECK(As<StageMetadata>(notices[1]).MetersPerUnit == 0.01);
-	static_cast<void>(As<Connected>(notices[2]));
+	As<Connected>(notices[2]);
 
 	// Metadata the server did not author is neither notified nor kept.
 	Producer bare;
 	hello.Metadata = StageMetadata{};
 	hello.Token.clear();
-	static_cast<void>(bare.Request());
+	bare.Request();
 	bare.Feed(server::HelloOk(hello));
-	static_cast<void>(bare.Notice<Connected>());
+	bare.Notice<Connected>();
 	CHECK(!bare.Status().Metadata.UpAxis);
 }
 
@@ -212,7 +216,7 @@ void TestHandshakeRejectionsHoldUntilAnExplicitConnect()
 {
 	{
 		Producer producer;
-		static_cast<void>(producer.Request());
+		producer.Request();
 		producer.Feed(server::AuthRejected("invalid token"));
 		CHECK(producer.Single<CloseAction>().Reason == DisconnectReason::HandshakeRejected);
 		const HandshakeRejected rejected = producer.Notice<HandshakeRejected>();
@@ -227,8 +231,8 @@ void TestHandshakeRejectionsHoldUntilAnExplicitConnect()
 		CHECK(!producer.Endpoint.RequestConnect(producer.Now, producer.Now + 2s));
 		CHECK(producer.Endpoint.Connect(producer.Now, producer.Now + 2s) == ConnectResult::Started);
 		CHECK(!producer.Status().Rejection);
-		static_cast<void>(producer.Attempt());
-		static_cast<void>(producer.Open());
+		producer.Attempt();
+		producer.Open();
 		producer.Feed(server::HelloOk());
 		CHECK(producer.Status().Connected);
 	}
@@ -248,7 +252,7 @@ void TestHandshakeRejectionsHoldUntilAnExplicitConnect()
 	for (const auto& [frame, expected] : rejections)
 	{
 		Producer producer;
-		static_cast<void>(producer.Request());
+		producer.Request();
 		producer.Feed(frame);
 		producer.ExpectClose(DisconnectReason::HandshakeRejected);
 		const std::optional<HandshakeRejected> rejection = producer.Status().Rejection;
@@ -299,13 +303,12 @@ void TestHighwaterContradictionsRequireRecovery()
 	};
 	for (const HighwaterCase& expected : cases)
 	{
-		Producer producer;
-		static_cast<void>(producer.Handshake());
+		Producer producer(kConnected);
 		for (int index = 0; index < expected.Submitted; ++index)
 		{
 			CHECK(producer.Submit("/P") == ProducerResult::Accepted);
 		}
-		static_cast<void>(producer.Sends());
+		producer.Sends();
 		if (expected.AcknowledgedBefore != 0)
 		{
 			producer.Feed(server::Acknowledged(expected.AcknowledgedBefore));
@@ -314,8 +317,8 @@ void TestHighwaterContradictionsRequireRecovery()
 		if (hello)
 		{
 			producer.Disconnect();
-			static_cast<void>(producer.Request());
-			static_cast<void>(producer.Notices());
+			producer.Request();
+			producer.Notices();
 		}
 		producer.Feed(expected.Frame);
 		producer.ExpectClose(DisconnectReason::RecoveryRequired);
@@ -333,7 +336,7 @@ void TestHandshakeProtocolErrorsAreFailedAttempts()
 	for (const Bytes& bytes : {server::Ping(), Bytes{0, 0, 0, 2, 0xFF, 0xFF}})
 	{
 		Producer producer;
-		static_cast<void>(producer.Request());
+		producer.Request();
 		producer.Feed(bytes);
 		CHECK(producer.Single<CloseAction>().Reason == DisconnectReason::ProtocolError);
 		producer.Disconnect();
@@ -351,7 +354,7 @@ void TestHandshakeDeadline()
 	{
 		Producer producer;
 		CHECK(producer.Endpoint.RequestConnect(producer.Now, producer.Now + 2s));
-		static_cast<void>(producer.Attempt());
+		producer.Attempt();
 		producer.Advance(1999ms);
 		CHECK(producer.Commands().empty());
 		producer.Advance(1ms);
@@ -365,14 +368,14 @@ void TestHandshakeDeadline()
 	}
 	{
 		Producer producer;
-		static_cast<void>(producer.Request());
+		producer.Request();
 		producer.Advance(2s);
 		CHECK(producer.Single<CloseAction>().Reason == DisconnectReason::HandshakeTimeout);
 		producer.Feed(server::HelloOk());
 		CHECK(!producer.Status().Connected && producer.Notices().empty());
 		producer.Disconnect();
 		producer.Now += 1s;
-		static_cast<void>(producer.Handshake());
+		producer.Handshake();
 		CHECK(producer.Submit("/A") == ProducerResult::Accepted);
 	}
 }
@@ -380,7 +383,7 @@ void TestHandshakeDeadline()
 void FailRequest(Producer& producer)
 {
 	CHECK(producer.Endpoint.RequestConnect(producer.Now, producer.Now + 2s));
-	static_cast<void>(producer.Attempt());
+	producer.Attempt();
 	producer.Disconnect(DisconnectReason::ConnectFailed);
 }
 
@@ -402,7 +405,7 @@ void TestRequestBackoff()
 		 {
 			 CHECK(producer.Endpoint.Connect(producer.Now, producer.Now + 2s) ==
 				   ConnectResult::Started);
-			 static_cast<void>(producer.Attempt());
+			 producer.Attempt();
 			 producer.Disconnect(DisconnectReason::ConnectFailed);
 		 },
 		 false, true},
@@ -416,7 +419,7 @@ void TestRequestBackoff()
 		{[](Producer& producer)
 		 {
 			 producer.Now += 1s;
-			 static_cast<void>(producer.Handshake());
+			 producer.Handshake();
 			 producer.Disconnect();
 			 FailRequest(producer);
 		 },
@@ -444,14 +447,13 @@ void TestRequestBackoff()
 // accept its own late HelloOk, either of which quarantines a healthy session.
 void TestCancelDuringHandshakeKeepsTheSessionHealthy(bool disconnect)
 {
-	Producer producer;
-	static_cast<void>(producer.Handshake());
+	Producer producer(kConnected);
 	CHECK(producer.Submit("/Unsent") == ProducerResult::Accepted);
 	const Bytes unsent = producer.Sends().at(0);
 	producer.Disconnect();
 	CHECK(producer.Notice<Disconnected>().Reason == DisconnectReason::PeerClosed);
 
-	static_cast<void>(producer.Request());
+	producer.Request();
 	bool finished = false;
 	if (disconnect)
 	{
@@ -484,14 +486,14 @@ void TestCancelBeforeTheSocketOpens()
 {
 	Producer producer;
 	CHECK(producer.Endpoint.RequestConnect(producer.Now, producer.Now + 2s));
-	static_cast<void>(producer.Attempt());
+	producer.Attempt();
 	CHECK(!producer.Endpoint.CancelConnect());
 	CHECK(producer.Single<CloseAction>().Reason == DisconnectReason::Cancelled);
 	// The host's connect finished before it applied the close.
 	producer.Endpoint.OnConnected({});
 	CHECK(producer.Commands().empty());
 	producer.Disconnect(DisconnectReason::Cancelled);
-	static_cast<void>(producer.Handshake());
+	producer.Handshake();
 	CHECK(producer.Submit("/A") == ProducerResult::Accepted);
 
 	// Cancelling leaves a published connection intact.
@@ -506,12 +508,12 @@ void TestAReportedEndVoidsActionsQueuedForTheConnection()
 {
 	Producer producer;
 	CHECK(producer.Endpoint.RequestConnect(producer.Now, producer.Now + 2s));
-	static_cast<void>(producer.Attempt());
+	producer.Attempt();
 	CHECK(!producer.Endpoint.CancelConnect());
 	producer.Disconnect(DisconnectReason::ConnectFailed);
 	CHECK(producer.Endpoint.RequestConnect(producer.Now, producer.Now + 2s));
-	static_cast<void>(producer.Attempt());
-	static_cast<void>(producer.Open());
+	producer.Attempt();
+	producer.Open();
 	producer.Feed(server::HelloOk());
 	CHECK(producer.Status().Connected);
 
@@ -520,7 +522,7 @@ void TestAReportedEndVoidsActionsQueuedForTheConnection()
 	producer.Disconnect();
 	CHECK(producer.Commands().empty());
 	CHECK(producer.Endpoint.RequestConnect(producer.Now, producer.Now + 2s));
-	static_cast<void>(producer.Attempt());
+	producer.Attempt();
 }
 
 // An attempt the host has not taken ends at once, so its close cannot share
@@ -555,8 +557,7 @@ void TestAnUntakenAttemptIsWithdrawn()
 
 void TestPublicationReplaysUnsentFramesInOrderWithoutCopies()
 {
-	Producer producer;
-	static_cast<void>(producer.Handshake());
+	Producer producer(kConnected);
 	CHECK(producer.Submit("/A", "", 1) == ProducerResult::Accepted);
 	CHECK(producer.Submit("/B", "", 2) == ProducerResult::Accepted);
 	CHECK(producer.Submit("/C", "", 3) == ProducerResult::Accepted);
@@ -567,10 +568,8 @@ void TestPublicationReplaysUnsentFramesInOrderWithoutCopies()
 	CHECK(producer.Notice<Disconnected>().Reason == DisconnectReason::PeerClosed);
 	CHECK(producer.Status().PendingTransactions == 2);
 
-	static_cast<void>(producer.Request());
-	server::Hello hello;
-	hello.CommittedThrough = 2;
-	producer.Feed(server::HelloOk(hello));
+	producer.Request();
+	producer.Feed(server::HelloOk(With(server::Hello{}, &server::Hello::CommittedThrough, 2)));
 	const std::vector<SendAction> replayed = producer.SendActions();
 	CHECK(replayed.size() == 1);
 	CHECK(replayed[0].Bytes == first[2].Bytes);
@@ -584,20 +583,18 @@ void TestPublicationReplaysUnsentFramesInOrderWithoutCopies()
 
 void TestAppendRequiresAPublishedHealthyConnection()
 {
-	ProducerConfig config = TestConfig();
-	config.MaxPendingTransactions = 2;
-	Producer producer(config);
+	Producer producer(With(TestConfig(), &ProducerConfig::MaxPendingTransactions, 2));
 	CHECK(producer.Submit("/A") == ProducerResult::InvalidPhase);
 	CHECK(producer.Endpoint.RequestConnect(producer.Now, producer.Now + 2s));
-	static_cast<void>(producer.Attempt());
+	producer.Attempt();
 	CHECK(producer.Submit("/A") == ProducerResult::InvalidPhase);
-	static_cast<void>(producer.Open());
+	producer.Open();
 	CHECK(producer.Submit("/A") == ProducerResult::InvalidPhase);
 	CHECK(producer.Commands().empty());
 	CHECK(producer.Endpoint.NextTransactionId() == 1 && producer.Endpoint.OutboxEmpty());
 
 	producer.Feed(server::HelloOk());
-	static_cast<void>(producer.Notices());
+	producer.Notices();
 	const Bytes frame = TransactionFrame(1, "/A");
 	CHECK(producer.Endpoint.Append(2, TransactionFrame(2, "/A"), 1, "") ==
 		  ProducerResult::SequenceMismatch);
@@ -613,13 +610,11 @@ void TestAppendRequiresAPublishedHealthyConnection()
 	CHECK(TransactionIds(producer.Sends()) == std::vector<std::uint64_t>{2});
 	producer.Feed(server::Acknowledged(1));
 	CHECK(producer.Submit("/C") == ProducerResult::Accepted);
-	static_cast<void>(producer.Sends());
+	producer.Sends();
 
 	producer.Disconnect();
 	CHECK(producer.Submit("/D") == ProducerResult::InvalidPhase);
-	server::Hello hello;
-	hello.CommittedThrough = 1;
-	static_cast<void>(producer.Handshake(hello));
+	producer.Handshake(With(server::Hello{}, &server::Hello::CommittedThrough, 1));
 	producer.Feed(server::Rejected(2, TransactionRejectionCode::InvalidTransaction, "bad"));
 	producer.ExpectClose(DisconnectReason::RecoveryRequired);
 	CHECK(producer.Submit("/D") == ProducerResult::RecoveryRequired);
@@ -631,7 +626,7 @@ void TestAcknowledgedCheckpointNeedsAnEmptyOutbox()
 	Producer producer;
 	server::Hello hello;
 	hello.ServerInstance = "server-a";
-	static_cast<void>(producer.Handshake(hello));
+	producer.Handshake(hello);
 	CHECK(!producer.Endpoint.AcknowledgedCheckpoint());
 	CHECK(producer.Submit("/A") == ProducerResult::Accepted);
 	CHECK(producer.Submit("/B") == ProducerResult::Accepted);
@@ -653,7 +648,7 @@ void TestAcknowledgedCheckpointNeedsAnEmptyOutbox()
 	// A Hello acknowledges no mirror position, even with nothing pending.
 	producer.Disconnect();
 	CHECK(producer.Endpoint.AcknowledgedCheckpoint());
-	static_cast<void>(producer.Request());
+	producer.Request();
 	hello.ServerInstance = "server-b";
 	hello.CommittedThrough = 4;
 	producer.Feed(server::HelloOk(hello));
@@ -663,7 +658,7 @@ void TestAcknowledgedCheckpointNeedsAnEmptyOutbox()
 	Producer anonymous;
 	hello = {};
 	hello.ServerInstance.clear();
-	static_cast<void>(anonymous.Handshake(hello));
+	anonymous.Handshake(hello);
 	CHECK(anonymous.Submit("/A") == ProducerResult::Accepted);
 	anonymous.Feed(server::Acknowledged(1, server::Checkpoint{1, 1}));
 	CHECK(anonymous.Endpoint.OutboxEmpty() && !anonymous.Endpoint.AcknowledgedCheckpoint());
@@ -671,8 +666,7 @@ void TestAcknowledgedCheckpointNeedsAnEmptyOutbox()
 
 void TestRejectionQuarantinesTheOutbox()
 {
-	Producer producer;
-	static_cast<void>(producer.Handshake());
+	Producer producer(kConnected);
 	CHECK(producer.Submit("/A", "layer-a", 1) == ProducerResult::Accepted);
 	CHECK(producer.Submit("/B", "layer-b", 2) == ProducerResult::Accepted);
 	const std::vector<Bytes> sent = producer.Sends();
@@ -714,8 +708,7 @@ void TestRejectionQuarantinesTheOutbox()
 
 void TestRejectionOfAnUnknownTransaction()
 {
-	Producer producer;
-	static_cast<void>(producer.Handshake());
+	Producer producer(kConnected);
 	CHECK(producer.Submit("/A") == ProducerResult::Accepted);
 	CHECK(TransactionIds(producer.Sends()) == std::vector<std::uint64_t>{1});
 	producer.Feed(server::Rejected(7, TransactionRejectionCode::StaleLayerGraph, "stale", 1));
@@ -731,8 +724,7 @@ void TestRejectionOfAnUnknownTransaction()
 
 void TestRateLimitClosesAndOpensARetryWindow()
 {
-	Producer producer;
-	static_cast<void>(producer.Handshake());
+	Producer producer(kConnected);
 	CHECK(producer.Submit("/A") == ProducerResult::Accepted);
 	const std::vector<Bytes> sent = producer.Sends();
 	producer.Feed(server::RateLimited(1.5F));
@@ -755,8 +747,7 @@ void TestRateLimitClosesAndOpensARetryWindow()
 	};
 	for (const auto& [seconds, window] : hostile)
 	{
-		Producer limited;
-		static_cast<void>(limited.Handshake());
+		Producer limited(kConnected);
 		limited.Feed(server::RateLimited(seconds));
 		limited.ExpectClose(DisconnectReason::RateLimited);
 		CHECK(limited.Status().RetryAfter == limited.Now + window);
@@ -766,8 +757,7 @@ void TestRateLimitClosesAndOpensARetryWindow()
 
 void TestRepairReplacesTheRejectedTransaction()
 {
-	Producer producer;
-	static_cast<void>(producer.Handshake());
+	Producer producer(kConnected);
 	CHECK(producer.Endpoint.RepairRejected(TransactionFrame(1, "/A"), 1, "") ==
 		  ProducerResult::InvalidPhase);
 	CHECK(producer.Submit("/Stale", "old-layer") == ProducerResult::Accepted);
@@ -787,8 +777,7 @@ void TestRepairReplacesTheRejectedTransaction()
 	producer.Feed(server::Acknowledged(2));
 	CHECK(producer.Endpoint.OutboxEmpty());
 
-	Producer invalid;
-	static_cast<void>(invalid.Handshake());
+	Producer invalid(kConnected);
 	CHECK(invalid.Submit("/A") == ProducerResult::Accepted);
 	invalid.Feed(server::Rejected(1, TransactionRejectionCode::InvalidTransaction, "bad"));
 	CHECK(invalid.Endpoint.RepairRejected(TransactionFrame(1, "/A"), 1, "") ==
@@ -800,10 +789,10 @@ void TestAbandonContinuesAsAFreshSession()
 {
 	Producer producer;
 	CHECK(!producer.Endpoint.AbandonRejectedSession("replacement"));
-	static_cast<void>(producer.Handshake());
+	producer.Handshake();
 	CHECK(producer.Submit("/Rejected") == ProducerResult::Accepted);
 	CHECK(producer.Submit("/Suffix") == ProducerResult::Accepted);
-	static_cast<void>(producer.Sends());
+	producer.Sends();
 	producer.Feed(server::Rejected(1, TransactionRejectionCode::InvalidTransaction, "injected"));
 	producer.ExpectClose(DisconnectReason::RecoveryRequired);
 
@@ -829,8 +818,7 @@ void TestAbandonContinuesAsAFreshSession()
 
 void TestDisconnectSaysQuitAndKeepsTheOutbox()
 {
-	Producer producer;
-	static_cast<void>(producer.Handshake());
+	Producer producer(kConnected);
 	CHECK(producer.Submit("/A") == ProducerResult::Accepted);
 	const std::vector<Bytes> sent = producer.Sends();
 	producer.Endpoint.Disconnect();
@@ -850,15 +838,14 @@ void TestDisconnectSaysQuitAndKeepsTheOutbox()
 	// An attempt in flight is closed without a Quit.
 	producer.Disconnect();
 	CHECK(producer.Endpoint.RequestConnect(producer.Now, producer.Now + 2s));
-	static_cast<void>(producer.Attempt());
+	producer.Attempt();
 	producer.Endpoint.Disconnect();
 	CHECK(producer.Single<CloseAction>().Reason == DisconnectReason::Cancelled);
 }
 
 void TestStopIsFinal()
 {
-	Producer producer;
-	static_cast<void>(producer.Handshake());
+	Producer producer(kConnected);
 	producer.Endpoint.Stop();
 	CHECK(DecodeSent(*producer.Next<SendAction>().Bytes).payload_type() == Payload::Quit);
 	CHECK(producer.Next<CloseAction>().Reason == DisconnectReason::Stopped);
@@ -876,7 +863,7 @@ void TestStopIsFinal()
 
 	Producer attempting;
 	CHECK(attempting.Endpoint.RequestConnect(attempting.Now, attempting.Now + 2s));
-	static_cast<void>(attempting.Attempt());
+	attempting.Attempt();
 	attempting.Endpoint.Stop();
 	CHECK(attempting.Single<CloseAction>().Reason == DisconnectReason::Stopped);
 	CHECK(attempting.Status().Stopped && !attempting.Endpoint.NextWake());
@@ -886,7 +873,7 @@ void TestControlFramesFollowTheConnection()
 {
 	Producer producer;
 	CHECK(!producer.Endpoint.QueueControl(ClaimFrame()));
-	static_cast<void>(producer.Handshake());
+	producer.Handshake();
 	CHECK(producer.Submit("/A") == ProducerResult::Accepted);
 	CHECK(producer.Endpoint.QueueControl(ClaimFrame()));
 	CHECK(producer.Submit("/B") == ProducerResult::Accepted);
@@ -899,8 +886,7 @@ void TestControlFramesFollowTheConnection()
 
 void TestMessagesWithoutAProducerActionAreIgnored()
 {
-	Producer producer;
-	static_cast<void>(producer.Handshake());
+	Producer producer(kConnected);
 	flatbuffers::FlatBufferBuilder newer(32);
 	const Bytes frames[] = {
 		server::Claimed("client"),
@@ -919,14 +905,13 @@ void TestMessagesWithoutAProducerActionAreIgnored()
 // A result read with the HelloOk applies to the connection the HelloOk published.
 void TestFramesAfterTheHelloOkInOneReadFollowPublication()
 {
-	Producer producer;
-	static_cast<void>(producer.Handshake());
+	Producer producer(kConnected);
 	CHECK(producer.Submit("/A") == ProducerResult::Accepted);
 	CHECK(producer.Submit("/B") == ProducerResult::Accepted);
-	static_cast<void>(producer.Sends());
+	producer.Sends();
 	producer.Disconnect();
 
-	static_cast<void>(producer.Request());
+	producer.Request();
 	server::Hello hello;
 	hello.CommittedThrough = 1;
 	producer.Feed(Concatenate({server::HelloOk(hello), server::Acknowledged(2)}));
@@ -949,10 +934,7 @@ void TestStaleHostReportsAreIgnored()
 void TestConcurrentAppendWhileTheLoopReads()
 {
 	constexpr std::uint64_t kTransactions = 2'000;
-	ProducerConfig config = TestConfig();
-	config.MaxPendingTransactions = 64;
-	Producer producer(config);
-	static_cast<void>(producer.Handshake());
+	Producer producer(kConnected, With(TestConfig(), &ProducerConfig::MaxPendingTransactions, 64));
 	ProducerEndpoint& endpoint = producer.Endpoint;
 
 	std::thread host(

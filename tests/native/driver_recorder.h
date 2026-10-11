@@ -176,8 +176,7 @@ public:
 	}
 
 	// Starts the loop if needed, then accepts the pending attempt with a HelloOk.
-	[[nodiscard]] std::shared_ptr<ScriptedConnection>
-	Handshake(const endpoint_test::server::Hello& hello = {})
+	std::shared_ptr<ScriptedConnection> Handshake(const endpoint_test::server::Hello& hello = {})
 	{
 		if (!Driver->Running())
 		{
