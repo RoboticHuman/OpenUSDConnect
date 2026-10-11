@@ -118,8 +118,8 @@ headers.
   prepends the big-endian length, and copy each once into the vector
   `ProducerEndpoint::Append` takes. The outbox shares that allocation through
   reconnect and acknowledgement.
-- The frame size limit is 16 MiB (`OUC::kMaxFrameSize`) and must match the
-  server.
+- The frame size limit is the core's `kDefaultMaxFrameSize` (16 MiB) and must
+  match the server.
 - Emitter and receiver each open their own TCP socket. `client_id` is the stable
   authentication and producer identity. `origin` is diagnostic metadata, while
   the emitter's `producer_session_id` provides exactly-once transaction identity.

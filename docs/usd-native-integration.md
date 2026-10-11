@@ -457,9 +457,11 @@ A sender's connection thread starts on the first connection request, a
 receiver's on `start()`; callbacks run on that thread. `close(timeout=None)`,
 or leaving a `with` block, stops the thread, which cannot be restarted, and
 returns whether it exited in time (`False` at once from a callback). A sender
-first writes the transactions already queued and the Quit message; closing does
-not wait for acknowledgements, which `flush()` does. Keep a reference while the
-object should run: a collected one closes.
+first writes the transactions already queued and the Quit message, only while
+the socket is open and within one second or a shorter `timeout`, so `close(0)`
+does not wait for them; closing does not wait for acknowledgements, which
+`flush()` does. Keep a reference while the object should run: a collected one
+closes.
 Either object also takes `notifications=`, a `NotificationQueue` its owner
 drains instead of every callback but `on_token_issued` (combining them raises
 `ValueError`), and offers `snapshot()`, its native status read in one call.

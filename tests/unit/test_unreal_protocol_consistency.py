@@ -98,7 +98,7 @@ def test_native_unreal_plugin_runs_on_the_client_engine():
     assert "builder.PushBytes(header, kFrameHeaderSize)" in protocol_source
     assert "WriteFrameHeader(payload_size, header, max_frame_size)" in protocol_source
     assert "std::vector" not in protocol_source
-    assert "static bool ApplyFrame" in applier
+    assert "static bool EventUsesChangeBlock" in applier
     assert "static bool ApplyValidatedFrame" in applier
 
 

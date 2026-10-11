@@ -78,27 +78,9 @@ struct OPENUSDCONNECT_API FUSDConnectStatus
 };
 
 /**
- * World subsystem that manages the OpenUSD Connect two-way sync.
- *
- * Receiver side (server → Unreal):
- *   A runner thread drives the client core's ReceiverEndpoint, which queues
- *   BroadcastEvent frames. Tick() drains them and applies each event to the
- *   open AUsdStageActor stage via FUSDEventApplier.
- *
- * Emitter side (Unreal → server):
- *   The stage listener fires whenever the USD stage changes locally (viewport
- *   transforms, USD Stage panel property edits). The subsystem reads the
- *   current TRS, visibility, and changed shader inputs from the pxr stage and
- *   appends SetXformTrs/SetVisibility/SetConnectableInput transactions to the
- *   client core's ProducerEndpoint, which a second runner thread sends. A
- *   feedback loop guard (bSuppressEmit) prevents echoing events received from
- *   the server back out.
- *
- * Usage:
- *  1. Place an AUsdStageActor in the level; set its RootLayer to the USD file
- *     the server is managing.
- *  2. Configure host/port in Edit > Project Settings > Plugins > OpenUSD Connect.
- *  3. Press Play the subsystem auto-connects both receiver and emitter.
+ * Two-way sync for the level's AUsdStageActor: Tick applies the events a receiver runner thread
+ * queues and appends local stage edits, never the applied ones, to the producer a second runner
+ * thread sends.
  */
 UCLASS()
 class OPENUSDCONNECT_API UUSDConnectSubsystem : public UTickableWorldSubsystem
@@ -118,8 +100,8 @@ public:
 		return true;
 	}
 
-	// Live sync must run in the editor (without PIE), not just during Play.
-	// UTickableWorldSubsystem defaults this to false we override to true.
+	// Live sync must run in the editor (without PIE), not just during Play;
+	// UTickableWorldSubsystem defaults this to false.
 	virtual bool IsTickableInEditor() const override
 	{
 		return true;
@@ -291,8 +273,8 @@ private:
 	/**
 	 * Prims whose material networks changed this tick (received events and
 	 * local edits), resolved to owning materials and materialized to local
-	 * .mtlx documents at the end of Tick. Game thread only both producers
-	 * (DrainAndApply, DrainAndEmit) and the consumer run there.
+	 * .mtlx documents at the end of Tick. Game thread only, where both producers
+	 * (DrainAndApply, DrainAndEmit) and the consumer run.
 	 */
 	TSet<FString> PendingMaterializePrims;
 };

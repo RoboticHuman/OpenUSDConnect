@@ -22,9 +22,8 @@ enum class FlushResult : std::uint8_t
 	Unfinished,
 };
 
-// Drives a ProducerEndpoint on one thread. The endpoint connects only when
-// asked, so the thread idles between connections until Stop. Call Wake after
-// an endpoint call that queues actions (Append, QueueControl, RequestConnect,
+// Drives a ProducerEndpoint on one thread, which idles between the connections it is asked for.
+// Call Wake after an endpoint call that queues actions (Append, QueueControl, RequestConnect,
 // CancelConnect, Disconnect) so the loop applies them.
 class ThreadedProducerDriver final : public ThreadedDriver<ProducerEndpoint>
 {

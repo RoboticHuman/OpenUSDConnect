@@ -5,6 +5,7 @@
 #include "openusdconnect/client/frame_codec.h"
 #include "openusdconnect/client/protocol_codec.h"
 
+#include <algorithm>
 #include <cstddef>
 #include <cstdint>
 #include <memory>
@@ -12,6 +13,7 @@
 #include <string>
 #include <string_view>
 #include <utility>
+#include <variant>
 #include <vector>
 
 // The connection steps both endpoints share, as free functions over their state.
@@ -74,6 +76,20 @@ template <typename Config>
 	}
 	actions.push_back(SendAction{Share(builder)});
 	return true;
+}
+
+// Erases the queued actions of the given kinds; returns whether there were any.
+template <typename... Kinds>
+bool Discard(std::vector<Action>& actions)
+{
+	const auto kept = std::remove_if(actions.begin(), actions.end(),
+									 [](const Action& action)
+									 {
+										 return (std::holds_alternative<Kinds>(action) || ...);
+									 });
+	const bool discarded = kept != actions.end();
+	actions.erase(kept, actions.end());
+	return discarded;
 }
 
 // Feeds bytes to decoder, then hands each complete frame to handle until it

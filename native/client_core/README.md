@@ -64,7 +64,9 @@ destroy the driver.
 - After an endpoint call from another thread that queues actions (`Append`, `QueueControl`,
   `RequestConnect`, `CancelConnect`, `Disconnect`, `RequestReplayFrom`, `MarkReplayApplied`),
   call `Wake()` so the loop applies them.
-- `Stop()` never blocks: it stops the endpoint and interrupts a pending connect or read.
-  `Join(timeout)` waits for the thread; destroying the driver stops and joins it.
+- `Close(timeout)` writes what is queued while the socket is open, within a one-second grace,
+  then stops the endpoint and joins the thread; destroying the driver does the same. `Stop()`
+  never blocks: it stops the endpoint and interrupts a pending connect or read.
+  `Join(timeout)` waits for the thread.
 - The receiver's `WaitConnected` and `WaitSynchronized` and the producer's `Connect` and
   `Flush` block, so they run on a thread other than the loop.

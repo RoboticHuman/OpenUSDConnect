@@ -331,13 +331,15 @@ class EventSender:
     def close(self, timeout: float | None = None) -> bool:
         """Write the queued transactions and the Quit message, then close the connection.
 
-        Then stops the connection thread. Closing does not wait for
-        acknowledgements; :meth:`flush` does. Waits up to ``timeout`` seconds
-        in all, without limit for ``None``, and returns whether the thread has
-        exited: ``True`` before the first connection request, ``False`` on
-        timeout or at once from a callback, which runs on that thread; the
-        thread then exits once the callback returns. Afterwards :meth:`connect`
-        and :meth:`request_connect` return ``False``; repeated calls are harmless.
+        Then stops the connection thread. The writes happen only while the socket
+        is open and within one second, or ``timeout`` when shorter, so ``close(0)``
+        does not wait for them. Closing does not wait for acknowledgements;
+        :meth:`flush` does. Waits up to ``timeout`` seconds in all, without limit
+        for ``None``, and returns whether the thread has exited: ``True`` before
+        the first connection request, ``False`` on timeout or at once from a
+        callback, which runs on that thread; the thread then exits once the
+        callback returns. Afterwards :meth:`connect` and :meth:`request_connect`
+        return ``False``; repeated calls are harmless.
         """
         return self._driver.close(timeout)
 

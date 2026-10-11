@@ -241,9 +241,7 @@ def test_token_provider_failure_is_the_connection_error(receivers, caplog):
     assert "EventReceiver: token provider failed" in caplog.text
 
 
-def test_legacy_callbacks_receive_message_dicts_once_on_the_connection_thread(
-    receivers, server, caplog
-):
+def test_callbacks_receive_message_dicts_once_on_the_connection_thread(receivers, server, caplog):
     state = server.sync_server
     calls = []
 

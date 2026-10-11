@@ -15,10 +15,9 @@ public class OpenUSDConnectClientCore : ModuleRules
 
 		PublicIncludePaths.Add(Path.Combine(ModuleDirectory, "include"));
 
-		// Other modules call into this module's DLL, so the core's API carries
-		// the export attribute; Platform.h defines the DLLEXPORT it expands to.
-		// Linking Core also gives the DLL Unreal's operator new and delete, which
-		// the containers that cross the API to other modules require.
+		// Other modules call into this DLL, so the core's API carries the export attribute that
+		// Platform.h defines. Linking Core gives the DLL Unreal's operator new and delete, which
+		// the containers crossing the API to other modules require.
 		PublicDefinitions.Add("OPENUSDCONNECT_CLIENT_API=OPENUSDCONNECTCLIENTCORE_API");
 		PrivateDependencyModuleNames.Add("Core");
 		ForceIncludeFiles.Add("HAL/Platform.h");

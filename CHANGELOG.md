@@ -124,7 +124,8 @@ callable arguments and properties.
 - `EventSender` and `EventReceiver` run their connections on native threads
   in the client core: transaction writes leave the calling thread and need no
   GIL, callbacks and the token provider run on the connection thread, and
-  `close()` interrupts a pending connect or read at once.
+  `close()` writes what was already queued, then stops the thread; a pending
+  connect is interrupted at once.
 - `EventSender.connect()` waits for an attempt already in flight before
   making its own; a token provider that raises is logged and fails that
   attempt instead of raising. While recovery is required, `rejection_reason`
@@ -139,8 +140,6 @@ callable arguments and properties.
 
 ### Fixed
 
-- A receiver continuing from a live-open snapshot replayed the full history
-  over it when the integration did not seed the dispatcher cursor.
 - MCP writes were confirmed before the mirror applied them.
 - `EventSender.send_events()` returns `False` for a transaction above the
   16 MiB frame limit instead of queueing one that made the server close the
@@ -153,6 +152,9 @@ callable arguments and properties.
 - `NoticeEmitter.rebind_stage()` compared stage metadata against the previous
   stage, and `cleanup()` kept pending stage-metadata changes.
 - A `ManagedClient` constructed with invalid options left the stage modified.
+- The Unreal plugin sent edits made while the server was down with the
+  server's values after a replay, because it read the values when emitting
+  instead of when it observed the edit.
 
 ## [0.4.0] - 2026-09-18
 

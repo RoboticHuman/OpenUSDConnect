@@ -25,18 +25,6 @@ class OPENUSDCONNECTPXR_API FUSDEventApplier
 {
 public:
 	/**
-	 * Decode and apply a single BroadcastEvent frame to the given stage actor.
-	 * @param RawFrame  Complete FlatBuffers Envelope bytes (no framing prefix).
-	 * @param StageActor  The AUsdStageActor whose pxr stage to modify.
-	 * @param OutTouchedPrim  Optional: receives the event's target prim path
-	 *        (empty for stage-scoped events).
-	 * @param OutEventKind  Optional: receives the wire event kind.
-	 */
-	static bool ApplyFrame(const TArray<uint8>& RawFrame, AUsdStageActor* StageActor,
-						   FString* OutTouchedPrim = nullptr,
-						   OpenUSDConnect::EventPayload* OutEventKind = nullptr);
-
-	/**
 	 * Apply a frame already schema-verified at the network boundary. The caller
 	 * owns any
 	 * surrounding SdfChangeBlock according to EventUsesChangeBlock().
@@ -47,15 +35,6 @@ public:
 
 	/** Whether a validated event kind can join an existing SdfChangeBlock. */
 	static bool EventUsesChangeBlock(OpenUSDConnect::EventPayload EventKind);
-
-	/**
-	 * Whether the frame's event kind is safe to apply inside an SdfChangeBlock.
-	 * Value writes on existing prims are; structural events (prim definition,
-	 * composition arcs, variants, schema application) are not they need the
-	 * stage to recompose as they apply. Callers batching multiple frames must
-	 * close any open block before applying a frame this returns false for.
-	 */
-	static bool FrameUsesChangeBlock(const TArray<uint8>& RawFrame);
 };
 
 /**

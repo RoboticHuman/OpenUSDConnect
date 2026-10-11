@@ -7,14 +7,11 @@
 #include <nanobind/stl/optional.h>
 
 #include <chrono>
-#include <cstddef>
-#include <functional>
 #include <memory>
 #include <mutex>
 #include <optional>
 #include <set>
 #include <string>
-#include <thread>
 #include <utility>
 #include <vector>
 
@@ -242,23 +239,11 @@ void BindThreadedDriver(nb::class_<PythonDriver<Driver>>& cls)
 			{
 				return driver.Get().Start();
 			})
-		.def("stop",
-			 [](Bound& driver)
-			 {
-				 driver.Get().Stop();
-			 })
 		.def("wake",
 			 [](Bound& driver)
 			 {
 				 driver.Get().Wake();
 			 })
-		.def(
-			"join",
-			[](Bound& driver, std::optional<double> timeout)
-			{
-				return driver.Get().Join(Timeout(timeout));
-			},
-			nb::arg("timeout") = nb::none(), nb::call_guard<nb::gil_scoped_release>())
 		.def(
 			"close",
 			[](Bound& driver, std::optional<double> timeout)
@@ -275,13 +260,6 @@ void BindThreadedDriver(nb::class_<PythonDriver<Driver>>& cls)
 					 [](Bound& driver)
 					 {
 						 return driver.Get().Stopped();
-					 })
-		.def_prop_ro("ident",
-					 [](Bound& driver) -> std::optional<std::size_t>
-					 {
-						 const std::optional<std::thread::id> id = driver.Get().ThreadId();
-						 return id ? std::optional(std::hash<std::thread::id>()(*id))
-								   : std::nullopt;
 					 })
 		.def_prop_ro("last_failure",
 					 [](Bound& driver)

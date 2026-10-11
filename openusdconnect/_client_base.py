@@ -1,6 +1,6 @@
 """Lifecycle shells the high-level clients build on.
 
-``ClientBase`` owns the lifecycle, status, observer hooks, and credential of
+``ClientBase`` owns the lifecycle, status, observer delivery, and credential of
 every client. ``PublishingClientBase`` adds the sender role: recovery,
 playback, and durable completion. ``EmitterClientBase`` adds stage-edit
 capture through a ``NoticeEmitter`` with optional transform coalescing.

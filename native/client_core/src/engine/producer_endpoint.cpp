@@ -12,6 +12,7 @@ namespace
 {
 
 using detail::Address;
+using detail::Discard;
 using detail::Share;
 using detail::Text;
 
@@ -49,20 +50,6 @@ constexpr auto kUnexpectedId = static_cast<std::uint8_t>(RejectionCode::Unexpect
 		return "shared_stage";
 	}
 	return "unknown";
-}
-
-// Erases the queued actions of the given kinds; returns whether there were any.
-template <typename... Kinds>
-bool Discard(std::vector<Action>& actions)
-{
-	const auto kept = std::remove_if(actions.begin(), actions.end(),
-									 [](const Action& action)
-									 {
-										 return (std::holds_alternative<Kinds>(action) || ...);
-									 });
-	const bool discarded = kept != actions.end();
-	actions.erase(kept, actions.end());
-	return discarded;
 }
 
 [[nodiscard]] std::chrono::steady_clock::duration RetryAfter(float seconds)

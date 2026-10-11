@@ -12,6 +12,7 @@ namespace
 {
 
 using detail::Address;
+using detail::Discard;
 using detail::Text;
 using detail::Value;
 
@@ -352,6 +353,12 @@ void ReceiverEndpoint::PollDrain(TimePoint now)
 void ReceiverEndpoint::Close(DisconnectReason reason)
 {
 	EndConnection(reason);
+	// An attempt the host has not taken ends here, so no close can follow it.
+	if (State == ConnectionState::Connecting && Discard<ConnectAction>(Actions))
+	{
+		State = ConnectionState::Idle;
+		return;
+	}
 	Actions.push_back(CloseAction{reason});
 	State = ConnectionState::Closing;
 }

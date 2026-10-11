@@ -1789,15 +1789,6 @@ bool UsesChangeBlock(OpenUSDConnect::EventPayload EventKind)
 	}
 }
 
-// BroadcastEvent's EventWrapper from a raw frame; nullptr on malformed input.
-const OpenUSDConnect::EventWrapper* GetFrameEventWrapper(const TArray<uint8>& RawFrame)
-{
-	const OpenUSDConnect::Envelope* Env = OUC::GetEnvelopeFromFrame(RawFrame);
-	const OpenUSDConnect::BroadcastEvent* BcEvent =
-		Env ? Env->payload_as_BroadcastEvent() : nullptr;
-	return BcEvent ? BcEvent->event() : nullptr;
-}
-
 const OpenUSDConnect::EventWrapper* GetValidatedFrameEventWrapper(TConstArrayView<uint8> RawFrame)
 {
 	const OpenUSDConnect::Envelope* Env = OpenUSDConnect::GetEnvelope(RawFrame.GetData());
@@ -1805,8 +1796,7 @@ const OpenUSDConnect::EventWrapper* GetValidatedFrameEventWrapper(TConstArrayVie
 }
 
 bool ApplyEventWrapper(const OpenUSDConnect::EventWrapper* Wrapper, AUsdStageActor* StageActor,
-					   FString* OutTouchedPrim, OpenUSDConnect::EventPayload* OutEventKind,
-					   bool bManageChangeBlock)
+					   FString* OutTouchedPrim, OpenUSDConnect::EventPayload* OutEventKind)
 {
 	if (!StageActor || !Wrapper)
 	{
@@ -1832,21 +1822,7 @@ bool ApplyEventWrapper(const OpenUSDConnect::EventWrapper* Wrapper, AUsdStageAct
 		*OutTouchedPrim = GetEventPrim(Wrapper);
 	}
 
-	// Structural events must apply outside an SdfChangeBlock: recomposition is
-	// deferred until the block closes, so UsdStage::DefinePrim cannot return
-	// the newly defined prim and arc edits act on a stale composed view. Value
-	// writes on existing prims are ChangeBlock-safe and batch into one
-	// consolidated ObjectsChanged notice, which the stage actor's FUsdListener
-	// turns into a single scene refresh.
-	if (bManageChangeBlock && UsesChangeBlock(Wrapper->event_type()))
-	{
-		pxr::SdfChangeBlock ChangeBlock;
-		DispatchEvent(PxrStage, Wrapper);
-	}
-	else
-	{
-		DispatchEvent(PxrStage, Wrapper);
-	}
+	DispatchEvent(PxrStage, Wrapper);
 	return true;
 #else
 	UE_LOG(LogUSDEventApplier, Warning, TEXT("USD SDK not available cannot apply USD events"));
@@ -1856,35 +1832,9 @@ bool ApplyEventWrapper(const OpenUSDConnect::EventWrapper* Wrapper, AUsdStageAct
 
 } // namespace
 
-// ---------------------------------------------------------------------------
-// FUSDEventApplier::FrameUsesChangeBlock
-// ---------------------------------------------------------------------------
-bool FUSDEventApplier::FrameUsesChangeBlock(const TArray<uint8>& RawFrame)
-{
-	if (RawFrame.Num() < 8)
-		return false;
-	const OpenUSDConnect::EventWrapper* Wrapper = GetFrameEventWrapper(RawFrame);
-	return Wrapper && UsesChangeBlock(Wrapper->event_type());
-}
-
 bool FUSDEventApplier::EventUsesChangeBlock(OpenUSDConnect::EventPayload EventKind)
 {
 	return UsesChangeBlock(EventKind);
-}
-
-// ---------------------------------------------------------------------------
-// FUSDEventApplier::ApplyFrame
-// ---------------------------------------------------------------------------
-bool FUSDEventApplier::ApplyFrame(const TArray<uint8>& RawFrame, AUsdStageActor* StageActor,
-								  FString* OutTouchedPrim,
-								  OpenUSDConnect::EventPayload* OutEventKind)
-{
-	if (!StageActor || RawFrame.Num() < 8)
-	{
-		return false;
-	}
-	const OpenUSDConnect::EventWrapper* Wrapper = GetFrameEventWrapper(RawFrame);
-	return ApplyEventWrapper(Wrapper, StageActor, OutTouchedPrim, OutEventKind, true);
 }
 
 bool FUSDEventApplier::ApplyValidatedFrame(TConstArrayView<uint8> RawFrame,
@@ -1896,5 +1846,5 @@ bool FUSDEventApplier::ApplyValidatedFrame(TConstArrayView<uint8> RawFrame,
 		return false;
 	}
 	return ApplyEventWrapper(GetValidatedFrameEventWrapper(RawFrame), StageActor, OutTouchedPrim,
-							 OutEventKind, false);
+							 OutEventKind);
 }

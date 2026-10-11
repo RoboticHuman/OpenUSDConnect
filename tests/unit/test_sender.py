@@ -5,6 +5,7 @@ import socket
 import threading
 import time
 import uuid
+import weakref
 from contextlib import contextmanager
 from contextlib import nullcontext as does_not_raise
 
@@ -595,3 +596,27 @@ def test_collecting_a_sender_stops_its_connection(server):
     gc.collect()
     wait_until(lambda: not client_registered(server, client_id))
     wait_until(lambda: server.sync_server.producer_committed_through(client_id, session_id) == 1)
+
+
+def test_dropping_a_sender_inside_its_callback_writes_and_stops(server):
+    holder, requested, dropped = {}, threading.Event(), threading.Event()
+
+    def on_token_issued(_token):
+        requested.wait(5)
+        sender = holder.pop("sender")
+        assert sender.send_events([ensure_prim_event(f"/Dropped{uuid.uuid4().hex}")])
+        del sender
+        dropped.set()
+
+    client_id = uuid.uuid4().hex
+    holder["sender"] = EventSender(
+        "127.0.0.1", _port(server), client_id=client_id, on_token_issued=on_token_issued
+    )
+    session_id, collected = holder["sender"].session_id, weakref.ref(holder["sender"])
+    assert holder["sender"].request_connect(timeout=5)
+    requested.set()
+    assert dropped.wait(5)
+    gc.collect()
+    wait_until(lambda: server.sync_server.producer_committed_through(client_id, session_id) == 1)
+    wait_until(lambda: not client_registered(server, client_id))
+    assert collected() is None

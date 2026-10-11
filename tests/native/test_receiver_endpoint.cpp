@@ -638,6 +638,14 @@ void TestStop()
 	{
 		Receiver receiver;
 		CHECK(receiver.Endpoint.Start(receiver.Now));
+		// An attempt the host has not taken is dropped, so a loop never connects after Stop.
+		receiver.Endpoint.Stop();
+		CHECK(receiver.Commands().empty());
+		CHECK(receiver.Status().Stopped);
+	}
+	{
+		Receiver receiver;
+		CHECK(receiver.Endpoint.Start(receiver.Now));
 		static_cast<void>(receiver.Single<ConnectAction>());
 		receiver.Endpoint.Stop();
 		CHECK(receiver.Single<CloseAction>().Reason == DisconnectReason::Stopped);

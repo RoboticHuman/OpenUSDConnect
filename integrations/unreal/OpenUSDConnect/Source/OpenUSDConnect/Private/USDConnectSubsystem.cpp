@@ -170,6 +170,12 @@ void UUSDConnectSubsystem::StopClients()
 		}
 		Producer->Disconnect();
 		ProducerRunner->Wake();
+		// Lets the runner write the Quit before ReleaseProducer's Stop aborts its sends.
+		const double CloseDeadline = FPlatformTime::Seconds() + 0.3;
+		while (Producer->Status().Closing && FPlatformTime::Seconds() < CloseDeadline)
+		{
+			FPlatformProcess::Sleep(0.005f);
+		}
 	}
 	DeliverNotifications();
 	EmittedXformPrims.Reset();
@@ -660,7 +666,7 @@ void UUSDConnectSubsystem::Tick(float DeltaTime)
 
 	// Guard: don't touch anything until the world is fully initialized and not
 	// being torn down. UTickableWorldSubsystem can tick during the tail end of
-	// world load running heavy work here can deadlock startup.
+	// world load, and heavy work there can deadlock startup.
 	UWorld* World = GetWorld();
 	if (!World || !World->bIsWorldInitialized || World->bIsTearingDown)
 	{
@@ -761,7 +767,7 @@ void UUSDConnectSubsystem::AttachToStageActor(AUsdStageActor* Actor)
 					if (Path.IsEmpty() || Path == TEXT("/"))
 						continue;
 
-					// Strip property suffix ".attrName" we want the prim path.
+					// Strip the property suffix ".attrName" to get the prim path.
 					// Changed "inputs:*" properties keep their name so the drain
 					// can emit just the edited shader inputs.
 					int32 DotIdx = INDEX_NONE;
@@ -1196,7 +1202,7 @@ void UUSDConnectSubsystem::ProcessPendingMaterializations()
 
 		// The session-layer authoring below fires stage notices; suppress our own
 		// listener so they don't loop back into the emit path. The stage actor's
-		// listener still sees them that's what triggers the re-import.
+		// listener still sees them, which triggers the re-import.
 		bSuppressEmit.store(true);
 		for (const FString& Material : Materials)
 		{

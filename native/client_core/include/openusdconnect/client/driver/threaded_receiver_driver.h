@@ -11,10 +11,9 @@
 namespace openusdconnect::client
 {
 
-// Drives a ReceiverEndpoint on one thread. After a consumer-thread endpoint
-// call that can close the connection or complete the replay, such as
-// RequestReplayFrom or MarkReplayApplied, call Wake so the loop applies its
-// actions and the waits re-check.
+// Drives a ReceiverEndpoint on one thread. Call Wake after a consumer-thread call that can close
+// the connection or complete the replay, such as RequestReplayFrom or MarkReplayApplied, so the
+// loop applies its actions and the waits re-check.
 class ThreadedReceiverDriver final : public ThreadedDriver<ReceiverEndpoint>
 {
 public:

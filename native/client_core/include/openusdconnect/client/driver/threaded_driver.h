@@ -21,14 +21,9 @@
 namespace openusdconnect::client
 {
 
-// Reference host loop: one thread with blocking sockets applies a started
-// endpoint's actions. Of the endpoint it calls only the host I/O both
-// endpoints share (OnConnected, OnBytes, OnDisconnected, OnTick, Stop,
-// TakeActions, TakeIssuedToken, NextWake, Status().Stopped) and the
-// OnReadTimeout its role supplies. It ticks at NextWake, during reads too, and
-// exits once the endpoint stops. A host thread that queues actions through the
-// endpoint must then Wake it. Never destroy the driver from one of its
-// callbacks. Hosts with their own scheduler drive the endpoint instead.
+// Reference host loop: one thread with blocking sockets applies a started endpoint's actions,
+// ticks at NextWake, and exits once the endpoint stops. Wake it after queuing actions from
+// another thread. Never destroy it on its own thread, such as from one of its callbacks.
 template <typename Endpoint>
 class ThreadedDriver
 {
@@ -202,11 +197,9 @@ protected:
 	{
 	}
 
-	// Stops and joins the loop.
 	~ThreadedDriver()
 	{
-		Stop();
-		static_cast<void>(Join());
+		static_cast<void>(Close(std::nullopt));
 	}
 
 	// Waits until ready holds, the loop stops or exits, or timeout passes.
