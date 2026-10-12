@@ -31,10 +31,10 @@ target_include_directories(OpenUSDConnectClientProtocol
 )
 target_link_libraries(OpenUSDConnectClientProtocol INTERFACE OpenUSDConnectClientCore)
 
+include(FetchContent)
 if(TARGET flatbuffers::flatbuffers)
     target_link_libraries(OpenUSDConnectClientProtocol INTERFACE flatbuffers::flatbuffers)
 else()
-    include(FetchContent)
     # include/ has no CMakeLists.txt, so the FlatBuffers project is never configured.
     FetchContent_Declare(flatbuffers
         URL https://github.com/google/flatbuffers/archive/refs/tags/v25.12.19.tar.gz
@@ -56,17 +56,31 @@ add_library(OpenUSDConnect::ClientEngine ALIAS OpenUSDConnectClientEngine)
 target_link_libraries(OpenUSDConnectClientEngine PUBLIC OpenUSDConnectClientProtocol)
 openusdconnect_configure_client_library(OpenUSDConnectClientEngine)
 
+# Standalone Asio for the driver's sockets. The driver links it privately, so no
+# consumer compiles against it.
+FetchContent_Declare(asio
+    URL https://github.com/chriskohlhoff/asio/archive/refs/tags/asio-1-38-2.tar.gz
+    URL_HASH SHA256=9f2648fa483e58a6bf848d970ee0ea650ca19ed7769dfa520ed4f7b8d27af1db
+)
+FetchContent_MakeAvailable(asio)
+add_library(OpenUSDConnectAsio INTERFACE)
+target_include_directories(OpenUSDConnectAsio SYSTEM INTERFACE "${asio_SOURCE_DIR}/asio/include")
+target_compile_definitions(OpenUSDConnectAsio INTERFACE
+    ASIO_STANDALONE ASIO_NO_DEPRECATED $<$<PLATFORM_ID:Windows>:_WIN32_WINNT=0x0601>
+)
+target_link_libraries(OpenUSDConnectAsio INTERFACE $<$<PLATFORM_ID:Windows>:ws2_32>)
+
 # Optional reference driver: one thread and blocking sockets drive the engine.
 # Hosts with their own I/O and scheduler drive the engine directly instead.
 add_library(OpenUSDConnectClientDriver STATIC
     src/driver/threaded_producer_driver.cpp
-    src/platform/bsd_socket.cpp
+    src/platform/asio_socket.cpp
 )
 add_library(OpenUSDConnect::ClientDriver ALIAS OpenUSDConnectClientDriver)
 find_package(Threads REQUIRED)
 target_link_libraries(OpenUSDConnectClientDriver
     PUBLIC OpenUSDConnectClientEngine Threads::Threads
-    PRIVATE $<$<PLATFORM_ID:Windows>:ws2_32>
+    PRIVATE OpenUSDConnectAsio
 )
 openusdconnect_configure_client_library(OpenUSDConnectClientDriver)
 

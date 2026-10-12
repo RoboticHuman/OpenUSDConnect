@@ -10,8 +10,10 @@ Four C++17 targets, each building on the previous one:
   `engine/producer_endpoint.h`) that own the connection protocol from handshake through
   reconnect backoff. They start no threads and open no sockets.
 - `OpenUSDConnect::ClientDriver`: an optional reference host loop (`driver/`) that drives one
-  endpoint on one thread with blocking Winsock or BSD sockets. The Python module links it; a
-  host with its own I/O loop and scheduler drives the endpoints directly instead.
+  endpoint on one thread with blocking sockets over standalone Asio, which CMake fetches pinned
+  on the first configure unless `FETCHCONTENT_SOURCE_DIR_ASIO` names a copy containing
+  `asio/include`. The Python module links it; a host with its own I/O loop and scheduler drives
+  the endpoints directly instead.
 
 Either way the host builds transactions, decodes and applies drained frames on its
 stage-owning thread, stores tokens, and handles notifications.

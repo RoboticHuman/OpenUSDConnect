@@ -69,7 +69,7 @@ add_test(NAME OpenUSDConnectThreadedProducerDriverTests
 
 add_executable(OpenUSDConnectTcpSocketTests test_tcp_socket.cpp)
 target_link_libraries(OpenUSDConnectTcpSocketTests
-    PRIVATE OpenUSDConnect::ClientDriver $<$<PLATFORM_ID:Windows>:ws2_32>
+    PRIVATE OpenUSDConnect::ClientDriver OpenUSDConnectAsio
 )
 if(MSVC)
     target_compile_options(OpenUSDConnectTcpSocketTests PRIVATE /W4 /permissive-)

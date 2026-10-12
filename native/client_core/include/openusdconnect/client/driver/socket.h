@@ -66,7 +66,7 @@ protected:
 	SocketFactory& operator=(const SocketFactory&) = delete;
 };
 
-// Winsock or BSD sockets with TCP_NODELAY, so small control frames go out at once.
+// Standalone Asio TCP sockets with TCP_NODELAY, so small control frames go out at once.
 class TcpSocketFactory final : public SocketFactory
 {
 public:

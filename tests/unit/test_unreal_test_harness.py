@@ -304,7 +304,7 @@ def _fake_client_core(root: Path) -> Path:
         "src/frame_codec.cpp",
         "src/engine/receiver_endpoint.cpp",
         "src/driver/threaded_producer_driver.cpp",
-        "src/platform/bsd_socket.cpp",
+        "src/platform/asio_socket.cpp",
         "CMakeLists.txt",
     ):
         path = root / relative

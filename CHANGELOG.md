@@ -132,9 +132,10 @@ callable arguments and properties.
   making its own; a token provider that raises is logged and fails that
   attempt instead of raising. While recovery is required, `rejection_reason`
   names the failure.
-- Building the native extension fetches the pinned FlatBuffers headers on the
-  first configure, which needs network access unless
-  `FETCHCONTENT_SOURCE_DIR_FLATBUFFERS` names a local copy.
+- Building the native extension fetches the pinned FlatBuffers and Asio
+  headers on the first configure, which needs network access unless
+  `FETCHCONTENT_SOURCE_DIR_FLATBUFFERS` and `FETCHCONTENT_SOURCE_DIR_ASIO` name
+  local copies.
 - The Unreal plugin runs on the native client engine: its receiver and emitter
   threads drive the client core's `ReceiverEndpoint` and `ProducerEndpoint`,
   built as the plugin's `OpenUSDConnectClientCore` module. Auth tokens stay in
