@@ -248,7 +248,7 @@ def build_native_module(
             "run",
             "--frozen",
             "--with",
-            "nanobind>=2.11,<3",
+            "nanobind>=2.15,<3",
             "python",
             "-m",
             "nanobind",
