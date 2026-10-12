@@ -4,6 +4,12 @@
 #include <cstdint>
 #include <vector>
 
+// A host that builds the core into a shared library defines this as its export
+// or import attribute.
+#ifndef OPENUSDCONNECT_CLIENT_API
+#define OPENUSDCONNECT_CLIENT_API
+#endif
+
 namespace openusdconnect::client
 {
 
@@ -19,7 +25,8 @@ enum class FrameResult : std::uint8_t
 	InvalidHeader,
 };
 
-[[nodiscard]] bool IsValidMaxFrameSize(std::size_t max_frame_size) noexcept;
+[[nodiscard]] OPENUSDCONNECT_CLIENT_API bool
+IsValidMaxFrameSize(std::size_t max_frame_size) noexcept;
 
 class FrameDecoder final
 {
@@ -49,7 +56,7 @@ private:
 									  std::vector<std::uint8_t>& frame,
 									  std::size_t max_frame_size = kDefaultMaxFrameSize);
 
-[[nodiscard]] FrameResult
+[[nodiscard]] OPENUSDCONNECT_CLIENT_API FrameResult
 WriteFrameHeader(std::size_t payload_size, std::uint8_t* destination,
 				 std::size_t max_frame_size = kDefaultMaxFrameSize) noexcept;
 

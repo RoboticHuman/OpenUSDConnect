@@ -117,7 +117,7 @@ def main() -> None:
             print("[Material Zoo Viewer] receiver authentication rejected", flush=True)
             return None
         sender = capture.get_emitter_sender()
-        emitter_connected = sender is not None and sender.sock is not None
+        emitter_connected = sender is not None and sender.connected
         receiver_connected = receiver is not None and receiver.connected
         if last_seq >= args.expected_seq and emitter_connected and receiver_connected:
             _present(args.camera)

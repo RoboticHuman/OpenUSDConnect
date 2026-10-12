@@ -406,10 +406,8 @@ def test_managed_client_shares_reissued_tokens(tmp_path, background, first_recon
             stage, app_name="token-refresh", client_id="token-refresh",
             port=runtime.server_address[1], persist_token=False,
         )
-        sender_readers = []
         try:
             assert client.connect(timeout=5)
-            sender_readers.append(client.sender._reader_thread)
             assert _drain_until(client, lambda: client.status.synchronized)
             old_token = client.sender.token
             assert old_token == client.receiver.token
@@ -437,7 +435,6 @@ def test_managed_client_shares_reissued_tokens(tmp_path, background, first_recon
                     assert client.status.connected
                 else:
                     assert client.connect(timeout=3)
-                sender_readers.append(client.sender._reader_thread)
                 sender_tokens.append(client.sender.token)
                 assert not client.sender.auth_rejected
             assert sender_tokens[0] != old_token
@@ -454,9 +451,6 @@ def test_managed_client_shares_reissued_tokens(tmp_path, background, first_recon
             assert client.sender.token == client.receiver.token == sender_tokens[0]
         finally:
             client.close()
-            for worker in (*sender_readers, client.sender._connect_thread):
-                if worker is not None:
-                    worker.join(timeout=3)
             runtime.sync_server.token_store.close()
 
 

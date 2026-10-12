@@ -10,12 +10,7 @@ from pathlib import Path
 from pxr import Sdf, Usd
 
 from ._client_base import PublishingClientBase
-from ._client_lifecycle import (
-    DEFAULT_WAIT_TIMEOUT_S,
-    BacklogHold,
-    deadline_after,
-    remaining_time,
-)
+from ._client_lifecycle import DEFAULT_WAIT_TIMEOUT_S, deadline_after, remaining_time
 from ._client_utils import client_origin, require_app_name
 from .client_id import make_stable_client_id
 from .client_observer import ClientObserver
@@ -30,7 +25,7 @@ from .protocol_constants import (
     K_SET_SUBLAYERS,
     LayerMode,
 )
-from .receiver import ReceiverThread
+from .receiver import EventReceiver
 from .recovery import RecoveryArtifact, RecoveryError
 from .sdf_layer_tracker import SdfLayerChangeTracker
 from .sender import EventSender
@@ -128,7 +123,6 @@ class SharedStageClient(PublishingClientBase):
         token: str | None = None,
         persist_token: bool = True,
         reconnect: bool = True,
-        background_send: bool = False,
         observer: ClientObserver | None = None,
         delegate_bridge_path: str | Path | None = None,
     ):
@@ -153,17 +147,17 @@ class SharedStageClient(PublishingClientBase):
             "origin": origin or client_origin(app_name, "shared"),
         }
         credential = self._credential.endpoint_kwargs()
-        self._receiver = ReceiverThread(
+        self._receiver = EventReceiver(
             host=host, port=port, sync_from=1, reconnect=reconnect,
             layered_replay=False, layer_mode=LayerMode.SHARED_STAGE,
-            **identity, **credential, **self._hooks.receiver_callbacks(),
+            notifications=self._notifications, **identity, **credential,
         )
         self._sender = EventSender(
-            host, port, layer_mode=LayerMode.SHARED_STAGE, background_send=background_send,
+            host, port, layer_mode=LayerMode.SHARED_STAGE, notifications=self._notifications,
             **identity, **credential,
         )
         self._last_seq = 0
-        self._backlog = BacklogHold()
+        self._backlog_marker = 0
         self._set_deferred([])
         self._last_recovery_assessment: SharedRecoveryAssessment | None = None
         self._recovery_rebind_artifact: RecoveryArtifact | None = None
@@ -489,7 +483,11 @@ class SharedStageClient(PublishingClientBase):
         sent = 0
         if self._graph.ready and self._receiver.connected and not self._sender.connected:
             self._sender.request_connect()
-        if self._sender.connected and self._is_synchronized() and not self._backlog.holding:
+        if (
+            self._sender.connected
+            and self._is_synchronized()
+            and self._receiver.drained_through(self._backlog_marker)
+        ):
             while routed := self._tracker.next_routed_batch():
                 batch, layer_key, events = routed
                 if not self._sender.send_events(events, layer_key=layer_key):
@@ -503,15 +501,15 @@ class SharedStageClient(PublishingClientBase):
         had_batch = bool(self._tracker.prepared_event_count)
         self._tracker.prepare_local_changes()
         if not had_batch and self._tracker.prepared_event_count:
-            self._backlog.freeze(self._receiver.queued_message_count)
+            self._backlog_marker = self._receiver.freeze_marker()
         try:
             return self._apply_incoming(max_messages)
         finally:
             self._tracker.restore_prepared()
 
     def _apply_incoming(self, max_messages: int | None = None) -> int:
+        generation = self._receiver.generation
         buffers = self._receiver.drain_queue(max_messages)
-        self._backlog.drained(len(buffers), self._receiver.queued_message_count)
         if not buffers:
             self._receiver.mark_replay_applied()
             return 0
@@ -557,6 +555,9 @@ class SharedStageClient(PublishingClientBase):
             self._receiver.request_replay_from(self._last_seq + 1)
             LOG.warning("Shared-stage decode failed: %s", result.errors[0])
         else:
+            if result.resync_requested:
+                self._receiver.reset_applied_progress()
+            self._receiver.mark_applied_through(generation, self._last_seq)
             self._receiver.mark_replay_applied()
         return applied
 
@@ -704,12 +705,8 @@ class SharedStageClient(PublishingClientBase):
         self._last_seq = 0
         old_tracker.close()
 
-    def _is_synchronized(self) -> bool:
-        return (
-            self._graph.ready
-            and self._receiver.synchronized
-            and not self._sender.recovery_required
-        )
+    def _synchronized(self, replayed: bool) -> bool:
+        return replayed and self._graph.ready and not self._sender.recovery_required
 
     def _prepared_events(self) -> int:
         return self._tracker.prepared_event_count

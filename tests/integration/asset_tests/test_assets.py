@@ -290,12 +290,12 @@ def _verify_material_zoo_stage_receiver(base_path, port, event_count):
 
     from openusdconnect.adapters import UsdStageAdapter
     from openusdconnect.dispatcher import EventDispatcher
-    from openusdconnect.receiver import ReceiverThread
+    from openusdconnect.receiver import EventReceiver
 
     stage = Usd.Stage.Open(base_path)
     assert stage is not None, f"Could not open Material Zoo base stage: {base_path}"
     stage.SetEditTarget(stage.GetSessionLayer())
-    receiver = ReceiverThread(
+    receiver = EventReceiver(
         host="127.0.0.1",
         port=port,
         sync_from=1,
@@ -339,8 +339,7 @@ def _verify_material_zoo_stage_receiver(base_path, port, event_count):
         ).Get()
         assert tuple(sphere_translate) == (0.0, 1.5, 0.0)
     finally:
-        receiver.stop()
-        receiver.join(timeout=2.0)
+        receiver.close(timeout=2.0)
         dispatcher.close()
 
 

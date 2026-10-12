@@ -22,8 +22,11 @@ add_subdirectory(
 # support applications that still embed Python 3.11.
 nanobind_add_module(_native_client
     "${OPENUSDCONNECT_SOURCE_DIR}/native/python/client_module.cpp"
+    "${OPENUSDCONNECT_SOURCE_DIR}/native/python/driver_bindings.cpp"
+    "${OPENUSDCONNECT_SOURCE_DIR}/native/python/producer_bindings.cpp"
+    "${OPENUSDCONNECT_SOURCE_DIR}/native/python/receiver_bindings.cpp"
 )
-target_link_libraries(_native_client PRIVATE OpenUSDConnectClientCore)
+target_link_libraries(_native_client PRIVATE OpenUSDConnect::ClientDriver)
 target_compile_features(_native_client PRIVATE cxx_std_17)
 
 if(MSVC)

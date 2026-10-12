@@ -165,8 +165,8 @@ def main():
     # Step 3: Start receiver
     # ==================================================================
     print("[Test] Step 3: Starting receiver")
-    from openusdconnect.receiver import ReceiverThread
-    receiver_addon._RECEIVER = ReceiverThread(
+    from openusdconnect.receiver import EventReceiver
+    receiver_addon._RECEIVER = EventReceiver(
         host="127.0.0.1", port=port, sync_from=1,
     )
     receiver_addon._RECEIVER.start()
@@ -248,8 +248,7 @@ def main():
 
     # Cleanup
     if receiver_addon._RECEIVER is not None:
-        receiver_addon._RECEIVER.stop()
-        receiver_addon._RECEIVER.join(timeout=2)
+        receiver_addon._RECEIVER.close(timeout=2)
         receiver_addon._RECEIVER = None
 
     with open(out_path, "w") as f:

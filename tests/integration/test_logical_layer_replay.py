@@ -12,7 +12,7 @@ from pxr import Sdf, Usd, UsdShade
 from openusdconnect.adapters import MockAdapter, UsdStageAdapter
 from openusdconnect.dispatcher import EventDispatcher
 from openusdconnect.emitter import NoticeEmitter
-from openusdconnect.receiver import ReceiverThread
+from openusdconnect.receiver import EventReceiver
 from openusdconnect.sender import EventSender
 from openusdconnect.server import UsdSyncServer
 from openusdconnect.server.connection import ConnectionHandler, ThreadedTCPServer
@@ -65,7 +65,7 @@ class _RunningServer:
 class _LayeredClient:
     def __init__(self, port, client_id):
         self.stage = Usd.Stage.CreateInMemory()
-        self.receiver = ReceiverThread(
+        self.receiver = EventReceiver(
             port=port,
             reconnect=False,
             client_id=client_id,
@@ -79,8 +79,7 @@ class _LayeredClient:
         self.receiver.start()
 
     def close(self):
-        self.receiver.stop()
-        self.receiver.join(timeout=2)
+        self.receiver.close(timeout=2)
         self.dispatcher.close()
 
     def pump_until(self, predicate, timeout=5.0):
@@ -125,7 +124,7 @@ class _NativeLayeredClient:
     def __init__(self, port, client_id, department):
         self.stage = Usd.Stage.CreateInMemory()
         self.adapter = MockAdapter()
-        self.receiver = ReceiverThread(
+        self.receiver = EventReceiver(
             port=port,
             reconnect=False,
             client_id=client_id,
@@ -141,8 +140,7 @@ class _NativeLayeredClient:
         self.receiver.start()
 
     def close(self):
-        self.receiver.stop()
-        self.receiver.join(timeout=2)
+        self.receiver.close(timeout=2)
         self.dispatcher.close()
 
     def pump_until(self, predicate, timeout=5.0):

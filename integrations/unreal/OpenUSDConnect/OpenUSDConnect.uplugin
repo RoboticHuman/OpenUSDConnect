@@ -15,6 +15,11 @@
 	"Installed": false,
 	"Modules": [
 		{
+			"Name": "OpenUSDConnectClientCore",
+			"Type": "Runtime",
+			"LoadingPhase": "None"
+		},
+		{
 			"Name": "OpenUSDConnectPXR",
 			"Type": "Runtime",
 			"LoadingPhase": "Default"

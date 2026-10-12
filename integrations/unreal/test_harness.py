@@ -20,6 +20,10 @@ from integrations.unreal.test_scenario import UnrealScenario, create_scenario
 REPO_ROOT = Path(__file__).resolve().parents[2]
 PLUGIN_SOURCE = Path(__file__).resolve().parent / "OpenUSDConnect"
 CLIENT_CORE_SOURCE = REPO_ROOT / "native" / "client_core"
+CLIENT_CORE_MODULE = Path("Source/OpenUSDConnectClientCore")
+# UBT compiles every source file under a module, so the driver, platform, and
+# testing sources stay out of it.
+CLIENT_CORE_STAGED = ("include", "src/frame_codec.cpp", "src/engine")
 EDITOR_DRIVER = REPO_ROOT / "tests" / "integration" / "scripts" / "unreal_e2e_driver.py"
 ENGINE_CONFIG = REPO_ROOT / "unreal.test.cfg"
 FLATBUFFERS_HEADER = Path(
@@ -383,11 +387,7 @@ def _plugin_fingerprint(
         if root.is_dir():
             paths.extend((path, plugin_source) for path in root.rglob("*") if path.is_file())
     if client_core_source is not None:
-        paths.extend(
-            (path, client_core_source)
-            for path in client_core_source.rglob("*")
-            if path.is_file()
-        )
+        paths.extend((path, client_core_source) for path in _client_core_files(client_core_source))
     for path, relative_root in sorted(paths):
         if any(part in {"Binaries", "Intermediate"} for part in path.parts):
             continue
@@ -396,6 +396,15 @@ def _plugin_fingerprint(
         digest.update(path.read_bytes())
         digest.update(b"\0")
     return digest.hexdigest()
+
+
+def _client_core_files(client_core_source: Path) -> list[Path]:
+    """The client core files the Unreal client core module compiles."""
+    files = []
+    for entry in CLIENT_CORE_STAGED:
+        path = client_core_source / entry
+        files.extend(sorted(p for p in path.rglob("*") if p.is_file()) if path.is_dir() else [path])
+    return files
 
 
 def _stage_plugin_source(
@@ -412,12 +421,14 @@ def _stage_plugin_source(
         destination,
         ignore=shutil.ignore_patterns("Binaries", "Intermediate"),
     )
-    core_destination = (
-        destination / "Source" / "ThirdParty" / "OpenUSDConnectClientCore"
-    )
-    if core_destination.exists():
-        shutil.rmtree(core_destination)
-    shutil.copytree(client_core_source, core_destination)
+    core_destination = destination / CLIENT_CORE_MODULE
+    for staged in ("include", "src"):
+        if (core_destination / staged).exists():
+            shutil.rmtree(core_destination / staged)
+    for path in _client_core_files(client_core_source):
+        target = core_destination / path.relative_to(client_core_source)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(path, target)
     return destination
 
 
@@ -481,7 +492,9 @@ def package_plugin(
         return package
 
     cache_root.mkdir(parents=True, exist_ok=True)
-    build_dir = cache_root / f".{package.name}.building-{os.getpid()}"
+    # BuildPlugin compiles inside this directory, and UBT refuses action paths
+    # over 260 characters on Windows, so its name stays short.
+    build_dir = cache_root / f".build-{os.getpid()}"
     staged_source = cache_root / f".{package.name}.source-{os.getpid()}"
     if build_dir.exists():
         shutil.rmtree(build_dir)

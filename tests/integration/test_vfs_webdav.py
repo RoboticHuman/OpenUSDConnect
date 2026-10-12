@@ -23,7 +23,7 @@ pytest.importorskip("wsgidav")
 
 from openusdconnect.codec import message_to_dict  # noqa: E402
 from openusdconnect.managed_client import ManagedClient  # noqa: E402
-from openusdconnect.receiver import ReceiverThread  # noqa: E402
+from openusdconnect.receiver import EventReceiver  # noqa: E402
 from openusdconnect.sender import EventSender  # noqa: E402
 from openusdconnect.server import UsdSyncServer  # noqa: E402
 from openusdconnect.server.connection import ConnectionHandler, ThreadedTCPServer  # noqa: E402
@@ -878,7 +878,7 @@ class TestSnapshotReplayContract:
             meta = stage.GetRootLayer().customLayerData["openusdconnect"]
             assert meta["snapshot_seq"] == 1
 
-            receiver = ReceiverThread(
+            receiver = EventReceiver(
                 host="127.0.0.1",
                 port=sync_port,
                 sync_from=meta["snapshot_seq"] + 1,
@@ -921,8 +921,7 @@ class TestSnapshotReplayContract:
             if sender is not None:
                 sender.disconnect()
             if receiver is not None:
-                receiver.stop()
-                receiver.join(timeout=2)
+                receiver.close(timeout=2)
             tcp_server.shutdown()
             tcp_server.server_close()
             srv.shutdown()

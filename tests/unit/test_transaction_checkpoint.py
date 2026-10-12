@@ -1,14 +1,12 @@
-"""Optional wire checkpoints and producer acknowledgement ownership."""
+"""Optional wire checkpoints the server captures for durable acknowledgements."""
 
 from unittest.mock import Mock
 
 import pytest
 
-from openusdconnect import _client_backend
-from openusdconnect.checkpoints import MirrorCheckpoint, TransactionCheckpoint
-from openusdconnect.codec import decode_envelope, encode_message, message_to_dict, resolve_payload
+from openusdconnect.checkpoints import TransactionCheckpoint
+from openusdconnect.codec import encode_message, message_to_dict
 from openusdconnect.protocol import make_transaction_result
-from openusdconnect.sender import EventSender
 from openusdconnect.server import UsdSyncServer
 from openusdconnect.server.transactions import TransactionRequest
 
@@ -146,60 +144,6 @@ def test_optional_checkpoint_roundtrip(checkpoint):
         }
     else:
         assert "checkpoint" not in decoded
-
-
-def test_checkpoint_requires_current_ack_and_no_pending_transactions(monkeypatch):
-    sender = EventSender("127.0.0.1", 1, client_id="checkpoint")
-    connection = sender._session.begin_connection()
-    generation = connection.generation
-    assert sender._session.accept_hello(generation, 0) == _client_backend.ProducerResult.ACCEPTED
-    sender._socket_generation = generation
-    sender._server_instance = "server"
-    sender.sock = object()
-    monkeypatch.setattr("openusdconnect.sender.send_raw", lambda *args: None)
-
-    def ack(txn_id, checkpoint=None):
-        envelope = decode_envelope(
-            encode_message(make_transaction_result(txn_id, checkpoint=checkpoint))
-        )
-        return resolve_payload(envelope)[1]
-
-    event = {"k": "ensure_prim", "prim": "/Own", "typeName": "Xform"}
-    assert sender.send_events([event])
-    assert sender.acknowledged_checkpoint is None
-    sender._accept_result(ack(1, TransactionCheckpoint(2, 8)), generation)
-    assert sender.acknowledged_checkpoint == MirrorCheckpoint("server", 2, 8)
-    sender._accept_result(ack(1, TransactionCheckpoint(9, 999)), generation + 1)
-    assert sender.acknowledged_checkpoint == MirrorCheckpoint("server", 2, 8)
-    assert sender.send_events([event])
-    assert sender.acknowledged_checkpoint is None
-    sender._accept_result(ack(2), generation)
-    assert sender.flush(timeout=0)
-    assert sender.acknowledged_checkpoint is None
-    sender.sock = None
-
-
-def test_hello_highwater_recovery_does_not_confirm_mirror(monkeypatch):
-    sender = EventSender("127.0.0.1", 1, client_id="checkpoint")
-    generation = sender._session.begin_connection().generation
-    sender._session.accept_hello(generation, 0)
-    sender._socket_generation = generation
-    sender.sock = Mock()
-    monkeypatch.setattr("openusdconnect.sender.send_raw", lambda *args: None)
-    try:
-        assert sender.send_events([{"k": "ensure_prim", "prim": "/Own", "typeName": "Xform"}])
-        sender._acknowledged_checkpoint = MirrorCheckpoint("old-instance", 0, 10)
-        generation = sender._session.begin_connection().generation
-        envelope = decode_envelope(encode_message({
-            "type": "hello_ok", "server_instance": "new-instance", "committed_through": 1,
-        }))
-        assert sender._accept_handshake_response(
-            sender.sock, envelope, envelope.PayloadType(), generation,
-        )
-        assert sender._session.empty
-        assert sender.acknowledged_checkpoint is None
-    finally:
-        sender.sock = None
 
 
 def test_duplicate_after_purge_has_no_original_visibility_proof(tmp_path, monkeypatch):

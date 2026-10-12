@@ -8,6 +8,10 @@ Saved/
 # to the committed flatc-generated bindings under Public/Schema)
 Source/*/ThirdParty/flatbuffers/
 
+# native/client_core sources the Unreal harness stages before BuildPlugin
+Source/OpenUSDConnectClientCore/include/
+Source/OpenUSDConnectClientCore/src/
+
 # Visual Studio user files (in case someone runs GenerateProjectFiles from this dir)
 *.suo
 *.user

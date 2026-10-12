@@ -29,11 +29,23 @@ SCENARIOS = (
     ("TransactionRecoveryFirst.cfg", "TransactionRecovery.tla", "recovery: reject 1"),
     ("TransactionRecovery.cfg", "TransactionRecovery.tla", "recovery: reject 3"),
     ("RecoverySessionRollover.cfg", "RecoverySessionRollover.tla", "session rollover"),
+    ("ProducerConnection.cfg", "ProducerConnection.tla", "producer connection: honest"),
+    (
+        "ProducerConnectionDivergence.cfg",
+        "ProducerConnection.tla",
+        "producer connection: divergence",
+    ),
     ("ReceiverSynchronization.cfg", "ReceiverSynchronization.tla", "receiver: queue 3"),
     (
         "ReceiverSynchronizationTight.cfg",
         "ReceiverSynchronization.tla",
         "receiver: queue 1",
+    ),
+    ("ReceiverReplayIdentity.cfg", "ReceiverReplayIdentity.tla", "replay identity: fresh"),
+    (
+        "ReceiverReplayIdentitySnapshot.cfg",
+        "ReceiverReplayIdentity.tla",
+        "replay identity: snapshot",
     ),
     ("TransactionCoordinator.cfg", "TransactionCoordinator.tla", "coordinator: valid"),
     (
@@ -53,6 +65,13 @@ SCENARIOS = (
 # These are the adversarial or split-boundary actions most likely to become
 # accidentally unreachable while the models are edited.
 REQUIRED_ACTIONS = {
+    "ProducerConnection.tla": {
+        "AbandonAttempt",
+        "ConnectInterrupted",
+        "PeerCloses",
+        "ServerLosesProgress",
+        "ServerRunsAhead",
+    },
     "RecoverySessionRollover.tla": {
         "ConcurrentAuthoritativeCommit",
         "RefreshCheckpoint",
@@ -63,6 +82,13 @@ REQUIRED_ACTIONS = {
         "ApplyCompleteSuccess",
         "InjectStaleComplete",
         "DiscardStaleFrame",
+    },
+    "ReceiverReplayIdentity.tla": {
+        "ReceiveResync",
+        "DropEvent",
+        "LiveReset",
+        "Restart",
+        "ConsumerFail",
     },
     "TransactionCoordinator.tla": {
         "GroupApply",

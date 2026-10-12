@@ -57,6 +57,12 @@ def _generated_flatbuffers_version() -> str | None:
     return ".".join(parts)
 
 
+def _fetched_flatbuffers_version() -> str | None:
+    cmake = _read("native/client_core/CMakeLists.txt")
+    match = re.search(r"google/flatbuffers/archive/refs/tags/v(\d+\.\d+\.\d+)\.tar\.gz", cmake)
+    return match.group(1) if match else None
+
+
 def _docker_instructions(dockerfile: str) -> list[str]:
     instructions: list[str] = []
     current = ""
@@ -143,9 +149,11 @@ def collect_errors() -> list[str]:
     setup_flatbuffers = str(
         _assignment("integrations/unreal/OpenUSDConnect/setup_flatbuffers.py", "DEFAULT_VERSION")
     )
-    generated_flatbuffers = _generated_flatbuffers_version()
-    if not flatbuffers or flatbuffers != setup_flatbuffers or flatbuffers != generated_flatbuffers:
-        errors.append("FlatBuffers Python, Unreal setup, and generated-header versions must match")
+    mirrors = {setup_flatbuffers, _generated_flatbuffers_version(), _fetched_flatbuffers_version()}
+    if not flatbuffers or mirrors != {flatbuffers}:
+        errors.append(
+            "FlatBuffers Python, Unreal setup, CMake fetch, and generated-header versions must match"
+        )
     vendored_version = ROOT / (
         "integrations/unreal/OpenUSDConnect/Source/OpenUSDConnectPXR/ThirdParty/flatbuffers/VERSION"
     )

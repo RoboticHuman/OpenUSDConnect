@@ -28,7 +28,7 @@ import numpy as np  # noqa: E402
 from openusdconnect.adapters import UsdStageAdapter  # noqa: E402
 from openusdconnect.cli_common import add_sync_endpoint_args  # noqa: E402
 from openusdconnect.dispatcher import EventDispatcher  # noqa: E402
-from openusdconnect.receiver import ReceiverThread  # noqa: E402
+from openusdconnect.receiver import EventReceiver  # noqa: E402
 from openusdconnect.sender import EventSender  # noqa: E402
 
 DEFAULTS = {
@@ -91,7 +91,7 @@ class WaveClient:
         from pxr import Usd
 
         self.mirror = Usd.Stage.CreateInMemory()
-        self.receiver = ReceiverThread(
+        self.receiver = EventReceiver(
             host=host, port=port, sync_from=1,
             client_id="fourier-wave-client", origin=f"{origin}-recv",
         )
@@ -171,8 +171,8 @@ class WaveClient:
             time.sleep(1.0 / 30.0)
 
     def stop(self):
-        self.receiver.stop()
-        self.sender.disconnect()
+        self.receiver.close()
+        self.sender.close()
 
 
 def build_parser(add_help: bool = True) -> argparse.ArgumentParser:

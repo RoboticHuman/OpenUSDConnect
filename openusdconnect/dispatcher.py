@@ -39,7 +39,7 @@ if TYPE_CHECKING:
     from .codec import ReceivedEvent
     from .emitter import NoticeEmitter
     from .layer_key_router import LayerKeyRouter
-    from .receiver import ReceiverThread
+    from .receiver import EventReceiver
 
 LOG = logging.getLogger(__name__)
 
@@ -380,7 +380,7 @@ class EventDispatcher:
     def __init__(
         self,
         *,
-        receiver: ReceiverThread,
+        receiver: EventReceiver,
         adapter: DCCAdapter,
         mirror_stage: Usd.Stage | None = None,
         emitter: NoticeEmitter | None = None,
@@ -455,6 +455,7 @@ class EventDispatcher:
         """
         if self._projection_state is not None:
             self._projection_state.ensure_native_projection_safe()
+        generation = self.receiver.generation
         bufs = (
             self.receiver.drain_queue()
             if max_messages is None
@@ -516,6 +517,9 @@ class EventDispatcher:
         if result.errors:
             self.receiver.request_replay_from(self._last_seq + 1)
         else:
+            if result.resync_requested:
+                self.receiver.reset_applied_progress()
+            self.receiver.mark_applied_through(generation, self._last_seq)
             self.receiver.mark_replay_applied()
 
         return applied

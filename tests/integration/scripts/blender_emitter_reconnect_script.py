@@ -70,7 +70,7 @@ def _tick():
             _result(
                 status="FAIL",
                 reason=f"timeout in {_phase}",
-                connected=bool(sender and sender.sock),
+                connected=bool(sender and sender.connected),
                 pending=sender.pending_transaction_count if sender else -1,
             )
             bpy.ops.wm.quit_blender()
@@ -92,7 +92,7 @@ def _tick():
 
         sender = capture.get_emitter_sender()
         if _phase == "wait_for_outage":
-            if not _exists("edit-now") or sender is None or sender.sock is not None:
+            if not _exists("edit-now") or sender is None or sender.connected:
                 return 0.1
             cube = _find_cube()
             assert cube is not None
@@ -119,7 +119,7 @@ def _tick():
             clean = not emitter or (not emitter.dirty and not emitter.prepared_event_count)
             if (
                 sender is None
-                or sender.sock is None
+                or not sender.connected
                 or sender.pending_transaction_count
                 or not clean
                 or sender.acknowledged_event_count < 1

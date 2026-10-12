@@ -44,6 +44,8 @@ linked from the shorter workflow guides.
   stage ownership, native adapters, publishers, receivers, and resolver behavior.
 - [Shared stage architecture](shared-stage-architecture.md): exact file-layer
   synchronization and its protocol.
+- [Native client core](../native/client_core/README.md): C++ targets, the
+  sans-IO endpoints, and the reference driver.
 - [MCP integration layout](../integrations/mcp/README.md#layout): extension
   points and module ownership.
 - [Unreal plugin developer notes](../integrations/unreal/OpenUSDConnect/PLUGIN_DEV.md):

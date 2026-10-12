@@ -12,12 +12,7 @@ from dataclasses import dataclass
 from pxr import Sdf, Usd
 
 from ._client_base import EmitterClientBase
-from ._client_lifecycle import (
-    DEFAULT_WAIT_TIMEOUT_S,
-    BacklogHold,
-    deadline_after,
-    remaining_time,
-)
+from ._client_lifecycle import DEFAULT_WAIT_TIMEOUT_S, deadline_after, remaining_time
 from ._client_utils import client_origin, require_app_name, validate_layered_source
 from .adapters import UsdStageAdapter
 from .client_id import make_stable_client_id
@@ -26,7 +21,7 @@ from .client_types import SyncUpdate
 from .defaults import DEFAULT_HOST, DEFAULT_SYNC_PORT
 from .dispatcher import AssetDependencyRefreshResult, EventDispatcher
 from .emitter import PrimChannel
-from .receiver import ReceiverThread
+from .receiver import EventReceiver
 from .recovery import RecoveryArtifact, RecoveryError
 from .sender import EventSender
 
@@ -65,7 +60,6 @@ class ManagedClient(EmitterClientBase):
         replicated_api_schemas: set[str] | None = None,
         extra_channels: Sequence[PrimChannel] | None = None,
         transform_coalesce_seconds: float = 0.0,
-        background_send: bool = False,
     ):
         app_name = require_app_name(app_name)
         if not isinstance(stage, Usd.Stage):
@@ -78,7 +72,7 @@ class ManagedClient(EmitterClientBase):
         self._app_name = app_name
         self._authoring_layer: Sdf.Layer | None = None
         self._last_recovery_result: ManagedRecoveryResult | None = None
-        self._backlog = BacklogHold()
+        self._backlog_marker = 0
         self._init_emitter(
             stage,
             attr_filter=attr_filter,
@@ -92,20 +86,19 @@ class ManagedClient(EmitterClientBase):
         }
         credential = self._credential.endpoint_kwargs()
         self._sender = EventSender(
-            host, port, department=department, background_send=background_send,
+            host, port, department=department, notifications=self._notifications,
             **identity, **credential,
         )
-        self._receiver = ReceiverThread(
+        self._receiver = EventReceiver(
             host=host, port=port, sync_from=1, reconnect=reconnect, layered_replay=True,
-            **identity, **credential, **self._hooks.receiver_callbacks(),
+            notifications=self._notifications, **identity, **credential,
         )
         self._dispatcher = EventDispatcher(
             receiver=self._receiver,
             adapter=UsdStageAdapter(stage),
             emitter=self._emitter,
-            on_resync=self._hooks.on_resync,
         )
-        self._dispatcher.on_applied_events = self._hooks.applied_events_for(self._dispatcher)
+        self._observe_dispatcher(self._dispatcher)
         # Modify the stage last so a failed construction leaves it untouched.
         with self._emitter.suppressed():
             self._authoring_layer = self._create_authoring_layer(stage, app_name)
@@ -121,8 +114,8 @@ class ManagedClient(EmitterClientBase):
         return self._authoring_layer
 
     @property
-    def receiver(self) -> ReceiverThread:
-        """The underlying :class:`ReceiverThread`; a diagnostic handle."""
+    def receiver(self) -> EventReceiver:
+        """The underlying :class:`EventReceiver`; a diagnostic handle."""
         return self._receiver
 
     @property
@@ -165,18 +158,19 @@ class ManagedClient(EmitterClientBase):
         had_batch = bool(self._emitter.prepared_event_count)
         outgoing = self._prepare_outgoing_events()
         if not had_batch and self._emitter.prepared_event_count:
-            self._backlog.freeze(self._receiver.queued_message_count)
+            self._backlog_marker = self._receiver.freeze_marker()
         received = self._apply_queued(max_messages)
         if self._closed:
             return self._progress(received)
-        self._backlog.drained(
-            self._dispatcher.drained_message_count, self._receiver.queued_message_count,
-        )
 
         sent = 0
         if self._receiver.connected and not self._sender.connected:
             self._sender.request_connect()
-        if self._sender.connected and self._is_synchronized() and not self._backlog.holding:
+        if (
+            self._sender.connected
+            and self._is_synchronized()
+            and self._receiver.drained_through(self._backlog_marker)
+        ):
             sent = self._send(outgoing)
         return self._progress(received, sent)
 
@@ -272,12 +266,8 @@ class ManagedClient(EmitterClientBase):
         self._resume_sender_after_recovery(remaining_time(deadline))
         return result
 
-    def _is_synchronized(self) -> bool:
-        return (
-            self._stage is not None
-            and self._receiver.synchronized
-            and not self._sender.recovery_required
-        )
+    def _synchronized(self, replayed: bool) -> bool:
+        return replayed and self._stage is not None and not self._sender.recovery_required
 
     def _is_parked(self) -> bool:
         return self._stage is None

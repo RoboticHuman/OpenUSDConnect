@@ -143,7 +143,8 @@ def run_author(args) -> int:
         print("\nstopping.")
         return 0
     finally:
-        sender.disconnect()
+        sender.flush(timeout=5.0)
+        sender.close()
 
 
 def main() -> int:

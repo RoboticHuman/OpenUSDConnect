@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from enum import StrEnum
 
-from .codec import TransactionRejectionCode
+from . import _client_backend
 
 
 class RecoveryError(RuntimeError):
@@ -30,16 +30,14 @@ class RecoveryKind(StrEnum):
     TRANSACTION_REJECTED = "transaction_rejected"
 
 
-_CODE_NAMES = {
-    TransactionRejectionCode.InvalidIdentity: "invalid_identity",
-    TransactionRejectionCode.UnexpectedId: "unexpected_id",
-    TransactionRejectionCode.StaleLayerGraph: "stale_layer_graph",
-    TransactionRejectionCode.InvalidTransaction: "invalid_transaction",
-}
-
-_CODE_DISPOSITIONS = {
-    TransactionRejectionCode.StaleLayerGraph: RejectionDisposition.RECOVERABLE_CONFLICT,
-    TransactionRejectionCode.InvalidTransaction: RejectionDisposition.INVALID_OPERATION,
+_DISPOSITIONS = {
+    _client_backend.ProducerRecoveryDisposition.SESSION_FATAL: RejectionDisposition.SESSION_FATAL,
+    _client_backend.ProducerRecoveryDisposition.RECOVERABLE_CONFLICT: (
+        RejectionDisposition.RECOVERABLE_CONFLICT
+    ),
+    _client_backend.ProducerRecoveryDisposition.INVALID_OPERATION: (
+        RejectionDisposition.INVALID_OPERATION
+    ),
 }
 
 
@@ -54,12 +52,11 @@ class TransactionFailure:
 
     @property
     def code_name(self) -> str:
-        return _CODE_NAMES.get(self.code, f"unknown_{self.code}")
+        return _client_backend.rejection_code_name(self.code) or f"unknown_{self.code}"
 
     @property
     def disposition(self) -> RejectionDisposition:
-        # Unknown rejection codes fail closed for forward compatibility.
-        return _CODE_DISPOSITIONS.get(self.code, RejectionDisposition.SESSION_FATAL)
+        return _DISPOSITIONS[_client_backend.rejection_disposition(self.code)]
 
     def __str__(self) -> str:
         expected = f", expected transaction {self.expected_txn_id}" if self.expected_txn_id else ""

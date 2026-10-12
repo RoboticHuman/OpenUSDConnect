@@ -1,43 +1,41 @@
 // Copyright OpenUSDConnect Contributors. All Rights Reserved.
 
 #include "TxnBuilder.h"
-#include "USDConnectProtocol.h"
-#include "USDWireFraming.h"
 
-using namespace OUC;
+using openusdconnect::client::ProtocolResult;
+
+static std::string_view ToStringView(const FTCHARToUTF8& Value)
+{
+	return {Value.Get(), static_cast<size_t>(Value.Length())};
+}
 
 // ---------------------------------------------------------------------------
 // Shared: Envelope{Txn{events}} wrapping
 // ---------------------------------------------------------------------------
 
-static openusdconnect::client::FrameResult
+static ProtocolResult
 FinishTxnFrame(flatbuffers::FlatBufferBuilder& Builder, uint64 TxnId,
 			   const TArray<flatbuffers::Offset<OpenUSDConnect::EventWrapper>>& Events,
-			   FWireFrame& OutFrame)
+			   std::vector<uint8>& OutFrame)
 {
-	const openusdconnect::client::ProtocolResult Result =
-		openusdconnect::client::FinishTransactionFrame(Builder, TxnId, Events.GetData(),
-													   static_cast<size_t>(Events.Num()));
-	if (Result != openusdconnect::client::ProtocolResult::Success)
+	const ProtocolResult Result = openusdconnect::client::FinishTransactionFrame(
+		Builder, TxnId, Events.GetData(), static_cast<size_t>(Events.Num()));
+	if (Result == ProtocolResult::Success)
 	{
-		OutFrame = FWireFrame();
-		return ToFrameResult(Result);
+		const uint8* Bytes = Builder.GetBufferPointer();
+		OutFrame.assign(Bytes, Bytes + Builder.GetSize());
 	}
-	OutFrame = FWireFrame(Builder.Release());
-	return openusdconnect::client::FrameResult::Success;
+	return Result;
 }
 
 // ---------------------------------------------------------------------------
 // Build Envelope { Txn { events: [EventWrapper{SetXformTrs}, ...] } }
 // ---------------------------------------------------------------------------
-openusdconnect::client::FrameResult BuildXformTxnFrame(uint64 TxnId,
-													   const TArray<FEmitXformTrs>& Xforms,
-													   FWireFrame& OutFrame,
-													   bool bIncludeEnsureXformOps)
+ProtocolResult BuildXformTxnFrame(uint64 TxnId, const TArray<FEmitXformTrs>& Xforms,
+								  std::vector<uint8>& OutFrame, bool bIncludeEnsureXformOps)
 {
-	OutFrame = FWireFrame();
 	if (Xforms.IsEmpty())
-		return openusdconnect::client::FrameResult::EmptyPayload;
+		return ProtocolResult::EmptyTransaction;
 
 	flatbuffers::FlatBufferBuilder Builder(512 +
 										   Xforms.Num() * (bIncludeEnsureXformOps ? 192 : 128));
@@ -52,11 +50,11 @@ openusdconnect::client::FrameResult BuildXformTxnFrame(uint64 TxnId,
 		if (bIncludeEnsureXformOps)
 		{
 			flatbuffers::Offset<OpenUSDConnect::EventWrapper> Ensure;
-			const openusdconnect::client::ProtocolResult Result =
+			const ProtocolResult Result =
 				openusdconnect::client::BuildEnsureXformOpsEvent(Builder, Prim, Ensure);
-			if (Result != openusdconnect::client::ProtocolResult::Success)
+			if (Result != ProtocolResult::Success)
 			{
-				return ToFrameResult(Result);
+				return Result;
 			}
 			Events.Add(Ensure);
 		}
@@ -64,11 +62,11 @@ openusdconnect::client::FrameResult BuildXformTxnFrame(uint64 TxnId,
 		const openusdconnect::client::XformTrsEventView View{ToStringView(PrimUtf8), X.T, X.R, X.S,
 															 X.Fields};
 		flatbuffers::Offset<OpenUSDConnect::EventWrapper> Event;
-		const openusdconnect::client::ProtocolResult Result =
+		const ProtocolResult Result =
 			openusdconnect::client::BuildXformTrsEvent(Builder, View, Prim, Event);
-		if (Result != openusdconnect::client::ProtocolResult::Success)
+		if (Result != ProtocolResult::Success)
 		{
-			return ToFrameResult(Result);
+			return Result;
 		}
 		Events.Add(Event);
 	}
@@ -79,13 +77,11 @@ openusdconnect::client::FrameResult BuildXformTxnFrame(uint64 TxnId,
 // ---------------------------------------------------------------------------
 // Build Envelope { Txn { events: [EventWrapper{SetVisibility}, ...] } }
 // ---------------------------------------------------------------------------
-openusdconnect::client::FrameResult
-BuildVisibilityTxnFrame(uint64 TxnId, const TArray<FEmitVisibility>& Visibilities,
-						FWireFrame& OutFrame)
+ProtocolResult BuildVisibilityTxnFrame(uint64 TxnId, const TArray<FEmitVisibility>& Visibilities,
+									   std::vector<uint8>& OutFrame)
 {
-	OutFrame = FWireFrame();
 	if (Visibilities.IsEmpty())
-		return openusdconnect::client::FrameResult::EmptyPayload;
+		return ProtocolResult::EmptyTransaction;
 
 	flatbuffers::FlatBufferBuilder Builder(256 + Visibilities.Num() * 64);
 
@@ -97,11 +93,11 @@ BuildVisibilityTxnFrame(uint64 TxnId, const TArray<FEmitVisibility>& Visibilitie
 		const FTCHARToUTF8 PrimUtf8(*V.PrimPath);
 		const openusdconnect::client::VisibilityEventView View{ToStringView(PrimUtf8), V.bVisible};
 		flatbuffers::Offset<OpenUSDConnect::EventWrapper> Event;
-		const openusdconnect::client::ProtocolResult Result =
+		const ProtocolResult Result =
 			openusdconnect::client::BuildVisibilityEvent(Builder, View, Event);
-		if (Result != openusdconnect::client::ProtocolResult::Success)
+		if (Result != ProtocolResult::Success)
 		{
-			return ToFrameResult(Result);
+			return Result;
 		}
 		Events.Add(Event);
 	}
@@ -112,13 +108,12 @@ BuildVisibilityTxnFrame(uint64 TxnId, const TArray<FEmitVisibility>& Visibilitie
 // ---------------------------------------------------------------------------
 // Build Envelope { Txn { events: [EventWrapper{SetConnectableInput}, ...] } }
 // ---------------------------------------------------------------------------
-openusdconnect::client::FrameResult
-BuildConnectableInputTxnFrame(uint64 TxnId, const TArray<FEmitConnectableInput>& InEvents,
-							  FWireFrame& OutFrame)
+ProtocolResult BuildConnectableInputTxnFrame(uint64 TxnId,
+											 const TArray<FEmitConnectableInput>& InEvents,
+											 std::vector<uint8>& OutFrame)
 {
-	OutFrame = FWireFrame();
 	if (InEvents.IsEmpty())
-		return openusdconnect::client::FrameResult::EmptyPayload;
+		return ProtocolResult::EmptyTransaction;
 
 	flatbuffers::FlatBufferBuilder Builder(512 + InEvents.Num() * 256);
 
@@ -147,11 +142,11 @@ BuildConnectableInputTxnFrame(uint64 TxnId, const TArray<FEmitConnectableInput>&
 				static_cast<size_t>(In.Floats.Num()),
 			};
 			flatbuffers::Offset<OpenUSDConnect::ConnectableInputValue> Input;
-			const openusdconnect::client::ProtocolResult Result =
+			const ProtocolResult Result =
 				openusdconnect::client::BuildConnectableInputValue(Builder, View, Input);
-			if (Result != openusdconnect::client::ProtocolResult::Success)
+			if (Result != ProtocolResult::Success)
 			{
-				return ToFrameResult(Result);
+				return Result;
 			}
 			Inputs.Add(Input);
 		}
@@ -159,13 +154,12 @@ BuildConnectableInputTxnFrame(uint64 TxnId, const TArray<FEmitConnectableInput>&
 		const FTCHARToUTF8 PrimUtf8(*Ev.PrimPath);
 		const FTCHARToUTF8 InfoIdUtf8(*Ev.InfoId);
 		flatbuffers::Offset<OpenUSDConnect::EventWrapper> Event;
-		const openusdconnect::client::ProtocolResult Result =
-			openusdconnect::client::BuildConnectableInputEvent(
-				Builder, ToStringView(PrimUtf8), ToStringView(InfoIdUtf8), Inputs.GetData(),
-				static_cast<size_t>(Inputs.Num()), Event);
-		if (Result != openusdconnect::client::ProtocolResult::Success)
+		const ProtocolResult Result = openusdconnect::client::BuildConnectableInputEvent(
+			Builder, ToStringView(PrimUtf8), ToStringView(InfoIdUtf8), Inputs.GetData(),
+			static_cast<size_t>(Inputs.Num()), Event);
+		if (Result != ProtocolResult::Success)
 		{
-			return ToFrameResult(Result);
+			return Result;
 		}
 		Events.Add(Event);
 	}

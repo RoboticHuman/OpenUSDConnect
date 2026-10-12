@@ -55,7 +55,7 @@ public:
 	UPROPERTY(config, EditAnywhere, Category="Authentication", meta=(DisplayName="Persist Auth Tokens"))
 	bool bPersistAuthTokens = true;
 
-	/** Seconds between reconnection attempts after a disconnect */
+	/** Seconds before the first reconnection attempt; later attempts back off exponentially */
 	UPROPERTY(config, EditAnywhere, Category="Connection", meta=(DisplayName="Reconnect Delay (s)", ClampMin=1, ClampMax=60))
 	float ReconnectDelaySecs = 3.0f;
 

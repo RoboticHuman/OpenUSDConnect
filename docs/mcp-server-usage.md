@@ -5,7 +5,7 @@ operations as local stdio tools. A client can author USD transactions and
 inspect the composed result through an in-memory mirror.
 
 The MCP process is a network client built on the core library (`EventSender` +
-`ReceiverThread` + `EventDispatcher` + `UsdStageAdapter`), the same shape as the
+`EventReceiver` + `EventDispatcher` + `UsdStageAdapter`), the same shape as the
 `usdview` integration. Every scene event it sends uses the core protocol. Its
 USD mirror also negotiates the optional layered-replay capability so authored
 logical-layer opinions retain their server strength ordering during live sync
@@ -229,7 +229,7 @@ Verify any network with
 ## Implementation notes
 
 - **Emit + mirror.** The MCP emits via `EventSender` and keeps a read-only
-  `Usd.Stage` mirror through `ReceiverThread`, replaying from sequence 1. The
+  `Usd.Stage` mirror through `EventReceiver`, replaying from sequence 1. The
   server broadcasts committed records to every receiver, including the
   producer's receiver, so the mirror contains the authoritative result of both
   local and remote edits. The emitter and receiver use distinct diagnostic

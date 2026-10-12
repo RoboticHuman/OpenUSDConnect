@@ -1,6 +1,6 @@
 """Blender receiver applies incoming network events to Blender objects.
 
-Uses ReceiverThread from openusdconnect.receiver and drains the queue
+Uses EventReceiver from openusdconnect.receiver and drains the queue
 on the main thread via bpy.app.timers.
 """
 
@@ -28,14 +28,14 @@ from openusdconnect.protocol_constants import (
     K_SET_GPRIM_ATTRS,
     K_SET_XFORM_TRS,
 )
-from openusdconnect.receiver import ReceiverThread
+from openusdconnect.receiver import EventReceiver
 
 from . import SESSION_ORIGIN as _ORIGIN
 from .blender_adapter import BlenderAdapter, apply_stage_metadata_to_scene
 
 LOG = logging.getLogger(__name__)
 
-_RECEIVER: ReceiverThread | None = None
+_RECEIVER: EventReceiver | None = None
 _DISPATCHER: EventDispatcher | None = None
 _ADAPTER: BlenderAdapter | None = None
 _MIRROR_STAGE = None
@@ -231,15 +231,6 @@ def _set_remote_apply_guard(value: bool):
         capture_module.set_emitter_feedback_guard(value)
 
 
-def _stop_receiver_thread(receiver: ReceiverThread) -> None:
-    """Stop a receiver and tolerate joining a thread that never started."""
-    receiver.stop()
-    try:
-        receiver.join(timeout=2.0)
-    except RuntimeError:
-        LOG.debug("Receiver thread could not be joined", exc_info=True)
-
-
 def _store_last_sequence(scene, value: int) -> None:
     """Persist replay progress when the Blender scene is still writable."""
     try:
@@ -310,7 +301,7 @@ def _refresh_shader_reverse_sync_state(author, adapter, prim_path: str):
             )
 
 
-# Latest-wins PlaybackState handoff: written by the receiver thread,
+# Latest-wins PlaybackState handoff: written by the receiver's connection thread,
 # read-and-cleared by Blender's main-thread timer. The lock keeps the
 # read-then-clear pair atomic so an update arriving in between can't be
 # silently wiped under the GIL this is rare in practice, under
@@ -325,7 +316,7 @@ def _on_playback_state(state: dict) -> None:
     """Receive an authoritative PlaybackState broadcast.
 
     Stashes the payload for the next timer tick to apply on the Blender
-    main thread (callbacks run on the receiver thread).
+    main thread (callbacks run on the receiver's connection thread).
     """
     global _LATEST_PLAYBACK_STATE
     snapshot = dict(state)
@@ -492,7 +483,7 @@ def _on_resync() -> None:
         _DISPATCHER.adapter.mirror_stage = mirror_stage
 
 
-def _build_dispatcher(receiver: ReceiverThread) -> EventDispatcher:
+def _build_dispatcher(receiver: EventReceiver) -> EventDispatcher:
     """Construct a dispatcher over the receiver-owned layered USD mirror."""
     mirror_stage = _ensure_mirror_stage()
     adapter = _ensure_adapter()
@@ -540,7 +531,7 @@ def _apply_received_events_timer():
         LOG.error("OpenUSDConnect receiver rejected: %s", reason)
         receiver = _RECEIVER
         _RECEIVER = None
-        _stop_receiver_thread(receiver)
+        receiver.close(timeout=2.0)
         _RECEIVER_TIMER_REGISTERED = False
         scene = bpy.context.scene
         if scene is not None:
@@ -675,7 +666,7 @@ class USD_CONNECT_OT_start_receiver(bpy.types.Operator):
         try:
             from . import STABLE_CLIENT_ID
 
-            _RECEIVER = ReceiverThread(
+            _RECEIVER = EventReceiver(
                 host=host,
                 port=port,
                 sync_from=plan.sync_from,
@@ -711,7 +702,7 @@ class USD_CONNECT_OT_start_receiver(bpy.types.Operator):
             if _RECEIVER is not None and getattr(_RECEIVER, "auth_rejected", False):
                 token_client.delete_token(host, port)
             if _RECEIVER is not None:
-                _stop_receiver_thread(_RECEIVER)
+                _RECEIVER.close(timeout=2.0)
                 _RECEIVER = None
             _set_remote_apply_guard(False)
             _unregister_receiver_timer()
@@ -730,7 +721,7 @@ class USD_CONNECT_OT_stop_receiver(bpy.types.Operator):
         if _RECEIVER is not None:
             receiver = _RECEIVER
             _RECEIVER = None
-            _stop_receiver_thread(receiver)
+            receiver.close(timeout=2.0)
             _store_last_sequence(context.scene, _LAST_SEQ)
         _unregister_receiver_timer()
         _set_remote_apply_guard(False)
@@ -899,7 +890,7 @@ def unregister():
     if _RECEIVER is not None:
         receiver = _RECEIVER
         _RECEIVER = None
-        _stop_receiver_thread(receiver)
+        receiver.close(timeout=2.0)
     _discard_replay_state()
     _unregister_receiver_timer()
     if BPY_AVAILABLE:

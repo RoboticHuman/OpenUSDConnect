@@ -1,6 +1,6 @@
 """E2E: the MCP session authors over real TCP; mirror + other clients reflect it.
 
-Exercises the full networked path (EventSender -> server -> ReceiverThread ->
+Exercises the full networked path (EventSender -> server -> EventReceiver ->
 UsdStageAdapter mirror), the read-after-write drain, ancestor auto-create, and
 fan-out to an independent client. Headless, no DCC.
 """
@@ -20,7 +20,7 @@ from integrations.mcp.validation import validate_and_prepare
 from openusdconnect.adapters import UsdStageAdapter
 from openusdconnect.checkpoints import MirrorCheckpoint
 from openusdconnect.dispatcher import EventDispatcher
-from openusdconnect.receiver import ReceiverThread
+from openusdconnect.receiver import EventReceiver
 from openusdconnect.sender import EventSender
 from tests.helpers import ensure_prim_event, in_process_server, start_server, stop_server
 
@@ -148,15 +148,15 @@ def test_reconnect_and_disconnect_join_mirror_threads(server):
     session = _connect(server)
     first = session.receiver.receiver
     try:
-        assert first.is_alive()
+        assert first.running
         session.sender.disconnect()
         session.connect()
         second = session.receiver.receiver
         assert second is not first
-        assert not first.is_alive()
-        assert second.is_alive()
+        assert not first.running
+        assert second.running
         session.disconnect()
-        assert not second.is_alive()
+        assert not second.running
         session.disconnect()
     finally:
         session.disconnect()
@@ -167,7 +167,7 @@ def test_mesh_roundtrip_and_fanout(server):
     other = None
     try:
         other_stage = Usd.Stage.CreateInMemory()
-        other = ReceiverThread(
+        other = EventReceiver(
             host="127.0.0.1", port=server, sync_from=1, client_id="other", origin="other-recv"
         )
         other.start()
@@ -204,7 +204,7 @@ def test_mesh_roundtrip_and_fanout(server):
         assert UsdGeom.Mesh(om).GetPointsAttr().Get() is not None
     finally:
         if other is not None:
-            other.stop()
+            other.close()
         session.disconnect()
 
 

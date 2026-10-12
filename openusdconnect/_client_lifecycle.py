@@ -3,22 +3,32 @@
 from __future__ import annotations
 
 import logging
-import queue
-import threading
 import time
-from collections.abc import Callable
 from typing import TYPE_CHECKING
 
+from . import _client_backend
 from .client_types import ClientPhase, ClientStatus
 from .sender import TransactionRejectedError
 
 if TYPE_CHECKING:
-    from .receiver import ReceiverThread
+    from .receiver import EventReceiver
+    from .sender import EventSender
 
 LOG = logging.getLogger(__name__)
 
 DEFAULT_WAIT_TIMEOUT_S = 10.0
 _POLL_INTERVAL_S = 0.01
+
+_PHASES = {
+    _client_backend.ClientPhase.OFFLINE: ClientPhase.OFFLINE,
+    _client_backend.ClientPhase.CONNECTING: ClientPhase.CONNECTING,
+    _client_backend.ClientPhase.REPLAYING: ClientPhase.REPLAYING,
+    _client_backend.ClientPhase.READY: ClientPhase.READY,
+    _client_backend.ClientPhase.RECOVERY_REQUIRED: ClientPhase.RECOVERY_REQUIRED,
+    _client_backend.ClientPhase.REJECTED: ClientPhase.REJECTED,
+    _client_backend.ClientPhase.CLOSED: ClientPhase.CLOSED,
+    _client_backend.ClientPhase.PARKED: ClientPhase.PARKED,
+}
 
 
 def deadline_after(timeout: float | None) -> float | None:
@@ -48,21 +58,17 @@ def compute_phase(
     connecting: bool,
 ) -> ClientPhase:
     """The one precedence order every client uses for ``ClientStatus.phase``."""
-    if closed:
-        return ClientPhase.CLOSED
-    if recovery_required:
-        return ClientPhase.RECOVERY_REQUIRED
-    if rejected:
-        return ClientPhase.REJECTED
-    if parked:
-        return ClientPhase.PARKED
-    if replaying:
-        return ClientPhase.REPLAYING
-    if ready:
-        return ClientPhase.READY
-    if connecting:
-        return ClientPhase.CONNECTING
-    return ClientPhase.OFFLINE
+    return _PHASES[
+        _client_backend.compute_phase(
+            closed=closed,
+            recovery_required=recovery_required,
+            rejected=rejected,
+            parked=parked,
+            replaying=replaying,
+            ready=ready,
+            connecting=connecting,
+        )
+    ]
 
 
 def raise_if_blocked(client, status: ClientStatus) -> None:
@@ -115,82 +121,6 @@ def submit_and_wait(client, timeout: float | None) -> bool:
             return False
 
 
-class BacklogHold:
-    """Hold a local batch until the messages queued before it have been drained.
-
-    Counting those messages, rather than checking whether a drain used its
-    whole budget, keeps sustained inbound traffic from holding edits forever.
-    """
-
-    __slots__ = ("_ahead",)
-
-    def __init__(self):
-        self._ahead = 0
-
-    @property
-    def holding(self) -> bool:
-        return self._ahead > 0
-
-    def freeze(self, queued: int) -> None:
-        """Record the queue depth when a new local batch is frozen."""
-        self._ahead = queued
-
-    def drained(self, count: int, queued: int) -> None:
-        # The messages ahead of the batch are at the front of the queue, so a
-        # replay request that discards the queue also bounds them.
-        self._ahead = min(max(0, self._ahead - count), queued)
-
-
-class ClientCallbackQueue:
-    """Deliver notifications raised on network threads during update() or close()."""
-
-    def __init__(self):
-        self._queue = queue.SimpleQueue()
-        self._lock = threading.Lock()
-        self._closed = False
-
-    def wrap(self, callback: Callable) -> Callable:
-        def enqueue(value):
-            with self._lock:
-                if not self._closed:
-                    self._queue.put((callback, value))
-
-        return enqueue
-
-    def drain(self) -> None:
-        # Only notifications queued before this tick, so a busy receiver cannot
-        # starve update().
-        for _ in range(self._queue.qsize()):
-            try:
-                callback, value = self._queue.get_nowait()
-            except queue.Empty:
-                break
-            callback(value)
-
-    def close(self) -> None:
-        """Refuse new notifications and deliver the queued ones.
-
-        Every queued notification runs even if one raises; the first error is
-        re-raised after the rest have been delivered.
-        """
-        with self._lock:
-            self._closed = True
-        error = None
-        while True:
-            try:
-                callback, value = self._queue.get_nowait()
-            except queue.Empty:
-                break
-            try:
-                callback(value)
-            except Exception as exc:
-                if error is not None:
-                    LOG.exception("Observer notification failed while closing")
-                error = error or exc
-        if error is not None:
-            raise error
-
-
 def raise_if_rejected(endpoint, role: str) -> None:
     if endpoint.auth_rejected:
         raise PermissionError(f"{role} authentication rejected")
@@ -198,9 +128,6 @@ def raise_if_rejected(endpoint, role: str) -> None:
         raise ConnectionError(endpoint.rejection_reason or f"{role} connection rejected")
 
 
-def stop_receiver(receiver: ReceiverThread) -> None:
-    receiver.stop()
-    if receiver.is_alive() and receiver is not threading.current_thread():
-        receiver.join(timeout=2.0)
-        if receiver.is_alive():
-            LOG.warning("Receiver thread did not stop within 2 seconds")
+def close_endpoint(endpoint: EventReceiver | EventSender) -> None:
+    if not endpoint.close(timeout=2.0):
+        LOG.warning("%s did not stop within 2 seconds", type(endpoint).__name__)

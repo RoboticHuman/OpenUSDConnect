@@ -17,7 +17,7 @@ from openusdconnect.protocol_constants import (
     MSG_TRANSACTION_RESULT,
     PROTOCOL_VERSION,
 )
-from openusdconnect.receiver import ReceiverThread
+from openusdconnect.receiver import EventReceiver
 from openusdconnect.sender import EventSender
 from openusdconnect.server import UsdSyncServer
 from openusdconnect.server.connection import ConnectionHandler, ThreadedTCPServer
@@ -439,7 +439,7 @@ def test_live_receiver_observes_grouped_records_in_sequence_order(transaction_se
         return append_batch(records, producer_progress=producer_progress)
 
     state.store.append_batch = observe_group
-    receiver = ReceiverThread(
+    receiver = EventReceiver(
         host="127.0.0.1",
         port=port,
         reconnect=False,
@@ -493,8 +493,7 @@ def test_live_receiver_observes_grouped_records_in_sequence_order(transaction_se
         assert sequences == list(range(1, len(senders) + 1))
         assert group_sizes == [len(senders)]
     finally:
-        receiver.stop()
-        receiver.join(timeout=5)
+        receiver.close(timeout=5)
         for sender in senders:
             sender.disconnect()
 
@@ -536,7 +535,7 @@ def test_single_commits_publish_in_durable_sequence_order(
     monkeypatch.setattr(
         state, "broadcast_transaction_group_views", observe_group_publication
     )
-    receiver = ReceiverThread(
+    receiver = EventReceiver(
         host="127.0.0.1",
         port=port,
         reconnect=False,
@@ -575,8 +574,7 @@ def test_single_commits_publish_in_durable_sequence_order(
         assert [record["seq"] for record in records] == [1, 2]
     finally:
         second_published.set()
-        receiver.stop()
-        receiver.join(timeout=5)
+        receiver.close(timeout=5)
         first.disconnect()
         second.disconnect()
 

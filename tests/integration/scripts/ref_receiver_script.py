@@ -36,7 +36,7 @@ from openusdconnect.codec import message_to_dict
 from openusdconnect.protocol_constants import (
     MSG_EVENT,
 )
-from openusdconnect.receiver import ReceiverThread
+from openusdconnect.receiver import EventReceiver
 
 
 def _process_event(adapter, ev):
@@ -74,7 +74,7 @@ def main():
         print(f"[RefReceiver] Asset root: {asset_root}")
 
     print(f"[RefReceiver] Connecting to 127.0.0.1:{port}")
-    receiver = ReceiverThread(host="127.0.0.1", port=port, sync_from=1)
+    receiver = EventReceiver(host="127.0.0.1", port=port, sync_from=1)
     receiver.start()
 
     # Wait for events to arrive via replay
@@ -94,11 +94,7 @@ def main():
         print(f"[RefReceiver] Processing: {k} {prim_path}")
         _process_event(adapter, ev)
 
-    receiver.stop()
-    try:
-        receiver.join(timeout=2.0)
-    except Exception:
-        pass
+    receiver.close(timeout=2.0)
 
     # ------------------------------------------------------------------
     # Inspect scene

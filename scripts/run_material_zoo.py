@@ -477,8 +477,10 @@ def _publish(port: int, fixture_events: list[dict], presentation_events: list[di
             raise RuntimeError("Material Zoo fixture transaction failed")
         if presentation_events and not sender.send_events(presentation_events):
             raise RuntimeError("Material Zoo presentation transaction failed")
+        if not sender.flush(timeout=10):
+            raise RuntimeError("Material Zoo transactions were not acknowledged within 10 seconds")
     finally:
-        sender.disconnect()
+        sender.close()
 
 
 def _raise_if_viewer_failed(processes: list[subprocess.Popen]) -> None:

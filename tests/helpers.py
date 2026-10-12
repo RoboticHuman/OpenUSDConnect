@@ -6,11 +6,9 @@ import subprocess
 import sys
 import threading
 import time
-from collections import deque
 from contextlib import contextmanager
 
 from openusdconnect.client_observer import ClientObserver
-from openusdconnect.codec import encode_message
 from openusdconnect.protocol_constants import (
     K_SET_REFERENCE,
     K_SET_XFORM_TRS,
@@ -150,28 +148,85 @@ def ensure_prim_event(path):
 
 
 @contextmanager
-def in_process_server():
-    """Run an isolated TCP server on an ephemeral port."""
+def serving(state, port=0):
+    """Serve *state* on a loopback port; leaving closes the listener and its connections."""
     from openusdconnect.server.connection import ConnectionHandler, ThreadedTCPServer
-    from openusdconnect.server.state import UsdSyncServer
 
-    state = UsdSyncServer(log_path=":memory:", txn_batch_size=1)
-    tcp = ThreadedTCPServer(("127.0.0.1", 0), ConnectionHandler, state, max_workers=8)
-    thread = threading.Thread(target=tcp.serve_forever, daemon=True)
+    tcp = ThreadedTCPServer(("127.0.0.1", port), ConnectionHandler, state, max_workers=8)
+    # Shutdown waits for the next poll.
+    thread = threading.Thread(target=tcp.serve_forever, args=(0.05,), daemon=True)
     thread.start()
     try:
-        yield state, tcp.server_address[1]
+        yield tcp.server_address[1]
     finally:
         tcp.shutdown()
         tcp.server_close()
         thread.join(5)
-        state.shutdown()
-        state.store.close()
         assert not thread.is_alive()
 
 
-def wait_until(predicate):
-    deadline = time.monotonic() + 5
+@contextmanager
+def server_state():
+    """An isolated server state with an in-memory event log."""
+    from openusdconnect.server.state import UsdSyncServer
+
+    state = UsdSyncServer(log_path=":memory:", txn_batch_size=1)
+    try:
+        yield state
+    finally:
+        state.shutdown()
+        state.store.close()
+
+
+@contextmanager
+def in_process_server():
+    """Run an isolated TCP server on an ephemeral port."""
+    with server_state() as state, serving(state) as port:
+        yield state, port
+
+
+def recorded_hellos(monkeypatch):
+    """Record every hello the in-process server decodes, in arrival order."""
+    from openusdconnect.server import connection
+
+    hellos = []
+    decode = connection.decode_hello
+
+    def record(table):
+        hellos.append(decode(table))
+        return hellos[-1]
+
+    monkeypatch.setattr(connection, "decode_hello", record)
+    return hellos
+
+
+@contextmanager
+def embedded_server(**config):
+    """Run a ``ServerRuntime`` on an ephemeral loopback port with an in-memory event log."""
+    from openusdconnect.server import ServerConfig, ServerRuntime
+
+    runtime = ServerRuntime(
+        ServerConfig(
+            host="127.0.0.1", port=0, log_path=":memory:", preflight_plugins=False, **config
+        )
+    )
+    try:
+        with runtime:
+            yield runtime
+    finally:
+        if runtime.sync_server is not None and runtime.sync_server.token_store is not None:
+            runtime.sync_server.token_store.close()
+
+
+def client_registered(runtime, client_id):
+    """Whether the server of *runtime* holds a connection from *client_id*."""
+    state = runtime.sync_server
+    with state.clients_lock:
+        return any(info.client_id == client_id for info in state.clients.values())
+
+
+def wait_until(predicate, timeout=5.0):
+    deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
         if predicate():
             return
@@ -179,76 +234,42 @@ def wait_until(predicate):
     assert predicate()
 
 
-@contextmanager
-def receiver_connection(receiver):
-    """Run one connection attempt and close its socket before returning."""
-    thread = threading.Thread(target=receiver._connect_and_recv, daemon=True)
-    thread.start()
-    try:
-        wait_until(lambda: receiver.connected)
-        yield
-    finally:
-        receiver._close_socket()
-        thread.join(5)
-        assert not thread.is_alive()
-        receiver.connected = False
+def connect_client(client, *, synchronized=True):
+    """Start a high-level client and complete its receiver's handshake with the server.
 
-
-def mcp_session_with_receiver(port):
-    """Build an MCP mirror whose connection timing is controlled by the test."""
-    from pxr import Usd
-
-    from integrations.mcp.config import McpConfig
-    from integrations.mcp.session import ConnectionSession
-    from openusdconnect.usd_client import UsdReceiver
-
-    session = ConnectionSession(McpConfig(read_after_write_timeout_s=1))
-    session.mirror_stage = Usd.Stage.CreateInMemory()
-    session.receiver = UsdReceiver(
-        session.mirror_stage,
-        app_name="replay-identity-test",
-        host="127.0.0.1",
-        port=port,
-        persist_token=False,
-    )
-    # These tests drive one connection attempt directly to control reconnect timing.
-    session.receiver._started = True
-    return session
+    ``synchronized`` also applies the server's replay the way ``update()`` does,
+    without publishing local edits.
+    """
+    client.start()
+    receiver = client._receiver
+    assert receiver.wait_connected(5), receiver.connection_error
+    if synchronized:
+        apply = client.update if client._sender is None else client._apply_queued
+        wait_until(lambda: apply() is not None and receiver.synchronized)
 
 
 class PeerTraffic:
-    """Replaces a receiver's queue with ping messages that peers keep sending."""
+    """Records a peer producer commits, each queued by *receiver* when ``arrive`` returns."""
 
-    def __init__(self, receiver, monkeypatch, *, queued=0):
-        self._ping = encode_message({"type": "ping"})
-        self._frames = deque()
-        self.arrive(queued)
-        monkeypatch.setattr(receiver, "drain_queue", self._drain)
-        monkeypatch.setattr(
-            type(receiver), "queued_message_count",
-            property(lambda _receiver: len(self._frames)),
-        )
+    def __init__(self, state, receiver, make_event, *, layer_key=""):
+        self._state = state
+        self._receiver = receiver
+        self._make_event = make_event
+        self._layer_key = layer_key
+        self._txn_id = 0
 
     def arrive(self, count):
-        self._frames.extend([self._ping] * count)
-
-    def _drain(self, max_messages=None):
-        count = len(self._frames) if max_messages is None else min(max_messages, len(self._frames))
-        return deque(self._frames.popleft() for _ in range(count))
-
-
-def force_handshake(client, *, synchronized=False):
-    """Mark a high-level client started with a completed receiver handshake."""
-    client._started = True
-    receiver = getattr(client, "_receiver", None)
-    if receiver is not None:
-        receiver.connected = True
-        receiver.layered_replay_active = receiver.layered_replay
-        if synchronized:
-            receiver._synchronized_event.set()
-    graph = getattr(client, "_graph", None)
-    if graph is not None:
-        graph._ready = True
+        queued = self._receiver.queued_message_count + count
+        for _ in range(count):
+            self._txn_id += 1
+            self._state.process_idempotent_txn(
+                [self._make_event(f"/Peer{self._txn_id}")],
+                session_id="peer",
+                txn_id=self._txn_id,
+                client_id="peer",
+                layer_key=self._layer_key,
+            )
+        wait_until(lambda: self._receiver.queued_message_count == queued)
 
 
 class RecordingObserver(ClientObserver):

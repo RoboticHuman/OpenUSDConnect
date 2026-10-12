@@ -11,10 +11,15 @@ from openusdconnect import (
     PlaybackState,
     UsdReceiver,
 )
-from openusdconnect._observer_hooks import ObserverHooks, observer_hooks
 from openusdconnect.codec import encode_message
-from openusdconnect.protocol_constants import K_ENSURE_PRIM, K_SET_REFERENCE, K_SET_VISIBILITY
-from tests.helpers import RecordingObserver
+from openusdconnect.protocol_constants import (
+    K_ENSURE_PRIM,
+    K_SET_REFERENCE,
+    K_SET_VISIBILITY,
+    MSG_PLAYBACK_CLAIMED,
+    MSG_PLAYBACK_REJECTED,
+)
+from tests.helpers import RecordingObserver, embedded_server, wait_until
 
 
 def test_applied_batch_derives_sorted_unique_paths_once():
@@ -35,11 +40,18 @@ def test_only_overridden_methods_are_wired():
         def on_applied(self, batch):
             pass
 
-    assert observer_hooks(None, lambda cb: cb) == ObserverHooks()
-    assert observer_hooks(ClientObserver(), lambda cb: cb) == ObserverHooks()
-    hooks = observer_hooks(Paths(), lambda cb: cb)
-    assert hooks.on_applied is not None
-    assert set(hooks.receiver_callbacks().values()) == {None}
+    def wiring(observer):
+        client = UsdReceiver(
+            Usd.Stage.CreateInMemory(), app_name="observer-wiring", persist_token=False,
+            observer=observer,
+        )
+        dispatcher = client.dispatcher
+        client.close()
+        wired = client._notification_methods
+        return dispatcher.on_applied_events is not None, dispatcher.on_resync, wired
+
+    assert wiring(None) == wiring(ClientObserver()) == (False, None, {})
+    assert wiring(Paths()) == (True, None, {})
 
 
 def _event_frames(*paths):
@@ -116,17 +128,29 @@ def test_stage_edits_made_in_on_resync_are_not_published(monkeypatch):
 
 def test_notification_payloads_are_typed():
     observer = RecordingObserver()
-    callbacks = observer_hooks(observer, lambda callback: callback).receiver_callbacks()
-    callbacks["on_playback_state"](
-        {"type": "playback_state", "playing": True, "time": 2.0, "rate": 1.0,
-         "leader_client_id": "a"}
-    )
-    callbacks["on_playback_claimed"]({"type": "playback_claimed", "leader_client_id": "a"})
-    callbacks["on_playback_rejected"](
-        {"type": "playback_rejected", "reason": "busy", "current_leader_client_id": "b"}
-    )
-    assert [value for _name, value, _thread in observer.calls] == [
-        PlaybackState(True, 2.0, 1.0, "a"),
+
+    def playback():
+        return [value for name, value, _thread in observer.calls if name.startswith("playback")]
+
+    with embedded_server() as server:
+        state = server.sync_server
+        client = UsdReceiver(
+            Usd.Stage.CreateInMemory(), app_name="typed-notifications",
+            port=server.server_address[1], persist_token=False, observer=observer,
+        )
+        try:
+            client.start()
+            # The server sends its playback state after every accepted hello.
+            wait_until(lambda: client.update() is not None and playback())
+            state.broadcast_message({"type": MSG_PLAYBACK_CLAIMED, "leader_client_id": "a"})
+            state.broadcast_message({
+                "type": MSG_PLAYBACK_REJECTED, "reason": "busy", "current_leader_client_id": "b",
+            })
+            wait_until(lambda: client.update() is not None and len(playback()) == 3)
+        finally:
+            client.close()
+    assert playback() == [
+        PlaybackState(**state.get_playback_state()),
         PlaybackClaim(True, "a"),
         PlaybackClaim(False, "b", "busy"),
     ]
