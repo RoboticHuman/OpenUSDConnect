@@ -111,10 +111,10 @@ def build_server(config: McpConfig | None = None) -> "FastMCP":
     @mcp.tool()
     @_catch
     def usd_connect(
-        host: str = None,
-        port: int = None,
-        client_id: str = None,
-        department: str = None,
+        host: str | None = None,
+        port: int | None = None,
+        client_id: str | None = None,
+        department: str | None = None,
     ) -> dict:
         """Connect to the OpenUSDConnect sync server and start the read-only
         mirror stage. Uses env defaults (OPENUSDCONNECT_HOST/PORT) when args are
@@ -179,7 +179,7 @@ def build_server(config: McpConfig | None = None) -> "FastMCP":
 
     @mcp.tool()
     @_catch
-    def usd_get_prim(path: str, fields: list = None) -> dict:
+    def usd_get_prim(path: str, fields: list | None = None) -> dict:
         """Read a prim: type, api_schemas, transform (t/r/s), authored attributes
         (long arrays summarized), variant selections, and material binding. Pass
         fields (e.g. ['xform','material_binding']) to return only those sections
@@ -188,7 +188,7 @@ def build_server(config: McpConfig | None = None) -> "FastMCP":
 
     @mcp.tool()
     @_catch
-    def usd_get_prims(paths: list, fields: list = None) -> dict:
+    def usd_get_prims(paths: list, fields: list | None = None) -> dict:
         """Batch usd_get_prim: read many prims in one call (pairs with
         usd_changes_since). Each entry has the get_prim shape; an unresolved path
         yields an error entry rather than failing the batch."""
@@ -223,7 +223,7 @@ def build_server(config: McpConfig | None = None) -> "FastMCP":
 
     @mcp.tool()
     @_catch
-    def usd_get_attributes(path: str, names: list = None, max_items: int = 12) -> dict:
+    def usd_get_attributes(path: str, names: list | None = None, max_items: int = 12) -> dict:
         """Read just the attributes you need. With names: returns {name: value}
         for those only (arrays summarized to max_items; raise it for more, or to
         pull a whole array). Without names: a cheap index of authored attributes
@@ -264,13 +264,15 @@ def build_server(config: McpConfig | None = None) -> "FastMCP":
 
     @mcp.tool()
     @_catch
-    def usd_claim_playback(time: float = None) -> dict:
+    def usd_claim_playback(time: float | None = None) -> dict:
         """Claim the single playback-leader role (optionally setting the time)."""
         return session.claim_playback(time)
 
     @mcp.tool()
     @_catch
-    def usd_playback_control(action: str, time: float = None, rate: float = None) -> dict:
+    def usd_playback_control(
+        action: str, time: float | None = None, rate: float | None = None
+    ) -> dict:
         """Drive shared playback (leader only): action play|pause|stop|set_time|
         set_rate; time for set_time; rate for set_rate."""
         return session.playback_control(action, time, rate)
