@@ -125,6 +125,9 @@ callable arguments and properties.
 - `NoticeEmitter.rebind_stage()` compared stage metadata against the previous
   stage, and `cleanup()` kept pending stage-metadata changes.
 - A `ManagedClient` constructed with invalid options left the stage modified.
+- MCP tools rejected an explicit `null` for optional arguments whose schema
+  advertised `"default": null` (`usd_connect`, `usd_get_prim`, `usd_get_prims`,
+  `usd_get_attributes`, `usd_claim_playback`, `usd_playback_control`).
 
 ## [0.4.0] - 2026-09-18
 
